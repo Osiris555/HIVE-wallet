@@ -3,7 +3,7 @@ import { Platform } from "react-native";
 
 const BASE_URL = Platform.select({
   web: "http://localhost:3000",
-  default: "http://192.168.1.42:3000", // replace with your LAN IP
+  default: "http://192.168.0.11:3000", // replace with your LAN IP
 });
 
 if (!BASE_URL) {
