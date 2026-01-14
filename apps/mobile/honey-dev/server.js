@@ -9,7 +9,7 @@ const PORT = 3000;
    BASIC SETUP
 ====================== */
 app.use(cors());
-app.use(express.json()); // ✅ REQUIRED for Axios POST bodies
+app.use(express.json()); // ✅ REQUIRED for JSON POST bodies
 
 /* ======================
    CONFIG
@@ -33,7 +33,7 @@ function now() {
 
 function normalizeWallet(body) {
   // ✅ Accept BOTH address and wallet (client-safe)
-  return body.wallet || body.address || null;
+  return body?.wallet || body?.address || null;
 }
 
 function createTx({ type, from = null, to, amount }) {
@@ -70,7 +70,11 @@ app.get("/", (_req, res) => {
   res.json({ status: "HIVE Wallet server running" });
 });
 
-/* Get balance */
+/* ----------------------
+   BALANCE
+---------------------- */
+
+/* Get balance (GET /balance/:wallet) */
 app.get("/balance/:wallet", (req, res) => {
   const wallet = req.params.wallet;
 
@@ -84,7 +88,25 @@ app.get("/balance/:wallet", (req, res) => {
   });
 });
 
-/* Get transactions */
+/* Get balance (POST /balance) ✅ Added for web client compatibility */
+app.post("/balance", (req, res) => {
+  const wallet = normalizeWallet(req.body);
+
+  if (!wallet) {
+    return res.status(400).json({ error: "Missing wallet/address" });
+  }
+
+  res.json({
+    wallet,
+    balance: getBalance(wallet),
+  });
+});
+
+/* ----------------------
+   TRANSACTIONS
+---------------------- */
+
+/* Get transactions (GET /transactions/:wallet) */
 app.get("/transactions/:wallet", (req, res) => {
   const wallet = req.params.wallet;
 
@@ -92,14 +114,29 @@ app.get("/transactions/:wallet", (req, res) => {
     return res.status(400).json({ error: "Missing wallet" });
   }
 
-  const txs = transactions.filter(
-    (tx) => tx.from === wallet || tx.to === wallet
-  );
+  const txs = transactions.filter((tx) => tx.from === wallet || tx.to === wallet);
 
   res.json(txs);
 });
 
-/* Mint */
+/* Get transactions (POST /transactions) ✅ Added for web client compatibility */
+app.post("/transactions", (req, res) => {
+  const wallet = normalizeWallet(req.body);
+
+  if (!wallet) {
+    return res.status(400).json({ error: "Missing wallet/address" });
+  }
+
+  const txs = transactions.filter((tx) => tx.from === wallet || tx.to === wallet);
+
+  res.json(txs);
+});
+
+/* ----------------------
+   MINT
+---------------------- */
+
+/* Mint (POST /mint) */
 app.post("/mint", (req, res) => {
   const wallet = normalizeWallet(req.body);
 
@@ -113,9 +150,14 @@ app.post("/mint", (req, res) => {
   const remaining = lastMint + MINT_COOLDOWN_MS - now();
 
   if (remaining > 0) {
+    const cooldownSeconds = Math.ceil(remaining / 1000);
+
+    // ✅ Optional but recommended: standard header for rate limiting
+    res.set("Retry-After", String(cooldownSeconds));
+
     return res.status(429).json({
       error: "Cooldown active",
-      cooldownSeconds: Math.ceil(remaining / 1000),
+      cooldownSeconds,
     });
   }
 
@@ -135,34 +177,45 @@ app.post("/mint", (req, res) => {
     wallet,
     balance: balances[wallet],
     tx,
-    cooldownSeconds: MINT_COOLDOWN_MS / 1000,
+    cooldownSeconds: Math.ceil(MINT_COOLDOWN_MS / 1000),
   });
 });
 
-/* Send */
+/* ----------------------
+   SEND
+---------------------- */
+
+/* Send (POST /send) */
 app.post("/send", (req, res) => {
   const { from, to, amount } = req.body;
 
-  if (!from || !to || !amount) {
+  if (!from || !to || amount === undefined || amount === null) {
     return res.status(400).json({
       error: "Missing from, to, or amount",
     });
   }
 
-  if (getBalance(from) < amount) {
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    return res.status(400).json({
+      error: "Amount must be a positive number",
+    });
+  }
+
+  if (getBalance(from) < amt) {
     return res.status(400).json({
       error: "Insufficient balance",
     });
   }
 
-  balances[from] -= amount;
-  balances[to] = getBalance(to) + amount;
+  balances[from] = getBalance(from) - amt;
+  balances[to] = getBalance(to) + amt;
 
   const tx = createTx({
     type: "send",
     from,
     to,
-    amount,
+    amount: amt,
   });
 
   addTx(tx);
