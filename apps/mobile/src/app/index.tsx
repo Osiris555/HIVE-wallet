@@ -1,117 +1,250 @@
-import { View, Text, Pressable, StyleSheet } from "react-native";
-import { useEffect, useState } from "react";
-import { fetchBalance, mintTokens } from "../chain/transactions";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  FlatList,
+  StyleSheet,
+  Platform,
+} from "react-native";
 
-const MINT_COOLDOWN_MS = 30_000;
+import { getBalance, mint, send, getTransactions } from "../chain/transactions";
 
-export default function App() {
-  const [address] = useState("demo-wallet");
+const DEFAULT_WALLET = "demo-wallet-1";
+const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
+
+function storageGet(key: string): string | null {
+  if (Platform.OS !== "web") return null;
+  try { return window.localStorage.getItem(key); } catch { return null; }
+}
+function storageSet(key: string, value: string) {
+  if (Platform.OS !== "web") return;
+  try { window.localStorage.setItem(key, value); } catch {}
+}
+function storageRemove(key: string) {
+  if (Platform.OS !== "web") return;
+  try { window.localStorage.removeItem(key); } catch {}
+}
+
+export default function IndexScreen() {
+  const [wallet, setWallet] = useState<string>(DEFAULT_WALLET);
   const [balance, setBalance] = useState<number>(0);
-  const [cooldownUntil, setCooldownUntil] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(false);
+  const [status, setStatus] = useState<string>("");
 
-  /**
-   * Load balance from server
-   */
+  const [to, setTo] = useState<string>("");
+  const [amount, setAmount] = useState<string>("");
+
+  const [showTxs, setShowTxs] = useState<boolean>(false);
+  const [txs, setTxs] = useState<any[]>([]);
+
+  const [cooldownEndMs, setCooldownEndMs] = useState<number>(() => {
+    const saved = storageGet(STORAGE_COOLDOWN_END);
+    return saved ? Number(saved) : 0;
+  });
+
+  const msLeft = Math.max(0, cooldownEndMs - Date.now());
+  const isCoolingDown = msLeft > 0;
+  const secondsLeft = useMemo(() => Math.ceil(msLeft / 1000), [msLeft]);
+
+  useEffect(() => {
+    if (!isCoolingDown) return;
+    const id = setInterval(() => setCooldownEndMs((x) => x), 250);
+    return () => clearInterval(id);
+  }, [isCoolingDown]);
+
+  useEffect(() => {
+    if (!isCoolingDown && cooldownEndMs !== 0) {
+      setCooldownEndMs(0);
+      storageRemove(STORAGE_COOLDOWN_END);
+    }
+  }, [isCoolingDown, cooldownEndMs]);
+
+  function startCooldown(seconds: number) {
+    const end = Date.now() + seconds * 1000;
+    setCooldownEndMs(end);
+    storageSet(STORAGE_COOLDOWN_END, String(end));
+  }
+
   async function loadBalance() {
     try {
-      const b = await fetchBalance(address);
-      setBalance(b);
-    } catch (err) {
-      console.error("Balance fetch failed", err);
+      const data: any = await getBalance(wallet);
+      setBalance(Number(data?.balance || 0));
+    } catch (e: any) {
+      setStatus(e?.message || "Balance fetch failed");
     }
   }
 
-  /**
-   * Initial load
-   */
+  async function loadTxs() {
+    try {
+      const list: any = await getTransactions(wallet);
+      setTxs(Array.isArray(list) ? list : []);
+    } catch (e: any) {
+      setStatus(e?.message || "Transaction fetch failed");
+    }
+  }
+
   useEffect(() => {
+    setStatus("");
     loadBalance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
-   * Mint handler (async-safe)
-   */
   async function handleMint() {
-    const now = Date.now();
-    if (now < cooldownUntil || loading) return;
+    if (isCoolingDown) {
+      setStatus(`Cooldown active: ${secondsLeft}s left`);
+      return;
+    }
 
     try {
-      setLoading(true);
-      await mintTokens(address);
-      await loadBalance(); // ✅ critical fix
-      setCooldownUntil(now + MINT_COOLDOWN_MS);
-    } catch (err) {
-      console.error("Mint failed", err);
-    } finally {
-      setLoading(false);
+      setStatus("");
+      const data: any = await mint(wallet);
+
+      const secs = Number(data?.cooldownSeconds || 60);
+      startCooldown(secs);
+
+      // Always refresh authoritative data after mint
+      await loadBalance();
+      if (showTxs) await loadTxs();
+
+      setStatus("Mint successful!");
+    } catch (e: any) {
+      if (e?.status === 429) {
+        const secs = Number(e?.cooldownSeconds || 60);
+        startCooldown(secs);
+        setStatus(`Cooldown active: ${secs}s left`);
+        return;
+      }
+      setStatus(e?.message || "Mint failed");
     }
   }
 
-  const cooldownRemaining = Math.max(
-    0,
-    Math.ceil((cooldownUntil - Date.now()) / 1000)
-  );
+  async function handleSend() {
+    const t = to.trim();
+    const n = Number(amount);
+
+    if (!t) return setStatus("Enter a recipient address.");
+    if (!Number.isFinite(n) || n <= 0) return setStatus("Enter a valid amount.");
+
+    try {
+      setStatus("");
+      await send(wallet, t, n);
+
+      setAmount("");
+
+      // Refresh after send
+      await loadBalance();
+      if (showTxs) await loadTxs();
+
+      setStatus("Send successful!");
+    } catch (e: any) {
+      setStatus(e?.message || "Send failed");
+    }
+  }
+
+  async function toggleTxs() {
+    const next = !showTxs;
+    setShowTxs(next);
+    if (next) await loadTxs();
+  }
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>HIVE Wallet</Text>
+      <Text style={styles.balance}>Balance: {balance} HNY</Text>
 
-      <Text style={styles.balance}>
-        Balance: {balance} HNY
-      </Text>
+      {!!status && <Text style={styles.status}>{status}</Text>}
 
-      <Pressable
+      <TouchableOpacity
+        style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]}
         onPress={handleMint}
-        disabled={cooldownRemaining > 0 || loading}
-        style={[
-          styles.mintButton,
-          (cooldownRemaining > 0 || loading) && styles.disabled,
-        ]}
+        disabled={isCoolingDown}
       >
         <Text style={styles.buttonText}>
-          {cooldownRemaining > 0
-            ? `Mint (${cooldownRemaining}s)`
-            : loading
-            ? "Minting..."
-            : "Mint"}
+          {isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}
         </Text>
-      </Pressable>
+      </TouchableOpacity>
+
+      <View style={styles.row}>
+        <TouchableOpacity style={styles.smallButton} onPress={loadBalance}>
+          <Text style={styles.smallButtonText}>Get Balance</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.smallButton} onPress={toggleTxs}>
+          <Text style={styles.smallButtonText}>
+            {showTxs ? "Hide History" : "Transaction History"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      <Text style={styles.sectionTitle}>Send</Text>
+
+      <TextInput
+        style={styles.input}
+        value={to}
+        onChangeText={setTo}
+        placeholder="Recipient address"
+        placeholderTextColor="#777"
+        autoCapitalize="none"
+      />
+      <TextInput
+        style={styles.input}
+        value={amount}
+        onChangeText={setAmount}
+        placeholder="Amount"
+        placeholderTextColor="#777"
+        keyboardType="numeric"
+      />
+
+      <TouchableOpacity style={styles.button} onPress={handleSend}>
+        <Text style={styles.buttonText}>Send</Text>
+      </TouchableOpacity>
+
+      {showTxs && (
+        <View style={styles.txsBox}>
+          {txs.length === 0 ? (
+            <Text style={styles.txEmpty}>No transactions yet.</Text>
+          ) : (
+            <FlatList
+              data={txs}
+              keyExtractor={(item) => item.id || item.hash || String(item.timestamp)}
+              renderItem={({ item }) => (
+                <View style={styles.txRow}>
+                  <Text style={styles.txMain}>
+                    {String(item.type).toUpperCase()} • {item.amount} • {item.status}
+                  </Text>
+                  <Text style={styles.txSub}>From: {item.from || "—"}</Text>
+                  <Text style={styles.txSub}>To: {item.to}</Text>
+                </View>
+              )}
+            />
+          )}
+        </View>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#000",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: "700",
-    color: "#fff",
-    marginBottom: 12,
-  },
-  balance: {
-    fontSize: 18,
-    color: "#fff",
-    marginBottom: 24,
-  },
-  mintButton: {
-    backgroundColor: "#D4AF37", // gold
-    paddingVertical: 14,
-    paddingHorizontal: 36,
-    borderRadius: 12,
-  },
-  disabled: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: "#000",
-    fontSize: 18,
-    fontWeight: "700",
-  },
+  container: { flex: 1, backgroundColor: "#000", padding: 24, justifyContent: "center" },
+  title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 12 },
+  balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 10 },
+  status: { color: "#ff6b6b", textAlign: "center", marginBottom: 10 },
+
+  button: { backgroundColor: "#d1a93a", padding: 14, borderRadius: 12, alignItems: "center", marginTop: 10 },
+  buttonDisabled: { opacity: 0.6 },
+  buttonText: { color: "#000", fontWeight: "800", fontSize: 16 },
+
+  row: { flexDirection: "row", gap: 10, marginTop: 10 },
+  smallButton: { flex: 1, borderWidth: 1, borderColor: "#444", padding: 12, borderRadius: 12, backgroundColor: "#111" },
+  smallButtonText: { color: "#fff", textAlign: "center", fontWeight: "700", fontSize: 12 },
+
+  sectionTitle: { color: "#fff", marginTop: 18, marginBottom: 8, fontWeight: "700" },
+  input: { backgroundColor: "#111", borderWidth: 1, borderColor: "#333", borderRadius: 10, padding: 12, color: "#fff", marginBottom: 10 },
+
+  txsBox: { marginTop: 14, borderWidth: 1, borderColor: "#333", borderRadius: 12, padding: 12, backgroundColor: "#0b0b0b", maxHeight: 280 },
+  txEmpty: { color: "#bbb" },
+  txRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#222" },
+  txMain: { color: "#fff", fontWeight: "700" },
+  txSub: { color: "#bbb", marginTop: 2, fontSize: 12 },
 });
