@@ -1,4 +1,4 @@
-// apps/mobile/src/chain/transactions.ts
+// apps/mobile/src/chain/transactions.js
 
 type TxType = "mint" | "send";
 
@@ -12,6 +12,8 @@ export type Transaction = {
 
 const balances: Record<string, number> = {};
 const transactions: Transaction[] = [];
+const API_BASE = "http://192.168.0.11:3000";
+
 
 const FAUCET_AMOUNT = 100;
 
