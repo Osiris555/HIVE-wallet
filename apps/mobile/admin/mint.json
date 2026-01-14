@@ -1,0 +1,13 @@
+{
+  "wallet": "HNY1_DEV_WALLET",
+  "amount": 1000,
+  "adminKey": "HONEY_ADMIN_SECRET_123"
+
+async function adminMint() {
+  const res = await fetch(`${SERVER}/admin/mint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      wallet:
+
+}

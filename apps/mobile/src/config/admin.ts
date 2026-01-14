@@ -1,0 +1,1 @@
+export const ADMIN_WALLET = "HNY1_ADMIN_WALLET";
