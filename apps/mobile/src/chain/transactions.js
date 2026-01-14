@@ -1,67 +1,111 @@
 // apps/mobile/src/chain/transactions.js
 
-type TxType = "mint" | "send";
-
-export type Transaction = {
-  from: string;
-  to: string;
-  amount: number;
-  timestamp: number;
-  type: TxType;
-};
-
-const balances: Record<string, number> = {};
-const transactions: Transaction[] = [];
 const API_BASE = "http://192.168.0.11:3000";
 
-
-const FAUCET_AMOUNT = 100;
-
-export function getBalance(address: string): number {
-  return balances[address] || 0;
+/* -----------------------
+   Helpers
+----------------------- */
+async function readJsonSafe(res) {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
-export function mint(address: string): { amount: number } {
-  balances[address] = getBalance(address) + FAUCET_AMOUNT;
-
-  transactions.push({
-    from: "FAUCET",
-    to: address,
-    amount: FAUCET_AMOUNT,
-    timestamp: Date.now(),
-    type: "mint",
-  });
-
-  return { amount: FAUCET_AMOUNT };
+function makeError(message, status, data) {
+  const err = new Error(message || "Request failed");
+  err.status = status;
+  err.data = data;
+  return err;
 }
 
-export function send(
-  from: string,
-  to: string,
-  amount: number
-): { success: boolean } {
-  const fromBalance = getBalance(from);
+/* -----------------------
+   API FUNCTIONS
+   (CANONICAL NAMES)
+----------------------- */
 
-  if (fromBalance < amount) {
-    throw new Error("Insufficient balance");
+export async function getBalance(wallet) {
+  if (!wallet) throw makeError("Missing wallet", 400);
+
+  const res = await fetch(
+    `${API_BASE}/balance/${encodeURIComponent(wallet)}`
+  );
+
+  const body = await readJsonSafe(res);
+
+  if (!res.ok) {
+    throw makeError(body?.error || "Balance fetch failed", res.status, body);
   }
 
-  balances[from] = fromBalance - amount;
-  balances[to] = getBalance(to) + amount;
-
-  transactions.push({
-    from,
-    to,
-    amount,
-    timestamp: Date.now(),
-    type: "send",
-  });
-
-  return { success: true };
+  return body; // { wallet, balance }
 }
 
-export function getTransactions(address: string): Transaction[] {
-  return transactions.filter(
-    (tx) => tx.from === address || tx.to === address
+export async function mint(wallet) {
+  if (!wallet) throw makeError("Missing wallet", 400);
+
+  const res = await fetch(`${API_BASE}/mint`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ wallet }),
+  });
+
+  const body = await readJsonSafe(res);
+
+  if (res.status === 429) {
+    const err = makeError(body?.error || "Cooldown active", 429, body);
+    err.cooldownSeconds = body?.cooldownSeconds ?? 60;
+    throw err;
+  }
+
+  if (!res.ok) {
+    throw makeError(body?.error || "Mint failed", res.status, body);
+  }
+
+  return body;
+  // { success, wallet, balance, tx, cooldownSeconds }
+}
+
+export async function send(from, to, amount) {
+  if (!from || !to) throw makeError("Missing from/to", 400);
+
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) {
+    throw makeError("Amount must be a positive number", 400);
+  }
+
+  const res = await fetch(`${API_BASE}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to, amount: amt }),
+  });
+
+  const body = await readJsonSafe(res);
+
+  if (!res.ok) {
+    throw makeError(body?.error || "Send failed", res.status, body);
+  }
+
+  return body;
+  // { success, tx, fromBalance, toBalance }
+}
+
+export async function getTransactions(wallet) {
+  if (!wallet) throw makeError("Missing wallet", 400);
+
+  const res = await fetch(
+    `${API_BASE}/transactions/${encodeURIComponent(wallet)}`
   );
+
+  const body = await readJsonSafe(res);
+
+  if (!res.ok) {
+    throw makeError(
+      body?.error || "Transaction fetch failed",
+      res.status,
+      body
+    );
+  }
+
+  return body; // tx[]
 }
