@@ -1,43 +1,72 @@
-import axios from "axios";
-import { Platform } from "react-native";
+const API_BASE = ""; // if your dev server proxies to backend, keep "".
+// Otherwise set: "http://localhost:3000"
 
-const BASE_URL = Platform.select({
-  web: "http://localhost:3000",
-  default: "http://192.168.0.11:3000", // replace with your LAN IP
-});
-
-if (!BASE_URL) {
-  throw new Error("BASE_URL not resolved");
+async function readJsonSafe(res) {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
-export type Transaction = {
-  id?: number;
-  type: string;
-  from?: string;
-  to?: string;
-  amount: number;
-  status?: string;
-  timestamp?: number;
-};
+function parseRetryAfterSeconds(res, body) {
+  const ra = res.headers.get("retry-after");
+  if (ra && !Number.isNaN(Number(ra))) return Number(ra);
 
-export async function fetchBalance(address: string): Promise<number> {
-  const res = await axios.get(`${BASE_URL}/balance/${address}`);
-  return res.data.balance;
+  if (body && typeof body === "object") {
+    if (typeof body.retryAfterSeconds === "number") return body.retryAfterSeconds;
+    if (typeof body.retryAfterMs === "number") return Math.ceil(body.retryAfterMs / 1000);
+    if (typeof body.msLeft === "number") return Math.ceil(body.msLeft / 1000);
+    if (typeof body.secondsLeft === "number") return body.secondsLeft;
+    if (typeof body.cooldownSeconds === "number") return body.cooldownSeconds;
+  }
+  return null;
 }
 
-export async function mintTokens(
-  address: string
-): Promise<{ cooldownSeconds?: number } | void> {
-  const res = await axios.post(`${BASE_URL}/mint`, { address });
-  return res.data;
+async function post(path, payload) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload ? JSON.stringify(payload) : "{}",
+  });
+
+  const body = await readJsonSafe(res);
+
+  if (res.status === 429) {
+    const cooldownSeconds = parseRetryAfterSeconds(res, body) ?? 30;
+    return {
+      ok: false,
+      status: 429,
+      cooldownSeconds,
+      message: body?.message || `Cooldown active. Try again in ${cooldownSeconds}s.`,
+      data: body,
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      status: res.status,
+      message: body?.message || `Request failed (${res.status})`,
+      data: body,
+    };
+  }
+
+  return { ok: true, status: res.status, message: body?.message || "OK", data: body };
 }
 
-export async function getTransactions(
-  address?: string
-): Promise<Transaction[]> {
-  const res = await axios.get(
-    `${BASE_URL}/transactions`,
-    address ? { params: { address } } : undefined
-  );
-  return res.data;
+export async function mint() {
+  return post("/mint");
+}
+
+export async function getBalance() {
+  return post("/balance");
+}
+
+export async function send({ to, amount }) {
+  return post("/send", { to, amount });
+}
+
+export async function getTransactions() {
+  return post("/transactions");
 }
