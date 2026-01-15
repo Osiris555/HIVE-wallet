@@ -1,6 +1,9 @@
+// apps/mobile/src/chain/transactions.ts
+
 import nacl from "tweetnacl";
 import * as naclUtil from "tweetnacl-util";
 import * as Crypto from "expo-crypto";
+import * as SecureStore from "expo-secure-store";
 
 export type TxType = "mint" | "send";
 
@@ -31,33 +34,62 @@ export type ChainStatus = {
 // IMPORTANT: must be your backend
 const API_BASE = "http://192.168.0.11:3000";
 
-// Web: localStorage
-// Native: in-memory (we’ll add SecureStore next)
+// Storage keys
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
 const WALLET_STORAGE = "HIVE_WALLET_ID";
-
-let memPrivB64: string | null = null;
-let memPubB64: string | null = null;
-let memWallet: string | null = null;
 
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-function getStored(key: string) {
-  if (!isWeb()) return null;
+/**
+ * Web: localStorage
+ * Native: expo-secure-store (Keychain / Keystore)
+ */
+async function kvGet(key: string): Promise<string | null> {
+  if (isWeb()) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
   try {
-    return window.localStorage.getItem(key);
+    // NOTE: returns null if not set
+    return await SecureStore.getItemAsync(key);
   } catch {
     return null;
   }
 }
 
-function setStored(key: string, value: string) {
-  if (!isWeb()) return;
+async function kvSet(key: string, value: string): Promise<void> {
+  if (isWeb()) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {}
+    return;
+  }
+
   try {
-    window.localStorage.setItem(key, value);
+    // Use AFTER_FIRST_UNLOCK so it persists and works normally for dev/testnet
+    await SecureStore.setItemAsync(key, value, {
+      keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
+    });
+  } catch {}
+}
+
+async function kvDel(key: string): Promise<void> {
+  if (isWeb()) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {}
+    return;
+  }
+
+  try {
+    await SecureStore.deleteItemAsync(key);
   } catch {}
 }
 
@@ -139,33 +171,31 @@ async function postJson(path: string, payload: any) {
   return body;
 }
 
-// ---- key management ----
+/**
+ * ✅ Ensure keypair exists and is persisted (web: localStorage, native: SecureStore)
+ */
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
-  let pub = isWeb() ? getStored(KEY_STORAGE_PUB) : memPubB64;
-  let priv = isWeb() ? getStored(KEY_STORAGE_PRIV) : memPrivB64;
+  const pub = await kvGet(KEY_STORAGE_PUB);
+  const priv = await kvGet(KEY_STORAGE_PRIV);
 
   if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
 
+  // Generate from secure random seed (native-safe)
   const seed = await randomBytes(32);
   const kp = nacl.sign.keyPair.fromSeed(seed);
 
-  pub = u8ToB64(kp.publicKey);
-  priv = u8ToB64(kp.secretKey);
+  const pubB64 = u8ToB64(kp.publicKey);
+  const privB64 = u8ToB64(kp.secretKey);
 
-  if (isWeb()) {
-    setStored(KEY_STORAGE_PUB, pub);
-    setStored(KEY_STORAGE_PRIV, priv);
-  } else {
-    memPubB64 = pub;
-    memPrivB64 = priv;
-  }
+  await kvSet(KEY_STORAGE_PUB, pubB64);
+  await kvSet(KEY_STORAGE_PRIV, privB64);
 
-  return { publicKeyB64: pub, secretKeyB64: priv };
+  return { publicKeyB64: pubB64, secretKeyB64: privB64 };
 }
 
 /**
- * ✅ Server is the source of truth for the wallet address.
- * We DO NOT derive wallet client-side anymore.
+ * ✅ Register with server (server returns canonical wallet)
+ * Stores wallet id persistently.
  */
 export async function registerWallet(): Promise<{ wallet: string; nonce: number; registered: boolean }> {
   const { publicKeyB64 } = await ensureKeypair();
@@ -174,18 +204,28 @@ export async function registerWallet(): Promise<{ wallet: string; nonce: number;
   const wallet = String(res?.wallet || "");
   if (!wallet) throw makeError("Register did not return a wallet", 500, res);
 
-  if (isWeb()) setStored(WALLET_STORAGE, wallet);
-  else memWallet = wallet;
-
+  await kvSet(WALLET_STORAGE, wallet);
   return res;
 }
 
+/**
+ * ✅ Ensures wallet id exists (persisted). If missing, registers.
+ */
 export async function ensureWalletId(): Promise<string> {
-  const stored = isWeb() ? getStored(WALLET_STORAGE) : memWallet;
+  const stored = await kvGet(WALLET_STORAGE);
   if (stored) return stored;
 
   const reg = await registerWallet();
   return reg.wallet;
+}
+
+/**
+ * Optional utility: wipe wallet keys + id (useful for testing)
+ */
+export async function resetLocalWallet(): Promise<void> {
+  await kvDel(KEY_STORAGE_PUB);
+  await kvDel(KEY_STORAGE_PRIV);
+  await kvDel(WALLET_STORAGE);
 }
 
 export async function getAccount(wallet: string) {
