@@ -16,9 +16,11 @@ export type Transaction = {
   amount: number;
   gasFee?: number;
   status?: "pending" | "confirmed" | "failed";
+  failReason?: string | null;
   blockHeight?: number | null;
   blockHash?: string | null;
   nonce?: number;
+  expiresAtMs?: number | null;
   timestamp: number;
 };
 
@@ -31,10 +33,12 @@ export type ChainStatus = {
   latestBlock: any;
 };
 
-// IMPORTANT: must be your backend
 const API_BASE = "http://192.168.0.11:3000";
 
-// Storage keys
+// ✅ match server knobs
+const DEFAULT_GAS_FEE = 0.000001;
+const DEFAULT_TX_TTL_MS = 60 * 1000;
+
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
 const WALLET_STORAGE = "HIVE_WALLET_ID";
@@ -43,10 +47,6 @@ function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-/**
- * Web: localStorage
- * Native: expo-secure-store (Keychain / Keystore)
- */
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
     try {
@@ -55,9 +55,7 @@ async function kvGet(key: string): Promise<string | null> {
       return null;
     }
   }
-
   try {
-    // NOTE: returns null if not set
     return await SecureStore.getItemAsync(key);
   } catch {
     return null;
@@ -71,25 +69,10 @@ async function kvSet(key: string, value: string): Promise<void> {
     } catch {}
     return;
   }
-
   try {
-    // Use AFTER_FIRST_UNLOCK so it persists and works normally for dev/testnet
     await SecureStore.setItemAsync(key, value, {
       keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
     });
-  } catch {}
-}
-
-async function kvDel(key: string): Promise<void> {
-  if (isWeb()) {
-    try {
-      window.localStorage.removeItem(key);
-    } catch {}
-    return;
-  }
-
-  try {
-    await SecureStore.deleteItemAsync(key);
   } catch {}
 }
 
@@ -105,6 +88,7 @@ async function randomBytes(count: number): Promise<Uint8Array> {
   return Uint8Array.from(bytes);
 }
 
+// IMPORTANT: signing message remains the same (fee/expiry not signed yet)
 function canonicalMessage(params: {
   type: TxType;
   from?: string | null;
@@ -155,32 +139,26 @@ async function postJson(path: string, payload: any) {
   const body = await readJsonSafe(res);
 
   if (res.status === 429) {
-    const err: any = makeError(body?.error || "Cooldown active", 429, body);
+    const err: any = makeError(body?.error || "Rate limited", 429, body);
     err.cooldownSeconds = body?.cooldownSeconds ?? 60;
     throw err;
   }
-
   if (res.status === 409) {
     const err: any = makeError(body?.error || "Nonce mismatch", 409, body);
     err.expectedNonce = body?.expectedNonce;
     err.gotNonce = body?.gotNonce;
     throw err;
   }
-
   if (!res.ok) throw makeError(body?.error || `POST ${path} failed`, res.status, body);
+
   return body;
 }
 
-/**
- * ✅ Ensure keypair exists and is persisted (web: localStorage, native: SecureStore)
- */
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
   const pub = await kvGet(KEY_STORAGE_PUB);
   const priv = await kvGet(KEY_STORAGE_PRIV);
-
   if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
 
-  // Generate from secure random seed (native-safe)
   const seed = await randomBytes(32);
   const kp = nacl.sign.keyPair.fromSeed(seed);
 
@@ -193,10 +171,6 @@ export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKey
   return { publicKeyB64: pubB64, secretKeyB64: privB64 };
 }
 
-/**
- * ✅ Register with server (server returns canonical wallet)
- * Stores wallet id persistently.
- */
 export async function registerWallet(): Promise<{ wallet: string; nonce: number; registered: boolean }> {
   const { publicKeyB64 } = await ensureKeypair();
   const res = await postJson("/register", { publicKey: publicKeyB64 });
@@ -208,38 +182,22 @@ export async function registerWallet(): Promise<{ wallet: string; nonce: number;
   return res;
 }
 
-/**
- * ✅ Ensures wallet id exists (persisted). If missing, registers.
- */
 export async function ensureWalletId(): Promise<string> {
   const stored = await kvGet(WALLET_STORAGE);
   if (stored) return stored;
-
   const reg = await registerWallet();
   return reg.wallet;
-}
-
-/**
- * Optional utility: wipe wallet keys + id (useful for testing)
- */
-export async function resetLocalWallet(): Promise<void> {
-  await kvDel(KEY_STORAGE_PUB);
-  await kvDel(KEY_STORAGE_PRIV);
-  await kvDel(WALLET_STORAGE);
 }
 
 export async function getAccount(wallet: string) {
   return await getJson(`/account/${encodeURIComponent(wallet)}`);
 }
-
 export async function getChainStatus(): Promise<ChainStatus> {
   return await getJson("/status");
 }
-
 export async function getBalance(wallet: string) {
   return await getJson(`/balance/${encodeURIComponent(wallet)}`);
 }
-
 export async function getTransactions(wallet: string): Promise<Transaction[]> {
   return await getJson(`/transactions/${encodeURIComponent(wallet)}`);
 }
@@ -255,29 +213,28 @@ export async function mint(): Promise<any> {
   const wallet = await ensureWalletId();
 
   const acct = await getAccount(wallet);
-  if (!acct.registered) {
-    await registerWallet();
-  }
+  if (!acct.registered) await registerWallet();
 
   const acct2 = await getAccount(wallet);
   const nonce = acct2.nonce;
   const timestamp = Date.now();
   const amount = 100;
 
+  const gasFee = DEFAULT_GAS_FEE;
+  const expiresAtMs = timestamp + DEFAULT_TX_TTL_MS;
+
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalMessage({ type: "mint", from: "", to: wallet, amount, nonce, timestamp });
   const signature = signMessage(msg, secretKeyB64);
 
-  return await postJson("/mint", { wallet, nonce, timestamp, signature });
+  return await postJson("/mint", { wallet, nonce, timestamp, signature, gasFee, expiresAtMs });
 }
 
 export async function send(to: string, amount: number): Promise<any> {
   const from = await ensureWalletId();
 
   const acct = await getAccount(from);
-  if (!acct.registered) {
-    await registerWallet();
-  }
+  if (!acct.registered) await registerWallet();
 
   const acct2 = await getAccount(from);
   const nonce = acct2.nonce;
@@ -286,9 +243,12 @@ export async function send(to: string, amount: number): Promise<any> {
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be a positive number", 400);
 
+  const gasFee = DEFAULT_GAS_FEE;
+  const expiresAtMs = timestamp + DEFAULT_TX_TTL_MS;
+
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalMessage({ type: "send", from, to, amount: amt, nonce, timestamp });
   const signature = signMessage(msg, secretKeyB64);
 
-  return await postJson("/send", { from, to, amount: amt, nonce, timestamp, signature });
+  return await postJson("/send", { from, to, amount: amt, nonce, timestamp, signature, gasFee, expiresAtMs });
 }

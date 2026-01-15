@@ -37,13 +37,22 @@ function all(db, sql, params = []) {
   });
 }
 
+async function tableExists(db, tableName) {
+  const row = await get(
+    db,
+    `SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
+    [tableName]
+  );
+  return !!row;
+}
+
 async function columnExists(db, table, column) {
   const rows = await all(db, `PRAGMA table_info(${table});`);
   return rows.some((r) => r.name === column);
 }
 
 async function initDb(db) {
-  // accounts: wallet + optional pubkey + confirmed balance + nonce + lastMint
+  // 1) accounts
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS accounts (
@@ -56,32 +65,44 @@ async function initDb(db) {
     );`
   );
 
-  // transactions: store pending + confirmed + failed + block linkage
-  await run(
-    db,
-    `CREATE TABLE IF NOT EXISTS transactions (
-      id TEXT PRIMARY KEY,
-      hash TEXT NOT NULL,
-      type TEXT NOT NULL,
-      fromWallet TEXT,
-      toWallet TEXT NOT NULL,
-      amount REAL NOT NULL,
-      nonce INTEGER NOT NULL,
-      gasFee REAL NOT NULL,
-      status TEXT NOT NULL,
-      failReason TEXT,
-      blockHeight INTEGER,
-      blockHash TEXT,
-      timestampMs INTEGER NOT NULL
-    );`
-  );
+  // 2) transactions (create if missing, otherwise migrate)
+  const txTableExists = await tableExists(db, "transactions");
 
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_to ON transactions(toWallet);`);
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_from ON transactions(fromWallet);`);
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_status_ts ON transactions(status, timestampMs);`);
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_blockHeight ON transactions(blockHeight);`);
+  if (!txTableExists) {
+    // Fresh DB -> create with all columns
+    await run(
+      db,
+      `CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,
+        hash TEXT NOT NULL,
+        type TEXT NOT NULL,
+        fromWallet TEXT,
+        toWallet TEXT NOT NULL,
+        amount REAL NOT NULL,
+        nonce INTEGER NOT NULL,
+        gasFee REAL NOT NULL,
+        status TEXT NOT NULL,
+        failReason TEXT,
+        expiresAtMs INTEGER,
+        blockHeight INTEGER,
+        blockHash TEXT,
+        timestampMs INTEGER NOT NULL
+      );`
+    );
+  } else {
+    // Existing DB -> add missing columns safely
+    const hasFailReason = await columnExists(db, "transactions", "failReason");
+    if (!hasFailReason) {
+      await run(db, `ALTER TABLE transactions ADD COLUMN failReason TEXT;`);
+    }
 
-  // blocks
+    const hasExpiresAt = await columnExists(db, "transactions", "expiresAtMs");
+    if (!hasExpiresAt) {
+      await run(db, `ALTER TABLE transactions ADD COLUMN expiresAtMs INTEGER;`);
+    }
+  }
+
+  // 3) blocks
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS blocks (
@@ -95,13 +116,19 @@ async function initDb(db) {
     );`
   );
 
-  await run(db, `CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks(timestampMs);`);
+  // 4) indexes AFTER migrations (critical)
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_to ON transactions(toWallet);`);
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_from ON transactions(fromWallet);`);
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_status_ts ON transactions(status, timestampMs);`);
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_blockHeight ON transactions(blockHeight);`);
 
-  // ---- lightweight migration for older DBs ----
-  const hasFailReason = await columnExists(db, "transactions", "failReason");
-  if (!hasFailReason) {
-    await run(db, `ALTER TABLE transactions ADD COLUMN failReason TEXT;`);
+  // Only create expiry index if column exists (extra safety)
+  const hasExpiresAtNow = await columnExists(db, "transactions", "expiresAtMs");
+  if (hasExpiresAtNow) {
+    await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_expiry ON transactions(expiresAtMs);`);
   }
+
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks(timestampMs);`);
 }
 
 module.exports = {
