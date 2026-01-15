@@ -28,17 +28,16 @@ export type ChainStatus = {
   latestBlock: any;
 };
 
-// IMPORTANT: must be your backend
 const API_BASE = "http://192.168.0.11:3000";
 
-// ---- simple key storage ----
-// Web: localStorage
-// Native: in-memory (works for now; later we’ll use SecureStore/Keychain)
+// Web storage (native in-memory for now)
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
+const WALLET_STORAGE = "HIVE_WALLET_ID";
 
 let memPrivB64: string | null = null;
 let memPubB64: string | null = null;
+let memWallet: string | null = null;
 
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -46,18 +45,11 @@ function isWeb() {
 
 function getStored(key: string) {
   if (!isWeb()) return null;
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
+  try { return window.localStorage.getItem(key); } catch { return null; }
 }
-
 function setStored(key: string, value: string) {
   if (!isWeb()) return;
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {}
+  try { window.localStorage.setItem(key, value); } catch {}
 }
 
 function b64ToU8(b64: string) {
@@ -65,6 +57,26 @@ function b64ToU8(b64: string) {
 }
 function u8ToB64(u8: Uint8Array) {
   return naclUtil.encodeBase64(u8);
+}
+
+async function randomBytes(count: number): Promise<Uint8Array> {
+  const bytes = await Crypto.getRandomBytesAsync(count);
+  return Uint8Array.from(bytes);
+}
+
+/**
+ * ✅ Derive wallet from pubkey (must match server)
+ */
+async function deriveWalletFromPubKeyB64(pubB64: string): Promise<string> {
+  const pubBytes = b64ToU8(pubB64);
+  // hash bytes -> hex
+  const hex = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    // convert bytes to a latin1-ish string safely:
+    String.fromCharCode(...Array.from(pubBytes)),
+    { encoding: Crypto.CryptoEncoding.HEX }
+  );
+  return `HNY_${hex.slice(0, 40)}`;
 }
 
 function canonicalMessage(params: {
@@ -86,11 +98,7 @@ function canonicalMessage(params: {
 }
 
 async function readJsonSafe(res: Response) {
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
+  try { return await res.json(); } catch { return null; }
 }
 
 function makeError(message: string, status?: number, data?: any) {
@@ -133,23 +141,17 @@ async function postJson(path: string, payload: any) {
   return body;
 }
 
-// ✅ Native-safe randomness for nacl
-async function randomBytes(count: number): Promise<Uint8Array> {
-  // Expo Crypto gives secure random bytes on native + web
-  const bytes = await Crypto.getRandomBytesAsync(count);
-  return Uint8Array.from(bytes);
-}
-
-// ---- key management ----
+/**
+ * ✅ Ensure keypair exists
+ */
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
-  // load
   let pub = isWeb() ? getStored(KEY_STORAGE_PUB) : memPubB64;
   let priv = isWeb() ? getStored(KEY_STORAGE_PRIV) : memPrivB64;
 
   if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
 
-  // ✅ Generate a deterministic keypair from a securely random seed
-  const seed = await randomBytes(32); // 32-byte seed
+  // generate from secure random seed (native-safe)
+  const seed = await randomBytes(32);
   const kp = nacl.sign.keyPair.fromSeed(seed);
 
   pub = u8ToB64(kp.publicKey);
@@ -166,12 +168,38 @@ export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKey
   return { publicKeyB64: pub, secretKeyB64: priv };
 }
 
-export async function registerWallet(wallet: string): Promise<any> {
+/**
+ * ✅ Ensure wallet id derived from pubkey and stored
+ */
+export async function ensureWalletId(): Promise<string> {
+  const stored = isWeb() ? getStored(WALLET_STORAGE) : memWallet;
+  if (stored) return stored;
+
   const { publicKeyB64 } = await ensureKeypair();
-  return await postJson("/register", { wallet, publicKey: publicKeyB64 });
+  const wallet = await deriveWalletFromPubKeyB64(publicKeyB64);
+
+  if (isWeb()) setStored(WALLET_STORAGE, wallet);
+  else memWallet = wallet;
+
+  return wallet;
 }
 
-export async function getAccount(wallet: string): Promise<{ wallet: string; balance: number; nonce: number; registered: boolean }> {
+/**
+ * ✅ Register this device’s wallet/pubkey (no collisions)
+ */
+export async function registerWallet(): Promise<{ wallet: string; nonce: number; registered: boolean }> {
+  const { publicKeyB64 } = await ensureKeypair();
+  const res = await postJson("/register", { publicKey: publicKeyB64 });
+
+  // store derived wallet returned by server as source of truth
+  const wallet = String(res?.wallet);
+  if (isWeb()) setStored(WALLET_STORAGE, wallet);
+  else memWallet = wallet;
+
+  return res;
+}
+
+export async function getAccount(wallet: string) {
   return await getJson(`/account/${encodeURIComponent(wallet)}`);
 }
 
@@ -179,17 +207,14 @@ export async function getChainStatus(): Promise<ChainStatus> {
   return await getJson("/status");
 }
 
-export async function getBalance(wallet: string): Promise<{ wallet: string; balance: number }> {
-  if (!wallet) throw makeError("Missing wallet", 400);
+export async function getBalance(wallet: string) {
   return await getJson(`/balance/${encodeURIComponent(wallet)}`);
 }
 
 export async function getTransactions(wallet: string): Promise<Transaction[]> {
-  if (!wallet) throw makeError("Missing wallet", 400);
   return await getJson(`/transactions/${encodeURIComponent(wallet)}`);
 }
 
-// ---- signed tx calls ----
 function signMessage(message: string, secretKeyB64: string) {
   const msgBytes = naclUtil.decodeUTF8(message);
   const sk = b64ToU8(secretKeyB64);
@@ -197,12 +222,13 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
-export async function mint(wallet: string): Promise<any> {
-  if (!wallet) throw makeError("Missing wallet", 400);
+export async function mint(): Promise<any> {
+  // always operate on derived wallet
+  const wallet = await ensureWalletId();
 
-  // Ensure wallet registered
+  // ensure registered
   const acct = await getAccount(wallet);
-  if (!acct.registered) await registerWallet(wallet);
+  if (!acct.registered) await registerWallet();
 
   const acct2 = await getAccount(wallet);
   const nonce = acct2.nonce;
@@ -216,18 +242,18 @@ export async function mint(wallet: string): Promise<any> {
   return await postJson("/mint", { wallet, nonce, timestamp, signature });
 }
 
-export async function send(from: string, to: string, amount: number): Promise<any> {
-  if (!from || !to) throw makeError("Missing from/to", 400);
-  const amt = Number(amount);
-  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be a positive number", 400);
+export async function send(to: string, amount: number): Promise<any> {
+  const from = await ensureWalletId();
 
-  // Ensure sender registered
   const acct = await getAccount(from);
-  if (!acct.registered) await registerWallet(from);
+  if (!acct.registered) await registerWallet();
 
   const acct2 = await getAccount(from);
   const nonce = acct2.nonce;
   const timestamp = Date.now();
+
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be a positive number", 400);
 
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalMessage({ type: "send", from, to, amount: amt, nonce, timestamp });

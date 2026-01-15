@@ -1,9 +1,17 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Platform } from "react-native";
 
-import { getBalance, mint, send, getTransactions, getChainStatus, getAccount, registerWallet } from "../chain/transactions";
+import {
+  getBalance,
+  mint,
+  send,
+  getTransactions,
+  getChainStatus,
+  ensureWalletId,
+  registerWallet,
+  getAccount,
+} from "../chain/transactions";
 
-const DEFAULT_WALLET = "demo-wallet-1";
 const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
 
 function storageGet(key: string): string | null {
@@ -20,7 +28,7 @@ function storageRemove(key: string) {
 }
 
 export default function IndexScreen() {
-  const [wallet, setWallet] = useState<string>(DEFAULT_WALLET);
+  const [wallet, setWallet] = useState<string>("");
   const [balance, setBalance] = useState<number>(0);
   const [status, setStatus] = useState<string>("");
 
@@ -69,31 +77,19 @@ export default function IndexScreen() {
     } catch {}
   }
 
-  async function ensureRegistered() {
-    try {
-      const acct: any = await getAccount(wallet);
-      if (!acct.registered) await registerWallet(wallet);
-    } catch (e: any) {
-      setStatus(e?.message || "Registration failed");
-    }
+  async function ensureRegistered(w: string) {
+    const acct: any = await getAccount(w);
+    if (!acct.registered) await registerWallet();
   }
 
-  async function loadBalance() {
-    try {
-      const data: any = await getBalance(wallet);
-      setBalance(Number(data?.balance || 0));
-    } catch (e: any) {
-      setStatus(e?.message || "Balance fetch failed");
-    }
+  async function loadBalance(w: string) {
+    const data: any = await getBalance(w);
+    setBalance(Number(data?.balance || 0));
   }
 
-  async function loadTxs() {
-    try {
-      const list: any = await getTransactions(wallet);
-      setTxs(Array.isArray(list) ? list : []);
-    } catch (e: any) {
-      setStatus(e?.message || "Transaction fetch failed");
-    }
+  async function loadTxs(w: string) {
+    const list: any = await getTransactions(w);
+    setTxs(Array.isArray(list) ? list : []);
   }
 
   function hasPending(list: any[]) {
@@ -102,11 +98,17 @@ export default function IndexScreen() {
 
   useEffect(() => {
     (async () => {
-      setStatus("");
-      await ensureRegistered();
-      await loadChainStatus();
-      await loadBalance();
-      if (showTxs) await loadTxs();
+      try {
+        setStatus("");
+        const w = await ensureWalletId();
+        setWallet(w);
+        await ensureRegistered(w);
+        await loadChainStatus();
+        await loadBalance(w);
+        if (showTxs) await loadTxs(w);
+      } catch (e: any) {
+        setStatus(e?.message || "Startup failed");
+      }
     })();
 
     const id = setInterval(() => loadChainStatus(), 1000);
@@ -117,15 +119,15 @@ export default function IndexScreen() {
   useEffect(() => {
     if (!showTxs) return;
     if (!hasPending(txs)) return;
+    if (!wallet) return;
 
     const id = setInterval(async () => {
-      await loadTxs();
-      await loadBalance();
+      await loadTxs(wallet);
+      await loadBalance(wallet);
     }, 1000);
 
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showTxs, txs]);
+  }, [showTxs, txs, wallet]);
 
   async function handleMint() {
     if (isCoolingDown) {
@@ -134,20 +136,16 @@ export default function IndexScreen() {
     }
     try {
       setStatus("");
-      const data: any = await mint(wallet);
+      const data: any = await mint();
       startCooldown(Number(data?.cooldownSeconds || 60));
-      await loadBalance();
-      if (showTxs) await loadTxs();
+      await loadBalance(wallet);
+      if (showTxs) await loadTxs(wallet);
       setStatus("Mint submitted (signed + nonce protected) ✅");
     } catch (e: any) {
       if (e?.status === 429) {
         const secs = Number(e?.cooldownSeconds || 60);
         startCooldown(secs);
         setStatus(`Cooldown active: ${secs}s left`);
-        return;
-      }
-      if (e?.status === 409) {
-        setStatus(`Nonce mismatch. Expected ${e?.expectedNonce}. Try again.`);
         return;
       }
       setStatus(e?.message || "Mint failed");
@@ -162,24 +160,26 @@ export default function IndexScreen() {
 
     try {
       setStatus("");
-      await send(wallet, t, n);
+      await send(t, n);
       setAmount("");
-      await loadBalance();
-      if (showTxs) await loadTxs();
+      await loadBalance(wallet);
+      if (showTxs) await loadTxs(wallet);
       setStatus("Send submitted (signed + nonce protected) ✅");
     } catch (e: any) {
-      if (e?.status === 409) {
-        setStatus(`Nonce mismatch. Expected ${e?.expectedNonce}. Try again.`);
-        return;
-      }
       setStatus(e?.message || "Send failed");
     }
+  }
+
+  async function handleRefresh() {
+    if (!wallet) return;
+    await loadBalance(wallet);
+    if (showTxs) await loadTxs(wallet);
   }
 
   async function toggleTxs() {
     const next = !showTxs;
     setShowTxs(next);
-    if (next) await loadTxs();
+    if (next && wallet) await loadTxs(wallet);
   }
 
   return (
@@ -187,28 +187,32 @@ export default function IndexScreen() {
       <Text style={styles.title}>HIVE Wallet</Text>
       <Text style={styles.chainText}>Chain height: {chainHeight} • Next block: ~{nextBlockSec}s</Text>
 
+      <Text style={styles.walletText} numberOfLines={1}>
+        Wallet: {wallet || "loading..."}
+      </Text>
+
       <Text style={styles.balance}>Balance: {balance} HNY</Text>
       {!!status && <Text style={styles.status}>{status}</Text>}
 
-      <TouchableOpacity style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]} onPress={handleMint} disabled={isCoolingDown}>
+      <TouchableOpacity style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]} onPress={handleMint} disabled={isCoolingDown || !wallet}>
         <Text style={styles.buttonText}>{isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}</Text>
       </TouchableOpacity>
 
       <View style={styles.row}>
-        <TouchableOpacity style={styles.smallButton} onPress={loadBalance}>
+        <TouchableOpacity style={styles.smallButton} onPress={handleRefresh} disabled={!wallet}>
           <Text style={styles.smallButtonText}>Get Balance</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.smallButton} onPress={toggleTxs}>
+
+        <TouchableOpacity style={styles.smallButton} onPress={toggleTxs} disabled={!wallet}>
           <Text style={styles.smallButtonText}>{showTxs ? "Hide History" : "Transaction History"}</Text>
         </TouchableOpacity>
       </View>
 
       <Text style={styles.sectionTitle}>Send</Text>
-
-      <TextInput style={styles.input} value={to} onChangeText={setTo} placeholder="Recipient address" placeholderTextColor="#777" autoCapitalize="none" />
+      <TextInput style={styles.input} value={to} onChangeText={setTo} placeholder="Recipient address (HNY_...)" placeholderTextColor="#777" autoCapitalize="none" />
       <TextInput style={styles.input} value={amount} onChangeText={setAmount} placeholder="Amount" placeholderTextColor="#777" keyboardType="numeric" />
 
-      <TouchableOpacity style={styles.button} onPress={handleSend}>
+      <TouchableOpacity style={styles.button} onPress={handleSend} disabled={!wallet}>
         <Text style={styles.buttonText}>Send</Text>
       </TouchableOpacity>
 
@@ -243,6 +247,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#000", padding: 24, justifyContent: "center" },
   title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 8 },
   chainText: { color: "#bbb", textAlign: "center", marginBottom: 10 },
+  walletText: { color: "#bbb", textAlign: "center", marginBottom: 6 },
   balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 10 },
   status: { color: "#ff6b6b", textAlign: "center", marginBottom: 10 },
 

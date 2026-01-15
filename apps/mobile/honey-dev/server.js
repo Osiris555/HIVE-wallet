@@ -27,29 +27,25 @@ const MAX_BLOCKS_STORED = 200;
 /* ======================
    IN-MEMORY STATE
 ====================== */
-const balances = {};             // wallet => number
-const transactions = [];         // newest-first list of all txs
-const mintCooldowns = {};        // wallet => lastMintTimeMs
+const balances = {};        // wallet => number
+const transactions = [];    // newest-first list of all txs
+const mintCooldowns = {};   // wallet => lastMintTimeMs
 
-// ✅ NEW: accounts
-const publicKeys = {};           // wallet => base64(pubkey 32 bytes)
-const nonces = {};               // wallet => next expected nonce (integer)
+// Accounts
+const publicKeys = {};      // wallet => base64(pubkey 32 bytes)
+const nonces = {};          // wallet => next expected nonce (integer)
 
 // Chain state
 let chainHeight = 0;
 let lastBlockTimeMs = Date.now();
-const blocks = [];               // newest-first
-const mempool = [];              // txs waiting to be included
+const blocks = [];          // newest-first
+const mempool = [];         // txs waiting to be included
 
 /* ======================
    HELPERS
 ====================== */
 function now() {
   return Date.now();
-}
-
-function normalizeWallet(body) {
-  return body?.wallet || body?.address || null;
 }
 
 function getBalance(wallet) {
@@ -68,9 +64,18 @@ function sha256Hex(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
-// ✅ Canonical string that gets signed (client + server must match EXACTLY)
+/**
+ * ✅ Derive wallet address from pubkey (testnet-style)
+ * wallet = HNY_<first 40 hex chars of sha256(pubkeyBytes)>
+ */
+function deriveWalletFromPubKeyB64(pubB64) {
+  const pubBytes = naclUtil.decodeBase64(pubB64);
+  const hex = sha256Hex(Buffer.from(pubBytes));
+  return `HNY_${hex.slice(0, 40)}`;
+}
+
+// Canonical signing string must match client exactly
 function canonicalMessage({ type, from, to, amount, nonce, timestamp }) {
-  // IMPORTANT: keep separators stable and avoid JSON stringify differences
   return [
     String(type),
     String(from ?? ""),
@@ -83,12 +88,8 @@ function canonicalMessage({ type, from, to, amount, nonce, timestamp }) {
 
 function verifySignature({ wallet, message, signatureB64 }) {
   const pubB64 = publicKeys[wallet];
-  if (!pubB64) {
-    return { ok: false, error: "Wallet not registered (missing public key)" };
-  }
-  if (!signatureB64) {
-    return { ok: false, error: "Missing signature" };
-  }
+  if (!pubB64) return { ok: false, error: "Wallet not registered (missing public key)" };
+  if (!signatureB64) return { ok: false, error: "Missing signature" };
 
   let pubKey, sig;
   try {
@@ -164,8 +165,7 @@ function buildBlockFromMempool() {
    BLOCK PRODUCER
 ====================== */
 setInterval(() => {
-  // Produces empty blocks too (testnet-like)
-  buildBlockFromMempool();
+  buildBlockFromMempool(); // produces empty blocks too
 }, BLOCK_TIME_MS);
 
 /* ======================
@@ -176,7 +176,6 @@ app.get("/", (_req, res) => {
   res.json({ status: "HIVE Wallet server running" });
 });
 
-/* Chain status */
 app.get("/status", (_req, res) => {
   const elapsed = now() - lastBlockTimeMs;
   const msUntilNext = Math.max(0, BLOCK_TIME_MS - (elapsed % BLOCK_TIME_MS));
@@ -191,28 +190,31 @@ app.get("/status", (_req, res) => {
   });
 });
 
-/* Recent blocks */
 app.get("/blocks", (req, res) => {
   const limit = Math.max(1, Math.min(Number(req.query.limit || 20), 200));
   res.json(blocks.slice(0, limit));
 });
 
-/* ✅ Register wallet pubkey */
+/**
+ * ✅ Register with publicKey only.
+ * Server derives the wallet address from the publicKey.
+ */
 app.post("/register", (req, res) => {
-  const wallet = normalizeWallet(req.body);
   const publicKey = req.body?.publicKey; // base64
 
-  if (!wallet || !publicKey) {
-    return res.status(400).json({ error: "Missing wallet and/or publicKey" });
+  if (!publicKey) {
+    return res.status(400).json({ error: "Missing publicKey" });
   }
 
-  // Basic validation: should decode to 32 bytes
+  // Validate: decode to 32 bytes
   try {
     const pk = naclUtil.decodeBase64(publicKey);
     if (pk.length !== 32) throw new Error("bad length");
   } catch {
     return res.status(400).json({ error: "Invalid publicKey (must be base64 32 bytes)" });
   }
+
+  const wallet = deriveWalletFromPubKeyB64(publicKey);
 
   publicKeys[wallet] = publicKey;
   if (!Number.isInteger(nonces[wallet])) nonces[wallet] = 0;
@@ -226,7 +228,6 @@ app.post("/register", (req, res) => {
   });
 });
 
-/* ✅ Account info (balance + nonce + registered) */
 app.get("/account/:wallet", (req, res) => {
   const wallet = req.params.wallet;
   if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -239,7 +240,6 @@ app.get("/account/:wallet", (req, res) => {
   });
 });
 
-/* Balance (GET /balance/:wallet) */
 app.get("/balance/:wallet", (req, res) => {
   const wallet = req.params.wallet;
   if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -247,15 +247,6 @@ app.get("/balance/:wallet", (req, res) => {
   res.json({ wallet, balance: getBalance(wallet) });
 });
 
-/* Balance (POST /balance) */
-app.post("/balance", (req, res) => {
-  const wallet = normalizeWallet(req.body);
-  if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
-
-  res.json({ wallet, balance: getBalance(wallet) });
-});
-
-/* Transactions (GET /transactions/:wallet) */
 app.get("/transactions/:wallet", (req, res) => {
   const wallet = req.params.wallet;
   if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -264,42 +255,25 @@ app.get("/transactions/:wallet", (req, res) => {
   res.json(txs);
 });
 
-/* Transactions (POST /transactions) */
-app.post("/transactions", (req, res) => {
-  const wallet = normalizeWallet(req.body);
-  if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
-
-  const txs = transactions.filter((tx) => tx.from === wallet || tx.to === wallet);
-  res.json(txs);
-});
-
 /* ======================
-   AUTHENTICATED TX ROUTES
-   (nonce + signature verified)
+   SIGNED TX ROUTES
 ====================== */
 
-/* Mint (POST /mint) */
 app.post("/mint", (req, res) => {
-  const wallet = normalizeWallet(req.body);
+  const wallet = req.body?.wallet;          // derived wallet string
   const nonce = req.body?.nonce;
   const timestamp = req.body?.timestamp;
   const signature = req.body?.signature;
 
-  if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
+  if (!wallet) return res.status(400).json({ error: "Missing wallet" });
   if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
   if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-  // Nonce check
   const expected = getNonce(wallet);
   if (nonce !== expected) {
-    return res.status(409).json({
-      error: "Nonce mismatch",
-      expectedNonce: expected,
-      gotNonce: nonce,
-    });
+    return res.status(409).json({ error: "Nonce mismatch", expectedNonce: expected, gotNonce: nonce });
   }
 
-  // Signature check
   const msg = canonicalMessage({
     type: "mint",
     from: "",
@@ -310,11 +284,8 @@ app.post("/mint", (req, res) => {
   });
 
   const sigOk = verifySignature({ wallet, message: msg, signatureB64: signature });
-  if (!sigOk.ok) {
-    return res.status(401).json({ error: sigOk.error });
-  }
+  if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
-  // Cooldown check
   const lastMint = mintCooldowns[wallet] || 0;
   const remaining = lastMint + MINT_COOLDOWN_MS - now();
   if (remaining > 0) {
@@ -323,10 +294,9 @@ app.post("/mint", (req, res) => {
     return res.status(429).json({ error: "Cooldown active", cooldownSeconds });
   }
 
-  // Accept tx: increment nonce (replay protection)
+  // accept: increment nonce
   setNonce(wallet, expected + 1);
 
-  // Apply balance immediately (optimistic like before)
   balances[wallet] = getBalance(wallet) + MINT_AMOUNT;
   mintCooldowns[wallet] = now();
 
@@ -352,30 +322,21 @@ app.post("/mint", (req, res) => {
   });
 });
 
-/* Send (POST /send) */
 app.post("/send", (req, res) => {
   const { from, to, amount, nonce, timestamp, signature } = req.body;
 
   if (!from || !to) return res.status(400).json({ error: "Missing from/to" });
 
   const amt = Number(amount);
-  if (!Number.isFinite(amt) || amt <= 0) {
-    return res.status(400).json({ error: "Amount must be a positive number" });
-  }
+  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be a positive number" });
   if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
   if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-  // Nonce check (replay protection)
   const expected = getNonce(from);
   if (nonce !== expected) {
-    return res.status(409).json({
-      error: "Nonce mismatch",
-      expectedNonce: expected,
-      gotNonce: nonce,
-    });
+    return res.status(409).json({ error: "Nonce mismatch", expectedNonce: expected, gotNonce: nonce });
   }
 
-  // Signature check (for wallet = from)
   const msg = canonicalMessage({
     type: "send",
     from,
@@ -388,14 +349,10 @@ app.post("/send", (req, res) => {
   const sigOk = verifySignature({ wallet: from, message: msg, signatureB64: signature });
   if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
-  if (getBalance(from) < amt) {
-    return res.status(400).json({ error: "Insufficient balance" });
-  }
+  if (getBalance(from) < amt) return res.status(400).json({ error: "Insufficient balance" });
 
-  // Accept tx: increment nonce
   setNonce(from, expected + 1);
 
-  // Apply balances immediately
   balances[from] = getBalance(from) - amt;
   balances[to] = getBalance(to) + amt;
 
@@ -420,15 +377,9 @@ app.post("/send", (req, res) => {
   });
 });
 
-/* ======================
-   GLOBAL ERROR HANDLER
-====================== */
 app.use((err, _req, res, _next) => {
   console.error("SERVER ERROR:", err);
-  res.status(500).json({
-    success: false,
-    error: err.message || "Internal server error",
-  });
+  res.status(500).json({ success: false, error: err.message || "Internal server error" });
 });
 
 app.listen(PORT, () => {
