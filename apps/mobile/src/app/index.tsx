@@ -540,242 +540,253 @@ useEffect(() => {
     return mintBusy ? "Minting..." : "Mint";
   }, [mintCooldown, mintBusy]);
 
-    // ---------------------------
+  // ---------------------------
   // ✅ Screen content (NO skins here)
   // ---------------------------
   const Screen = (
-    <ScrollView
-      contentContainerStyle={{
-        padding: 24,
-        gap: 14,
-        maxWidth: 950,
-        alignSelf: "center",
-        width: "100%",
-      }}
-    >
-      {/* header with settings */}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center" }}>
-        <View style={{ position: "absolute", right: 0 }}>
+    <View style={{ flex: 1 }}>
+      <ScrollView
+        contentContainerStyle={{
+          padding: 24,
+          gap: 14,
+          maxWidth: 950,
+          alignSelf: "center",
+          width: "100%",
+        }}
+      >
+        {/* header with settings */}
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center" }}>
+          <View style={{ position: "absolute", right: 0 }}>
+            <Pressable
+              onPress={() => setSettingsOpen(true)}
+              style={{
+                paddingVertical: 8,
+                paddingHorizontal: 12,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: T.border,
+                backgroundColor: "rgba(0,0,0,0.25)",
+              }}
+            >
+              <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
+            </Pressable>
+          </View>
+
+          <Text style={{ color: T.text, fontSize: 34, textAlign: "center", fontWeight: "800", marginTop: 6 }}>
+            HIVE Wallet
+          </Text>
+        </View>
+
+        <Text style={{ color: T.sub, textAlign: "center" }}>
+          Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
+        </Text>
+
+        {wallet ? <Text style={{ color: T.sub, textAlign: "center" }}>Wallet: {wallet}</Text> : null}
+
+        <Text style={{ color: T.text, textAlign: "center", fontSize: 20, marginTop: 6 }}>
+          Confirmed: {fmt8(confirmedBalance)} HNY
+        </Text>
+        <Text style={{ color: T.sub, textAlign: "center" }}>Spendable: {fmt8(spendableBalance)} HNY</Text>
+        <Text style={{ color: T.sub, textAlign: "center" }}>Fee vault: {fmt8(feeVaultBalance)} HNY</Text>
+
+        {message ? (
+          <Text style={{ color: message.toLowerCase().includes("failed") ? T.danger : T.ok, textAlign: "center" }}>
+            {message}
+          </Text>
+        ) : null}
+
+        {cooldownText ? <Text style={{ color: T.danger, textAlign: "center" }}>{cooldownText}</Text> : null}
+
+        {/* Mint */}
+        <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
           <Pressable
-            onPress={() => setSettingsOpen(true)}
+            onPress={handleMint}
+            disabled={mintBusy || mintCooldown > 0}
             style={{
-              paddingVertical: 8,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: T.border,
-              backgroundColor: "rgba(0,0,0,0.25)",
+              backgroundColor: T.gold,
+              opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
+              padding: 18,
+              borderRadius: 10,
+              alignItems: "center",
+              marginTop: 10,
+              // iOS glow
+              shadowColor: T.gold,
+              shadowOpacity: 0.35,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 0 },
+              // Android glow
+              elevation: 8,
             }}
           >
-            <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
+            <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
+          </Pressable>
+        </Animated.View>
+
+        <View style={{ flexDirection: "row", gap: 10 }}>
+          <Pressable
+            onPress={loadBalance}
+            style={{
+              flex: 1,
+              borderWidth: 1,
+              borderColor: T.border,
+              padding: 14,
+              borderRadius: 10,
+              alignItems: "center",
+              backgroundColor: T.panel,
+            }}
+          >
+            <Text style={{ color: T.text, fontWeight: "700" }}>Get Balance</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => {
+              setShowHistory((v) => !v);
+              if (!showHistory) loadTxs();
+            }}
+            style={{
+              flex: 1,
+              borderWidth: 1,
+              borderColor: T.border,
+              padding: 14,
+              borderRadius: 10,
+              alignItems: "center",
+              backgroundColor: T.panel,
+            }}
+          >
+            <Text style={{ color: T.text, fontWeight: "700" }}>{showHistory ? "Hide History" : "Transaction History"}</Text>
           </Pressable>
         </View>
 
-        <Text style={{ color: T.text, fontSize: 34, textAlign: "center", fontWeight: "800", marginTop: 6 }}>
-          HIVE Wallet
-        </Text>
-      </View>
+        <Text style={{ color: T.text, fontWeight: "800", fontSize: 18, marginTop: 10 }}>Send</Text>
 
-      <Text style={{ color: T.sub, textAlign: "center" }}>
-        Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
-      </Text>
-
-      {wallet ? <Text style={{ color: T.sub, textAlign: "center" }}>Wallet: {wallet}</Text> : null}
-
-      <Text style={{ color: T.text, textAlign: "center", fontSize: 20, marginTop: 6 }}>
-        Confirmed: {fmt8(confirmedBalance)} HNY
-      </Text>
-      <Text style={{ color: T.sub, textAlign: "center" }}>Spendable: {fmt8(spendableBalance)} HNY</Text>
-      <Text style={{ color: T.sub, textAlign: "center" }}>Fee vault: {fmt8(feeVaultBalance)} HNY</Text>
-
-      {message ? (
-        <Text style={{ color: message.toLowerCase().includes("failed") ? T.danger : T.ok, textAlign: "center" }}>
-          {message}
-        </Text>
-      ) : null}
-
-      {cooldownText ? <Text style={{ color: T.danger, textAlign: "center" }}>{cooldownText}</Text> : null}
-
-      {/* Mint */}
-      <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
-        <Pressable
-          onPress={handleMint}
-          disabled={mintBusy || mintCooldown > 0}
+        <TextInput
+          value={to}
+          onChangeText={setTo}
+          placeholder="Recipient address (HNY_...)"
+          placeholderTextColor="#666"
           style={{
-            backgroundColor: T.gold,
-            opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
-            padding: 18,
+            backgroundColor: "rgba(17,17,17,0.85)",
             borderRadius: 10,
-            alignItems: "center",
-            marginTop: 10,
-            shadowColor: T.gold,
-            shadowOpacity: 0.35,
-            shadowRadius: 12,
-            shadowOffset: { width: 0, height: 0 },
-            elevation: 8,
-          }}
-        >
-          <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
-        </Pressable>
-      </Animated.View>
-
-      {/* Balance + History buttons */}
-      <View style={{ flexDirection: "row", gap: 10 }}>
-        <Pressable
-          onPress={loadBalance}
-          style={{
-            flex: 1,
+            padding: 14,
+            color: T.text,
             borderWidth: 1,
             borderColor: T.border,
-            padding: 14,
-            borderRadius: 10,
-            alignItems: "center",
-            backgroundColor: T.panel,
           }}
-        >
-          <Text style={{ color: T.text, fontWeight: "700" }}>Get Balance</Text>
-        </Pressable>
+        />
 
-        <Pressable
-          onPress={() => {
-            setShowHistory((v) => !v);
-            if (!showHistory) loadTxs();
-          }}
+        <TextInput
+          value={amountStr}
+          onChangeText={setAmountStr}
+          placeholder="Amount"
+          placeholderTextColor="#666"
+          keyboardType={Platform.OS === "web" ? "text" : "numeric"}
           style={{
-            flex: 1,
+            backgroundColor: "rgba(17,17,17,0.85)",
+            borderRadius: 10,
+            padding: 14,
+            color: T.text,
             borderWidth: 1,
             borderColor: T.border,
-            padding: 14,
-            borderRadius: 10,
-            alignItems: "center",
-            backgroundColor: T.panel,
           }}
-        >
-          <Text style={{ color: T.text, fontWeight: "700" }}>{showHistory ? "Hide History" : "Transaction History"}</Text>
-        </Pressable>
-      </View>
+        />
 
-      <Text style={{ color: T.text, fontWeight: "800", fontSize: 18, marginTop: 10 }}>Send</Text>
+        {/* Send */}
+        <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
+          <Pressable
+            onPress={openSendConfirm}
+            disabled={sendBusy}
+            style={{
+              backgroundColor: T.gold,
+              opacity: sendBusy ? 0.6 : 1,
+              padding: 18,
+              borderRadius: 10,
+              alignItems: "center",
+              shadowColor: T.gold,
+              shadowOpacity: 0.28,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 0 },
+              elevation: 8,
+            }}
+          >
+            <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
+          </Pressable>
+        </Animated.View>
 
-      <TextInput
-        value={to}
-        onChangeText={setTo}
-        placeholder="Recipient address (HNY_...)"
-        placeholderTextColor="#666"
-        style={{
-          backgroundColor: "rgba(17,17,17,0.85)",
-          borderRadius: 10,
-          padding: 14,
-          color: T.text,
-          borderWidth: 1,
-          borderColor: T.border,
-        }}
-      />
+        {showHistory ? (
+          <View
+            style={{
+              marginTop: 6,
+              borderWidth: 1,
+              borderColor: T.border,
+              borderRadius: 10,
+              overflow: "hidden",
+              backgroundColor: T.panel,
+            }}
+          >
+            {txs.length === 0 ? (
+              <Text style={{ color: T.sub, padding: 14 }}>No transactions yet.</Text>
+            ) : (
+              txs.map((t, idx) => {
+                const gasFee = Number(t.gasFee || 0);
+                const serviceFee = Number(t.serviceFee || 0);
+                const totalFee = t.totalFee != null ? Number(t.totalFee) : Number((gasFee + serviceFee).toFixed(8));
 
-      <TextInput
-        value={amountStr}
-        onChangeText={setAmountStr}
-        placeholder="Amount"
-        placeholderTextColor="#666"
-        keyboardType={Platform.OS === "web" ? "text" : "numeric"}
-        style={{
-          backgroundColor: "rgba(17,17,17,0.85)",
-          borderRadius: 10,
-          padding: 14,
-          color: T.text,
-          borderWidth: 1,
-          borderColor: T.border,
-        }}
-      />
+                const title =
+                  `${String(t.type).toUpperCase()} · ${t.amount}` +
+                  ` · fee ${fmt8(totalFee)}` +
+                  ` · ${t.status}` +
+                  (t.blockHeight ? ` · block ${t.blockHeight}` : "");
 
-      {/* Send */}
-      <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
-        <Pressable
-          onPress={openSendConfirm}
-          disabled={sendBusy}
-          style={{
-            backgroundColor: T.gold,
-            opacity: sendBusy ? 0.6 : 1,
-            padding: 18,
-            borderRadius: 10,
-            alignItems: "center",
-            shadowColor: T.gold,
-            shadowOpacity: 0.28,
-            shadowRadius: 12,
-            shadowOffset: { width: 0, height: 0 },
-            elevation: 8,
-          }}
-        >
-          <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
-        </Pressable>
-      </Animated.View>
+                const showActions = isMyPendingSend(t);
 
-      {/* History */}
-      {showHistory ? (
-        <View style={{ marginTop: 6, borderWidth: 1, borderColor: T.border, borderRadius: 10, overflow: "hidden", backgroundColor: T.panel }}>
-          {txs.length === 0 ? (
-            <Text style={{ color: T.sub, padding: 14 }}>No transactions yet.</Text>
-          ) : (
-            txs.map((t, idx) => {
-              const gasFee = Number(t.gasFee || 0);
-              const serviceFee = Number(t.serviceFee || 0);
-              const totalFee = t.totalFee != null ? Number(t.totalFee) : Number((gasFee + serviceFee).toFixed(8));
+                return (
+                  <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: T.border }}>
+                    <Text style={{ color: T.text, fontWeight: "800" }}>{title}</Text>
+                    <Text style={{ color: T.sub }}>Gas: {fmt8(gasFee)} · Service: {fmt8(serviceFee)}</Text>
 
-              const title =
-                `${String(t.type).toUpperCase()} · ${t.amount}` +
-                ` · fee ${fmt8(totalFee)}` +
-                ` · ${t.status}` +
-                (t.blockHeight ? ` · block ${t.blockHeight}` : "");
+                    {t.failReason ? <Text style={{ color: T.danger }}>Reason: {t.failReason}</Text> : null}
+                    {t.nonce != null ? <Text style={{ color: T.sub }}>Nonce: {t.nonce}</Text> : null}
+                    <Text style={{ color: T.sub }}>From: {t.from || "—"}</Text>
+                    <Text style={{ color: T.sub }}>To: {t.to}</Text>
 
-              const showActions = isMyPendingSend(t);
+                    {showActions ? (
+                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                        <Pressable
+                          onPress={() => openRbf(t)}
+                          disabled={sendBusy}
+                          style={{
+                            paddingVertical: 10,
+                            paddingHorizontal: 14,
+                            borderRadius: 10,
+                            backgroundColor: T.blue,
+                            opacity: sendBusy ? 0.6 : 1,
+                          }}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Boost (RBF)</Text>
+                        </Pressable>
 
-              return (
-                <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: T.border }}>
-                  <Text style={{ color: T.text, fontWeight: "800" }}>{title}</Text>
-                  <Text style={{ color: T.sub }}>Gas: {fmt8(gasFee)} · Service: {fmt8(serviceFee)}</Text>
-
-                  {t.failReason ? <Text style={{ color: T.danger }}>Reason: {t.failReason}</Text> : null}
-                  {t.nonce != null ? <Text style={{ color: T.sub }}>Nonce: {t.nonce}</Text> : null}
-                  <Text style={{ color: T.sub }}>From: {t.from || "—"}</Text>
-                  <Text style={{ color: T.sub }}>To: {t.to}</Text>
-
-                  {showActions ? (
-                    <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-                      <Pressable
-                        onPress={() => openRbf(t)}
-                        disabled={sendBusy}
-                        style={{
-                          paddingVertical: 10,
-                          paddingHorizontal: 14,
-                          borderRadius: 10,
-                          backgroundColor: T.blue,
-                          opacity: sendBusy ? 0.6 : 1,
-                        }}
-                      >
-                        <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Boost (RBF)</Text>
-                      </Pressable>
-
-                      <Pressable
-                        onPress={() => openCancel(t)}
-                        disabled={sendBusy}
-                        style={{
-                          paddingVertical: 10,
-                          paddingHorizontal: 14,
-                          borderRadius: 10,
-                          backgroundColor: "rgba(255,90,90,0.95)",
-                          opacity: sendBusy ? 0.6 : 1,
-                        }}
-                      >
-                        <Text style={{ color: "#fff", fontWeight: "900" }}>✖ Cancel</Text>
-                      </Pressable>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })
-          )}
-        </View>
-      ) : null}
+                        <Pressable
+                          onPress={() => openCancel(t)}
+                          disabled={sendBusy}
+                          style={{
+                            paddingVertical: 10,
+                            paddingHorizontal: 14,
+                            borderRadius: 10,
+                            backgroundColor: "rgba(255,90,90,0.95)",
+                            opacity: sendBusy ? 0.6 : 1,
+                          }}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>✖ Cancel</Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+                  </View>
+                );
+              })
+            )}
+          </View>
+        ) : null}
+      </ScrollView>
 
       {/* ---------- Confirm modal (normal send) ---------- */}
       <Modal transparent visible={confirmOpen} animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
@@ -1108,7 +1119,7 @@ useEffect(() => {
           </BlurView>
         </View>
       </Modal>
-    </ScrollView>
+    </View>
   );
 
   // ---------------------------
