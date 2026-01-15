@@ -9,7 +9,7 @@ import {
   Platform,
 } from "react-native";
 
-import { getBalance, mint, send, getTransactions } from "../chain/transactions";
+import { getBalance, mint, send, getTransactions, getChainStatus } from "../chain/transactions";
 
 const DEFAULT_WALLET = "demo-wallet-1";
 const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
@@ -35,9 +35,14 @@ export default function IndexScreen() {
   const [to, setTo] = useState<string>("");
   const [amount, setAmount] = useState<string>("");
 
-  const [showTxs, setShowTxs] = useState<boolean>(false);
+  const [showTxs, setShowTxs] = useState<boolean>(true);
   const [txs, setTxs] = useState<any[]>([]);
 
+  // chain status
+  const [chainHeight, setChainHeight] = useState<number>(0);
+  const [nextBlockSec, setNextBlockSec] = useState<number>(0);
+
+  // cooldown
   const [cooldownEndMs, setCooldownEndMs] = useState<number>(() => {
     const saved = storageGet(STORAGE_COOLDOWN_END);
     return saved ? Number(saved) : 0;
@@ -66,6 +71,16 @@ export default function IndexScreen() {
     storageSet(STORAGE_COOLDOWN_END, String(end));
   }
 
+  async function loadChainStatus() {
+    try {
+      const s: any = await getChainStatus();
+      setChainHeight(Number(s?.chainHeight || 0));
+      setNextBlockSec(Math.ceil(Number(s?.msUntilNextBlock || 0) / 1000));
+    } catch {
+      // ignore chain status errors for now
+    }
+  }
+
   async function loadBalance() {
     try {
       const data: any = await getBalance(wallet);
@@ -84,11 +99,37 @@ export default function IndexScreen() {
     }
   }
 
+  function hasPending(list: any[]) {
+    return list.some((t) => t?.status === "pending");
+  }
+
+  // Initial load + keep chain status ticking
   useEffect(() => {
-    setStatus("");
-    loadBalance();
+    (async () => {
+      setStatus("");
+      await loadChainStatus();
+      await loadBalance();
+      if (showTxs) await loadTxs();
+    })();
+
+    const id = setInterval(() => loadChainStatus(), 1000);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Poll txs/balance while any pending exists
+  useEffect(() => {
+    if (!showTxs) return;
+    if (!hasPending(txs)) return;
+
+    const id = setInterval(async () => {
+      await loadTxs();
+      await loadBalance();
+    }, 1000);
+
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showTxs, txs]);
 
   async function handleMint() {
     if (isCoolingDown) {
@@ -99,15 +140,14 @@ export default function IndexScreen() {
     try {
       setStatus("");
       const data: any = await mint(wallet);
-
       const secs = Number(data?.cooldownSeconds || 60);
       startCooldown(secs);
 
-      // Always refresh authoritative data after mint
+      // After submission, we show pending behavior
       await loadBalance();
       if (showTxs) await loadTxs();
 
-      setStatus("Mint successful!");
+      setStatus("Mint submitted (pending until next block) ✅");
     } catch (e: any) {
       if (e?.status === 429) {
         const secs = Number(e?.cooldownSeconds || 60);
@@ -132,11 +172,10 @@ export default function IndexScreen() {
 
       setAmount("");
 
-      // Refresh after send
       await loadBalance();
       if (showTxs) await loadTxs();
 
-      setStatus("Send successful!");
+      setStatus("Send submitted (pending until next block) ✅");
     } catch (e: any) {
       setStatus(e?.message || "Send failed");
     }
@@ -151,6 +190,11 @@ export default function IndexScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>HIVE Wallet</Text>
+
+      <Text style={styles.chainText}>
+        Chain height: {chainHeight} • Next block: ~{nextBlockSec}s
+      </Text>
+
       <Text style={styles.balance}>Balance: {balance} HNY</Text>
 
       {!!status && <Text style={styles.status}>{status}</Text>}
@@ -187,6 +231,7 @@ export default function IndexScreen() {
         placeholderTextColor="#777"
         autoCapitalize="none"
       />
+
       <TextInput
         style={styles.input}
         value={amount}
@@ -212,6 +257,7 @@ export default function IndexScreen() {
                 <View style={styles.txRow}>
                   <Text style={styles.txMain}>
                     {String(item.type).toUpperCase()} • {item.amount} • {item.status}
+                    {item.status === "confirmed" && item.blockHeight != null ? ` • block ${item.blockHeight}` : ""}
                   </Text>
                   <Text style={styles.txSub}>From: {item.from || "—"}</Text>
                   <Text style={styles.txSub}>To: {item.to}</Text>
@@ -227,7 +273,8 @@ export default function IndexScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#000", padding: 24, justifyContent: "center" },
-  title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 12 },
+  title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 8 },
+  chainText: { color: "#bbb", textAlign: "center", marginBottom: 10 },
   balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 10 },
   status: { color: "#ff6b6b", textAlign: "center", marginBottom: 10 },
 
@@ -242,7 +289,7 @@ const styles = StyleSheet.create({
   sectionTitle: { color: "#fff", marginTop: 18, marginBottom: 8, fontWeight: "700" },
   input: { backgroundColor: "#111", borderWidth: 1, borderColor: "#333", borderRadius: 10, padding: 12, color: "#fff", marginBottom: 10 },
 
-  txsBox: { marginTop: 14, borderWidth: 1, borderColor: "#333", borderRadius: 12, padding: 12, backgroundColor: "#0b0b0b", maxHeight: 280 },
+  txsBox: { marginTop: 14, borderWidth: 1, borderColor: "#333", borderRadius: 12, padding: 12, backgroundColor: "#0b0b0b", maxHeight: 300 },
   txEmpty: { color: "#bbb" },
   txRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#222" },
   txMain: { color: "#fff", fontWeight: "700" },
