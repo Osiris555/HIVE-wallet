@@ -3,7 +3,6 @@ import nacl from "tweetnacl";
 import * as naclUtil from "tweetnacl-util";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
-import Constants from "expo-constants";
 
 export type TxType = "mint" | "send";
 
@@ -26,7 +25,7 @@ export type Transaction = {
   timestamp: number;
 };
 
-// Keep compatibility with your UI imports
+// Convenience alias used by your UI
 export type TxLike = Transaction;
 
 export type ChainStatus = {
@@ -41,11 +40,13 @@ export type ChainStatus = {
   txTtlMs: number;
   serviceFeeRate: number;
 
+  // server may expose vault balance under different names depending on version
   feeVaultBalance?: number;
   feeVault?: number;
   feeVaultBalanceHny?: number;
 };
 
+// ✅ Exported helpers used by UI
 export const ONE_SAT = 0.00000001;
 
 export function fmt8(n: number) {
@@ -54,19 +55,18 @@ export function fmt8(n: number) {
   return x.toFixed(8);
 }
 
+const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
+const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
+const WALLET_STORAGE = "HIVE_WALLET_ID";
+
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-// Web defaults to localhost; native defaults to your LAN IP for Expo Go iPhone testing.
-const API_BASE =
-  ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
-  (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
-  (isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000");
-
-const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
-const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
-const WALLET_STORAGE = "HIVE_WALLET_ID";
+// ✅ Your preferred setup:
+// - Web (localhost browser) -> localhost:3000
+// - Native (Expo Go iPhone) -> LAN IP:3000
+const API_BASE = isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000";
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
@@ -159,16 +159,12 @@ function pickFeeVaultBalance(status: any): number {
   return Number(v || 0);
 }
 
-function networkHint() {
-  return `API_BASE=${API_BASE}`;
-}
-
 async function getJson(path: string) {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, { method: "GET" });
   } catch (e: any) {
-    throw makeError(`Network error on GET ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error GET ${path} (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
   }
   const body = await readJsonSafe(res);
   if (!res.ok) throw makeError(body?.error || `GET ${path} failed`, res.status, body);
@@ -184,7 +180,7 @@ async function postJson(path: string, payload: any) {
       body: JSON.stringify(payload ?? {}),
     });
   } catch (e: any) {
-    throw makeError(`Network error on POST ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error POST ${path} (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
   }
 
   const body = await readJsonSafe(res);
@@ -195,7 +191,7 @@ async function postJson(path: string, payload: any) {
     throw err;
   }
   if (res.status === 409) {
-    const err: any = makeError(body?.error || "Nonce conflict", 409, body);
+    const err: any = makeError(body?.error || "Nonce mismatch", 409, body);
     err.expectedNonce = body?.expectedNonce;
     err.gotNonce = body?.gotNonce;
     throw err;
@@ -245,7 +241,7 @@ export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance:
   try {
     res = await fetch(`${API_BASE}/status`);
   } catch (e: any) {
-    throw makeError(`Network error on GET /status. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error GET /status (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
   }
 
   const body = await readJsonSafe(res);
@@ -255,10 +251,7 @@ export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance:
     err.data = body;
     throw err;
   }
-  return {
-    ...body,
-    feeVaultBalance: pickFeeVaultBalance(body),
-  };
+  return { ...body, feeVaultBalance: pickFeeVaultBalance(body) };
 }
 
 export async function getAccount(wallet: string) {
@@ -280,17 +273,19 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
-// rate optional; if missing -> 0
 export function computeServiceFee(amount: number, rate?: number) {
   const r = Number(rate);
   if (!Number.isFinite(r)) return 0;
   return Number((Number(amount) * r).toFixed(8));
 }
 
+/**
+ * Quote helper for the confirm screen.
+ */
 export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverride?: number }) {
   const status = await getChainStatus();
-  const minGas = Number(status.minGasFee || 0);
 
+  const minGas = Number(status.minGasFee || 0);
   const gasFee = Number.isFinite(opts?.gasFeeOverride as any)
     ? Math.max(minGas, Number(opts!.gasFeeOverride))
     : minGas;
@@ -299,7 +294,15 @@ export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverr
   const totalFee = Number((gasFee + serviceFee).toFixed(8));
   const totalCost = Number((amount + totalFee).toFixed(8));
 
-  return { chainId: status.chainId, gasFee, minGasFee: minGas, serviceFee, totalFee, totalCost, status };
+  return {
+    chainId: status.chainId,
+    gasFee,
+    minGasFee: minGas,
+    serviceFee,
+    totalFee,
+    totalCost,
+    status,
+  };
 }
 
 export async function mint(): Promise<any> {
@@ -348,6 +351,9 @@ export async function mint(): Promise<any> {
   });
 }
 
+/**
+ * Send (also used for RBF replacements when nonce < expectedNonce).
+ */
 export async function send(params: {
   to: string;
   amount: number;
@@ -369,7 +375,7 @@ export async function send(params: {
 
   const timestamp = Date.now();
   const amt = Number(params.amount);
-  if (!Number.isFinite(amt) || amt < 0) throw makeError("Amount must be >= 0", 400);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
 
   const gasFee = Number(params.gasFee);
   const serviceFee = Number(params.serviceFee);
@@ -408,12 +414,10 @@ export async function send(params: {
 }
 
 /**
- * ✅ RBF (Replace-By-Fee) for a pending send:
- * - same nonce
- * - same to/amount
- * - higher fee
+ * ✅ Replace a pending tx at a specific nonce with higher fee (RBF).
+ * This just uses /send with nonceOverride = pending nonce.
  */
-export async function rbfReplacePending(params: {
+export async function rbfReplacePending(args: {
   to: string;
   amount: number;
   nonce: number;
@@ -421,25 +425,32 @@ export async function rbfReplacePending(params: {
   serviceFee: number;
 }) {
   return await send({
-    to: params.to,
-    amount: params.amount,
-    nonceOverride: params.nonce,
-    gasFee: params.gasFee,
-    serviceFee: params.serviceFee,
+    to: args.to,
+    amount: args.amount,
+    nonceOverride: args.nonce,
+    gasFee: args.gasFee,
+    serviceFee: args.serviceFee,
   });
 }
 
 /**
- * ✅ Cancel a pending tx:
- * Most dev chains implement cancel as a same-nonce replacement sending 0 to self with higher fee.
+ * ✅ Cancel a pending tx by replacing it with a tiny self-send (amount must be > 0).
+ * Server requires serviceFee matches amount*rate, so we compute it.
  */
-export async function cancelPending(params: { nonce: number; gasFee: number; serviceFee: number }) {
+export async function cancelPending(args: { nonce: number; gasFee: number; serviceFee?: number }) {
   const from = await ensureWalletId();
+  const status = await getChainStatus();
+
+  const amount = ONE_SAT; // tiny dust to satisfy "Amount must be positive"
+  const serviceFee = Number.isFinite(args.serviceFee as any)
+    ? Number(args.serviceFee)
+    : computeServiceFee(amount, status.serviceFeeRate);
+
   return await send({
     to: from,
-    amount: 0,
-    nonceOverride: params.nonce,
-    gasFee: params.gasFee,
-    serviceFee: params.serviceFee,
+    amount,
+    nonceOverride: args.nonce,
+    gasFee: args.gasFee,
+    serviceFee,
   });
 }
