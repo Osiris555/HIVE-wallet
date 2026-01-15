@@ -52,7 +52,7 @@ async function columnExists(db, table, column) {
 }
 
 async function initDb(db) {
-  // 1) accounts
+  // accounts
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS accounts (
@@ -65,11 +65,10 @@ async function initDb(db) {
     );`
   );
 
-  // 2) transactions (create if missing, otherwise migrate)
+  // transactions
   const txTableExists = await tableExists(db, "transactions");
 
   if (!txTableExists) {
-    // Fresh DB -> create with all columns
     await run(
       db,
       `CREATE TABLE IF NOT EXISTS transactions (
@@ -81,6 +80,7 @@ async function initDb(db) {
         amount REAL NOT NULL,
         nonce INTEGER NOT NULL,
         gasFee REAL NOT NULL,
+        serviceFee REAL NOT NULL DEFAULT 0,
         status TEXT NOT NULL,
         failReason TEXT,
         expiresAtMs INTEGER,
@@ -90,19 +90,19 @@ async function initDb(db) {
       );`
     );
   } else {
-    // Existing DB -> add missing columns safely
-    const hasFailReason = await columnExists(db, "transactions", "failReason");
-    if (!hasFailReason) {
+    // migrations
+    if (!(await columnExists(db, "transactions", "failReason"))) {
       await run(db, `ALTER TABLE transactions ADD COLUMN failReason TEXT;`);
     }
-
-    const hasExpiresAt = await columnExists(db, "transactions", "expiresAtMs");
-    if (!hasExpiresAt) {
+    if (!(await columnExists(db, "transactions", "expiresAtMs"))) {
       await run(db, `ALTER TABLE transactions ADD COLUMN expiresAtMs INTEGER;`);
+    }
+    if (!(await columnExists(db, "transactions", "serviceFee"))) {
+      await run(db, `ALTER TABLE transactions ADD COLUMN serviceFee REAL NOT NULL DEFAULT 0;`);
     }
   }
 
-  // 3) blocks
+  // blocks
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS blocks (
@@ -116,13 +116,13 @@ async function initDb(db) {
     );`
   );
 
-  // 4) indexes AFTER migrations (critical)
+  // indexes (after migrations)
   await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_to ON transactions(toWallet);`);
   await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_from ON transactions(fromWallet);`);
   await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_status_ts ON transactions(status, timestampMs);`);
   await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_blockHeight ON transactions(blockHeight);`);
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_nonce_from ON transactions(fromWallet, nonce);`);
 
-  // Only create expiry index if column exists (extra safety)
   const hasExpiresAtNow = await columnExists(db, "transactions", "expiresAtMs");
   if (hasExpiresAtNow) {
     await run(db, `CREATE INDEX IF NOT EXISTS idx_txs_expiry ON transactions(expiresAtMs);`);

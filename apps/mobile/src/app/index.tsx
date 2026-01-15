@@ -1,317 +1,389 @@
+// apps/mobile/src/app/index.tsx
 import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Platform } from "react-native";
-
+import { View, Text, TextInput, Pressable, ScrollView, Modal, Platform } from "react-native";
 import {
+  ensureWalletId,
   getBalance,
-  mint,
-  send,
   getTransactions,
   getChainStatus,
-  ensureWalletId,
+  quoteSend,
+  mint,
+  send,
 } from "../chain/transactions";
 
-const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
-
-function storageGet(key: string): string | null {
-  if (Platform.OS !== "web") return null;
-  try { return window.localStorage.getItem(key); } catch { return null; }
-}
-function storageSet(key: string, value: string) {
-  if (Platform.OS !== "web") return;
-  try { window.localStorage.setItem(key, value); } catch {}
-}
-function storageRemove(key: string) {
-  if (Platform.OS !== "web") return;
-  try { window.localStorage.removeItem(key); } catch {}
+function fmt8(n: number) {
+  return Number(n).toFixed(8);
 }
 
-export default function IndexScreen() {
+export default function Index() {
   const [wallet, setWallet] = useState<string>("");
-  const [balance, setBalance] = useState<number>(0);
-  const [pendingDelta, setPendingDelta] = useState<number>(0);
-  const [spendable, setSpendable] = useState<number>(0);
+  const [chainHeight, setChainHeight] = useState<number>(0);
+  const [msUntilNextBlock, setMsUntilNextBlock] = useState<number>(0);
 
-  const [status, setStatus] = useState<string>("");
+  const [confirmedBalance, setConfirmedBalance] = useState<number>(0);
+  const [spendableBalance, setSpendableBalance] = useState<number>(0);
 
   const [to, setTo] = useState<string>("");
-  const [amount, setAmount] = useState<string>("");
+  const [amountStr, setAmountStr] = useState<string>("");
 
-  const [showTxs, setShowTxs] = useState<boolean>(true);
   const [txs, setTxs] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState<boolean>(true);
 
-  const [chainHeight, setChainHeight] = useState<number>(0);
-  const [nextBlockSec, setNextBlockSec] = useState<number>(0);
+  const [message, setMessage] = useState<string>("");
+  const [cooldownText, setCooldownText] = useState<string>("");
 
-  const [cooldownEndMs, setCooldownEndMs] = useState<number>(() => {
-    const saved = storageGet(STORAGE_COOLDOWN_END);
-    return saved ? Number(saved) : 0;
-  });
+  const [mintCooldown, setMintCooldown] = useState<number>(0);
+  const [mintBusy, setMintBusy] = useState<boolean>(false);
 
-  const msLeft = Math.max(0, cooldownEndMs - Date.now());
-  const isCoolingDown = msLeft > 0;
-  const secondsLeft = useMemo(() => Math.ceil(msLeft / 1000), [msLeft]);
+  const [sendBusy, setSendBusy] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (!isCoolingDown) return;
-    const id = setInterval(() => setCooldownEndMs((x) => x), 250);
-    return () => clearInterval(id);
-  }, [isCoolingDown]);
+  // confirmation modal
+  const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
+  const [quote, setQuote] = useState<any>(null);
 
-  useEffect(() => {
-    if (!isCoolingDown && cooldownEndMs !== 0) {
-      setCooldownEndMs(0);
-      storageRemove(STORAGE_COOLDOWN_END);
-    }
-  }, [isCoolingDown, cooldownEndMs]);
+  const amount = useMemo(() => Number(amountStr || 0), [amountStr]);
 
-  function startCooldown(seconds: number) {
-    const end = Date.now() + seconds * 1000;
-    setCooldownEndMs(end);
-    storageSet(STORAGE_COOLDOWN_END, String(end));
+  async function refreshStatus() {
+    const s = await getChainStatus();
+    setChainHeight(Number(s.chainHeight || 0));
+    setMsUntilNextBlock(Number(s.msUntilNextBlock || 0));
+    return s;
   }
 
-  async function loadChainStatus() {
+  async function loadWallet() {
+    const w = await ensureWalletId();
+    setWallet(w);
+    return w;
+  }
+
+  async function loadBalance() {
+    if (!wallet) return;
     try {
-      const s: any = await getChainStatus();
-      setChainHeight(Number(s?.chainHeight || 0));
-      setNextBlockSec(Math.ceil(Number(s?.msUntilNextBlock || 0) / 1000));
-    } catch {}
+      const b = await getBalance(wallet);
+      setConfirmedBalance(Number(b.balance || 0));
+      setSpendableBalance(Number(b.spendableBalance || 0));
+    } catch (e: any) {
+      console.error("Balance fetch failed:", e?.message || e);
+    }
   }
 
-  async function loadBalance(w: string) {
-    const data: any = await getBalance(w);
-    const confirmed = Number(data?.balance || 0);
-    setBalance(confirmed);
-    setPendingDelta(Number(data?.pendingDelta || 0));
-    setSpendable(
-      typeof data?.spendableBalance === "number"
-        ? Number(data.spendableBalance)
-        : confirmed
-    );
+  async function loadTxs() {
+    if (!wallet) return;
+    try {
+      const list = await getTransactions(wallet);
+      setTxs(list || []);
+    } catch (e: any) {
+      console.error("Tx fetch failed:", e?.message || e);
+    }
   }
 
-  async function loadTxs(w: string) {
-    const list: any = await getTransactions(w);
-    setTxs(Array.isArray(list) ? list : []);
-  }
-
-  function hasPending(list: any[]) {
-    return list.some((t) => t?.status === "pending");
+  async function bootstrap() {
+    await loadWallet();
+    await refreshStatus();
   }
 
   useEffect(() => {
-    (async () => {
-      try {
-        setStatus("");
-        const w = await ensureWalletId();
-        setWallet(w);
-        await loadChainStatus();
-        await loadBalance(w);
-        if (showTxs) await loadTxs(w);
-      } catch (e: any) {
-        setStatus(e?.message || "Startup failed");
-      }
-    })();
-
-    const id = setInterval(() => loadChainStatus(), 1000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    bootstrap();
   }, []);
 
   useEffect(() => {
-    if (!showTxs) return;
-    if (!hasPending(txs)) return;
     if (!wallet) return;
+    loadBalance();
+    loadTxs();
+  }, [wallet]);
 
-    const id = setInterval(async () => {
-      await loadTxs(wallet);
-      await loadBalance(wallet);
+  // tick down mint cooldown
+  useEffect(() => {
+    if (mintCooldown <= 0) return;
+    const t = setInterval(() => setMintCooldown((v) => Math.max(0, v - 1)), 1000);
+    return () => clearInterval(t);
+  }, [mintCooldown]);
+
+  useEffect(() => {
+    if (mintCooldown > 0) setCooldownText(`Cooldown active (${mintCooldown}s)`);
+    else setCooldownText("");
+  }, [mintCooldown]);
+
+  // status poll (chain height + next block)
+  useEffect(() => {
+    const i = setInterval(async () => {
+      try {
+        await refreshStatus();
+      } catch {}
     }, 1000);
-
-    return () => clearInterval(id);
-  }, [showTxs, txs, wallet]);
+    return () => clearInterval(i);
+  }, []);
 
   async function handleMint() {
-    if (!wallet) return;
-    if (isCoolingDown) {
-      setStatus(`Cooldown active: ${secondsLeft}s left`);
+    if (mintBusy || mintCooldown > 0) return;
+    setMessage("");
+    setMintBusy(true);
+    try {
+      const res = await mint();
+      setMessage("Mint submitted (pending until next block) ✅");
+      // optimistic refresh
+      await loadBalance();
+      await loadTxs();
+      // server returns cooldownSeconds sometimes; if not, keep local at 60
+      const cd = Number(res?.cooldownSeconds || 60);
+      setMintCooldown(cd);
+    } catch (e: any) {
+      if (e?.status === 429) {
+        const cd = Number(e.cooldownSeconds || 60);
+        setMintCooldown(cd);
+        setMessage(`Cooldown active (${cd}s)`);
+      } else {
+        setMessage(`Mint failed: ${e?.message || "Unknown error"}`);
+      }
+    } finally {
+      setMintBusy(false);
+    }
+  }
+
+  async function openSendConfirm() {
+    setMessage("");
+    if (!to || to.length < 8) {
+      setMessage("Enter a recipient address.");
+      return;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setMessage("Enter a valid amount.");
       return;
     }
     try {
-      setStatus("");
-      const data: any = await mint();
-      startCooldown(Number(data?.cooldownSeconds || 60));
-
-      await loadTxs(wallet);
-      await loadBalance(wallet);
-
-      setStatus("Mint submitted (pending until next block) ✅");
+      const q = await quoteSend(to, amount);
+      setQuote(q);
+      setConfirmOpen(true);
     } catch (e: any) {
-      if (e?.status === 429) {
-        const secs = Number(e?.cooldownSeconds || 60);
-        startCooldown(secs);
-        setStatus(`Cooldown active: ${secs}s left`);
-        return;
-      }
-      setStatus(e?.message || "Mint failed");
+      setMessage(`Quote failed: ${e?.message || "Unknown error"}`);
     }
   }
 
-  async function handleSend() {
-    if (!wallet) return;
-
-    const t = to.trim();
-    const n = Number(amount);
-    if (!t) return setStatus("Enter a recipient address (HNY_...).");
-    if (!Number.isFinite(n) || n <= 0) return setStatus("Enter a valid amount.");
-
+  async function handleSendSignedSubmit() {
+    if (!quote) return;
+    setSendBusy(true);
+    setMessage("");
     try {
-      setStatus("");
-      await send(t, n);
-      setAmount("");
+      const res = await send({
+        to,
+        amount,
+        gasFee: quote.gasFee,
+        serviceFee: quote.serviceFee,
+      });
 
-      await loadTxs(wallet);
-      await loadBalance(wallet);
+      setConfirmOpen(false);
 
-      setStatus("Send submitted (pending until next block) ✅");
+      if (res?.isReplacement) {
+        setMessage("Send replaced a pending tx with higher fee (RBF) ✅");
+      } else {
+        setMessage("Send submitted (pending until next block) ✅");
+      }
+
+      await loadBalance();
+      await loadTxs();
     } catch (e: any) {
-      setStatus(e?.message || "Send failed");
+      setMessage(`Send failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setSendBusy(false);
     }
   }
 
-  async function handleRefresh() {
-    if (!wallet) return;
-    await loadBalance(wallet);
-    if (showTxs) await loadTxs(wallet);
-  }
-
-  async function toggleTxs() {
-    const next = !showTxs;
-    setShowTxs(next);
-    if (next && wallet) await loadTxs(wallet);
-  }
-
-  const pendingText =
-    pendingDelta === 0
-      ? ""
-      : pendingDelta > 0
-      ? `Pending: +${pendingDelta} HNY`
-      : `Pending: ${pendingDelta} HNY`;
+  const mintLabel = useMemo(() => {
+    if (mintCooldown > 0) return `Mint (${mintCooldown}s)`;
+    return mintBusy ? "Minting..." : "Mint";
+  }, [mintCooldown, mintBusy]);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>HIVE Wallet</Text>
-      <Text style={styles.chainText}>Chain height: {chainHeight} • Next block: ~{nextBlockSec}s</Text>
+    <View style={{ flex: 1, backgroundColor: "#000" }}>
+      <ScrollView contentContainerStyle={{ padding: 24, gap: 14, maxWidth: 950, alignSelf: "center", width: "100%" }}>
+        <Text style={{ color: "#fff", fontSize: 34, textAlign: "center", fontWeight: "800", marginTop: 6 }}>
+          HIVE Wallet
+        </Text>
 
-      <Text style={styles.walletText} numberOfLines={1}>
-        Wallet: {wallet || "loading..."}
-      </Text>
+        <Text style={{ color: "#aaa", textAlign: "center" }}>
+          Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
+        </Text>
 
-      <Text style={styles.balance}>Confirmed: {balance} HNY</Text>
-      {!!pendingText && <Text style={styles.pending}>{pendingText}</Text>}
-      <Text style={styles.spendable}>Spendable: {spendable} HNY</Text>
+        {wallet ? (
+          <Text style={{ color: "#aaa", textAlign: "center" }}>
+            Wallet: {wallet}
+          </Text>
+        ) : null}
 
-      {!!status && <Text style={styles.status}>{status}</Text>}
+        <Text style={{ color: "#fff", textAlign: "center", fontSize: 20, marginTop: 6 }}>
+          Confirmed: {Math.floor(confirmedBalance)} HNY
+        </Text>
+        <Text style={{ color: "#aaa", textAlign: "center" }}>
+          Spendable: {Math.floor(spendableBalance)} HNY
+        </Text>
 
-      <TouchableOpacity
-        style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]}
-        onPress={handleMint}
-        disabled={isCoolingDown || !wallet}
-      >
-        <Text style={styles.buttonText}>{isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}</Text>
-      </TouchableOpacity>
+        {message ? (
+          <Text style={{ color: message.includes("failed") ? "#ff6b6b" : "#9dff9d", textAlign: "center" }}>
+            {message}
+          </Text>
+        ) : null}
 
-      <View style={styles.row}>
-        <TouchableOpacity style={styles.smallButton} onPress={handleRefresh} disabled={!wallet}>
-          <Text style={styles.smallButtonText}>Get Balance</Text>
-        </TouchableOpacity>
+        {cooldownText ? (
+          <Text style={{ color: "#ff6b6b", textAlign: "center" }}>
+            {cooldownText}
+          </Text>
+        ) : null}
 
-        <TouchableOpacity style={styles.smallButton} onPress={toggleTxs} disabled={!wallet}>
-          <Text style={styles.smallButtonText}>{showTxs ? "Hide History" : "Transaction History"}</Text>
-        </TouchableOpacity>
-      </View>
+        <Pressable
+          onPress={handleMint}
+          disabled={mintBusy || mintCooldown > 0}
+          style={{
+            backgroundColor: "#caa83c",
+            opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
+            padding: 18,
+            borderRadius: 10,
+            alignItems: "center",
+            marginTop: 10,
+          }}
+        >
+          <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
+        </Pressable>
 
-      <Text style={styles.sectionTitle}>Send</Text>
-      <TextInput
-        style={styles.input}
-        value={to}
-        onChangeText={setTo}
-        placeholder="Recipient address (HNY_...)"
-        placeholderTextColor="#777"
-        autoCapitalize="none"
-      />
-      <TextInput
-        style={styles.input}
-        value={amount}
-        onChangeText={setAmount}
-        placeholder="Amount"
-        placeholderTextColor="#777"
-        keyboardType="numeric"
-      />
+        <View style={{ flexDirection: "row", gap: 10 }}>
+          <Pressable
+            onPress={loadBalance}
+            style={{ flex: 1, borderWidth: 1, borderColor: "#222", padding: 14, borderRadius: 10, alignItems: "center" }}
+          >
+            <Text style={{ color: "#fff", fontWeight: "700" }}>Get Balance</Text>
+          </Pressable>
 
-      <TouchableOpacity style={styles.button} onPress={handleSend} disabled={!wallet}>
-        <Text style={styles.buttonText}>Send</Text>
-      </TouchableOpacity>
-
-      {showTxs && (
-        <View style={styles.txsBox}>
-          {txs.length === 0 ? (
-            <Text style={styles.txEmpty}>No transactions yet.</Text>
-          ) : (
-            <FlatList
-              data={txs}
-              keyExtractor={(item) => item.id || item.hash || String(item.timestamp)}
-              renderItem={({ item }) => (
-                <View style={styles.txRow}>
-                  <Text style={styles.txMain}>
-                    {String(item.type).toUpperCase()} • {item.amount} • {item.status}
-                    {item.status === "confirmed" && item.blockHeight != null ? ` • block ${item.blockHeight}` : ""}
-                  </Text>
-
-                  {item.status === "failed" && item.failReason ? (
-                    <Text style={styles.txFail}>Reason: {String(item.failReason)}</Text>
-                  ) : null}
-
-                  <Text style={styles.txSub}>Nonce: {item.nonce}</Text>
-                  <Text style={styles.txSub}>From: {item.from || "—"}</Text>
-                  <Text style={styles.txSub}>To: {item.to}</Text>
-                </View>
-              )}
-            />
-          )}
+          <Pressable
+            onPress={() => setShowHistory((v) => !v)}
+            style={{ flex: 1, borderWidth: 1, borderColor: "#222", padding: 14, borderRadius: 10, alignItems: "center" }}
+          >
+            <Text style={{ color: "#fff", fontWeight: "700" }}>{showHistory ? "Hide History" : "Transaction History"}</Text>
+          </Pressable>
         </View>
-      )}
+
+        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 18, marginTop: 10 }}>
+          Send
+        </Text>
+
+        <TextInput
+          value={to}
+          onChangeText={setTo}
+          placeholder="Recipient address (HNY_...)"
+          placeholderTextColor="#666"
+          style={{
+            backgroundColor: "#111",
+            borderRadius: 10,
+            padding: 14,
+            color: "#fff",
+            borderWidth: 1,
+            borderColor: "#222",
+          }}
+        />
+
+        <TextInput
+          value={amountStr}
+          onChangeText={setAmountStr}
+          placeholder="Amount"
+          placeholderTextColor="#666"
+          keyboardType={Platform.OS === "web" ? "text" : "numeric"}
+          style={{
+            backgroundColor: "#111",
+            borderRadius: 10,
+            padding: 14,
+            color: "#fff",
+            borderWidth: 1,
+            borderColor: "#222",
+          }}
+        />
+
+        <Pressable
+          onPress={openSendConfirm}
+          disabled={sendBusy}
+          style={{
+            backgroundColor: "#caa83c",
+            opacity: sendBusy ? 0.6 : 1,
+            padding: 18,
+            borderRadius: 10,
+            alignItems: "center",
+          }}
+        >
+          <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Sending..." : "Send"}</Text>
+        </Pressable>
+
+        {showHistory ? (
+          <View style={{ marginTop: 6, borderWidth: 1, borderColor: "#222", borderRadius: 10, overflow: "hidden" }}>
+            {txs.length === 0 ? (
+              <Text style={{ color: "#aaa", padding: 14 }}>No transactions yet.</Text>
+            ) : (
+              txs.map((t, idx) => {
+                const title =
+                  `${String(t.type).toUpperCase()} · ${t.amount}` +
+                  (t.totalFee != null ? ` · fee ${fmt8(t.totalFee)}` : "") +
+                  ` · ${t.status}` +
+                  (t.blockHeight ? ` · block ${t.blockHeight}` : "");
+
+                return (
+                  <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#222" }}>
+                    <Text style={{ color: "#fff", fontWeight: "800" }}>{title}</Text>
+                    {t.failReason ? <Text style={{ color: "#ff6b6b" }}>Reason: {t.failReason}</Text> : null}
+                    {t.nonce != null ? <Text style={{ color: "#aaa" }}>Nonce: {t.nonce}</Text> : null}
+                    <Text style={{ color: "#aaa" }}>From: {t.from || "—"}</Text>
+                    <Text style={{ color: "#aaa" }}>To: {t.to}</Text>
+                  </View>
+                );
+              })
+            )}
+          </View>
+        ) : null}
+      </ScrollView>
+
+      {/* Confirm modal */}
+      <Modal transparent visible={confirmOpen} animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", padding: 20 }}>
+          <View style={{ backgroundColor: "#0b0b0b", borderRadius: 14, borderWidth: 1, borderColor: "#222", padding: 16 }}>
+            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
+              Confirm Transaction
+            </Text>
+
+            <Text style={{ color: "#aaa" }}>To: {to}</Text>
+            <Text style={{ color: "#aaa" }}>Amount: {amount}</Text>
+
+            {quote ? (
+              <>
+                <View style={{ height: 10 }} />
+                <Text style={{ color: "#fff", fontWeight: "800" }}>Fees</Text>
+                <Text style={{ color: "#aaa" }}>Gas fee: {fmt8(quote.gasFee)}</Text>
+                <Text style={{ color: "#aaa" }}>Service fee (0.005%): {fmt8(quote.serviceFee)}</Text>
+                <Text style={{ color: "#aaa" }}>Total fee: {fmt8(quote.totalFee)}</Text>
+                <Text style={{ color: "#fff", marginTop: 6, fontWeight: "900" }}>
+                  Total cost: {fmt8(quote.totalCost)} HNY
+                </Text>
+              </>
+            ) : null}
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+              <Pressable
+                onPress={() => setConfirmOpen(false)}
+                disabled={sendBusy}
+                style={{ flex: 1, padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#333", alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800" }}>Cancel</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={handleSendSignedSubmit}
+                disabled={sendBusy}
+                style={{ flex: 1, padding: 14, borderRadius: 10, backgroundColor: "#caa83c", alignItems: "center", opacity: sendBusy ? 0.6 : 1 }}
+              >
+                <Text style={{ color: "#000", fontWeight: "900" }}>{sendBusy ? "Submitting..." : "Sign & Submit"}</Text>
+              </Pressable>
+            </View>
+
+            <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
+              Your device signs this transaction locally using your stored private key.
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#000", padding: 24, justifyContent: "center" },
-  title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 8 },
-  chainText: { color: "#bbb", textAlign: "center", marginBottom: 10 },
-  walletText: { color: "#bbb", textAlign: "center", marginBottom: 6 },
-
-  balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 4 },
-  pending: { color: "#ffd166", textAlign: "center", marginBottom: 2 },
-  spendable: { color: "#bbb", textAlign: "center", marginBottom: 10 },
-
-  status: { color: "#ff6b6b", textAlign: "center", marginBottom: 10 },
-
-  button: { backgroundColor: "#d1a93a", padding: 14, borderRadius: 12, alignItems: "center", marginTop: 10 },
-  buttonDisabled: { opacity: 0.6 },
-  buttonText: { color: "#000", fontWeight: "800", fontSize: 16 },
-
-  row: { flexDirection: "row", gap: 10, marginTop: 10 },
-  smallButton: { flex: 1, borderWidth: 1, borderColor: "#444", padding: 12, borderRadius: 12, backgroundColor: "#111" },
-  smallButtonText: { color: "#fff", textAlign: "center", fontWeight: "700", fontSize: 12 },
-
-  sectionTitle: { color: "#fff", marginTop: 18, marginBottom: 8, fontWeight: "700" },
-  input: { backgroundColor: "#111", borderWidth: 1, borderColor: "#333", borderRadius: 10, padding: 12, color: "#fff", marginBottom: 10 },
-
-  txsBox: { marginTop: 14, borderWidth: 1, borderColor: "#333", borderRadius: 12, padding: 12, backgroundColor: "#0b0b0b", maxHeight: 300 },
-  txEmpty: { color: "#bbb" },
-  txRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#222" },
-  txMain: { color: "#fff", fontWeight: "700" },
-  txFail: { color: "#ff6b6b", marginTop: 4, fontSize: 12, fontWeight: "700" },
-  txSub: { color: "#bbb", marginTop: 2, fontSize: 12 },
-});

@@ -13,12 +13,14 @@ export type Transaction = {
   from: string | null;
   to: string;
   amount: number;
+  nonce?: number;
   gasFee?: number;
+  serviceFee?: number;
+  totalFee?: number;
   status?: "pending" | "confirmed" | "failed";
   failReason?: string | null;
   blockHeight?: number | null;
   blockHash?: string | null;
-  nonce?: number;
   expiresAtMs?: number | null;
   timestamp: number;
 };
@@ -31,14 +33,12 @@ export type ChainStatus = {
   msUntilNextBlock: number;
   mempoolSize: number;
   latestBlock: any;
-  minGasFee?: number;
-  txTtlMs?: number;
+  minGasFee: number;
+  txTtlMs: number;
+  serviceFeeRate: number;
 };
 
 const API_BASE = "http://192.168.0.11:3000";
-
-const DEFAULT_GAS_FEE = 0.000001;
-const DEFAULT_TX_TTL_MS = 60 * 1000;
 
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
@@ -50,24 +50,14 @@ function isWeb() {
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
-    try {
-      return window.localStorage.getItem(key);
-    } catch {
-      return null;
-    }
+    try { return window.localStorage.getItem(key); } catch { return null; }
   }
-  try {
-    return await SecureStore.getItemAsync(key);
-  } catch {
-    return null;
-  }
+  try { return await SecureStore.getItemAsync(key); } catch { return null; }
 }
 
 async function kvSet(key: string, value: string): Promise<void> {
   if (isWeb()) {
-    try {
-      window.localStorage.setItem(key, value);
-    } catch {}
+    try { window.localStorage.setItem(key, value); } catch {}
     return;
   }
   try {
@@ -89,6 +79,14 @@ async function randomBytes(count: number): Promise<Uint8Array> {
   return Uint8Array.from(bytes);
 }
 
+function fmt8(n: number) {
+  return Number(n).toFixed(8);
+}
+
+/**
+ * MUST match server:
+ * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp
+ */
 function canonicalSignedMessage(params: {
   chainId: string;
   type: TxType;
@@ -97,6 +95,7 @@ function canonicalSignedMessage(params: {
   amount: number;
   nonce: number;
   gasFee: number;
+  serviceFee: number;
   expiresAtMs: number;
   timestamp: number;
 }) {
@@ -105,20 +104,17 @@ function canonicalSignedMessage(params: {
     String(params.type),
     String(params.from ?? ""),
     String(params.to ?? ""),
-    String(params.amount),
+    fmt8(params.amount),
     String(params.nonce),
-    String(params.gasFee),
+    fmt8(params.gasFee),
+    fmt8(params.serviceFee),
     String(params.expiresAtMs),
     String(params.timestamp),
   ].join("|");
 }
 
 async function readJsonSafe(res: Response) {
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
+  try { return await res.json(); } catch { return null; }
 }
 
 function makeError(message: string, status?: number, data?: any) {
@@ -198,12 +194,15 @@ export async function ensureWalletId(): Promise<string> {
 export async function getChainStatus(): Promise<ChainStatus> {
   return await getJson("/status");
 }
+
 export async function getAccount(wallet: string) {
   return await getJson(`/account/${encodeURIComponent(wallet)}`);
 }
+
 export async function getBalance(wallet: string) {
   return await getJson(`/balance/${encodeURIComponent(wallet)}`);
 }
+
 export async function getTransactions(wallet: string): Promise<Transaction[]> {
   return await getJson(`/transactions/${encodeURIComponent(wallet)}`);
 }
@@ -215,106 +214,112 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
-/**
- * ✅ retry wrapper for nonce mismatches (409)
- */
-async function withNonceRetry<T>(fn: () => Promise<T>, refreshNonce: () => Promise<void>): Promise<T> {
-  try {
-    return await fn();
-  } catch (e: any) {
-    if (e?.status === 409) {
-      await refreshNonce(); // refetch account/nonce
-      return await fn();    // retry once
-    }
-    throw e;
-  }
+export function computeServiceFee(amount: number, rate: number) {
+  return Number((Number(amount) * Number(rate)).toFixed(8));
+}
+
+export async function quoteSend(to: string, amount: number) {
+  const status = await getChainStatus();
+  const gasFee = Number(status.minGasFee);
+  const serviceFee = computeServiceFee(amount, status.serviceFeeRate);
+  const totalFee = Number((gasFee + serviceFee).toFixed(8));
+  const totalCost = Number((amount + totalFee).toFixed(8));
+  return { chainId: status.chainId, gasFee, serviceFee, totalFee, totalCost, status };
 }
 
 export async function mint(): Promise<any> {
   const wallet = await ensureWalletId();
   const status = await getChainStatus();
-  const chainId = String(status?.chainId || "");
+  const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
+  const acct = await getAccount(wallet);
+  if (!acct.registered) await registerWallet();
+
+  const acct2 = await getAccount(wallet);
+  const nonce = acct2.nonce;
+
+  const timestamp = Date.now();
+  const amount = 100;
+
+  const gasFee = Number(status.minGasFee);
+  const serviceFee = 0; // mint has no service fee (server enforces)
+  const expiresAtMs = timestamp + Number(status.txTtlMs);
+
   const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "mint",
+    from: "",
+    to: wallet,
+    amount,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+  });
 
-  const refresh = async () => {
-    const acct = await getAccount(wallet);
-    if (!acct.registered) await registerWallet();
-  };
+  const signature = signMessage(msg, secretKeyB64);
 
-  return await withNonceRetry(async () => {
-    const acct = await getAccount(wallet);
-    if (!acct.registered) await registerWallet();
-
-    const acct2 = await getAccount(wallet);
-    const nonce = acct2.nonce;
-
-    const timestamp = Date.now();
-    const amount = 100;
-
-    const gasFee = DEFAULT_GAS_FEE;
-    const expiresAtMs = timestamp + (status.txTtlMs ?? DEFAULT_TX_TTL_MS);
-
-    const msg = canonicalSignedMessage({
-      chainId,
-      type: "mint",
-      from: "",
-      to: wallet,
-      amount,
-      nonce,
-      gasFee,
-      expiresAtMs,
-      timestamp,
-    });
-
-    const signature = signMessage(msg, secretKeyB64);
-
-    return await postJson("/mint", { chainId, wallet, nonce, timestamp, signature, gasFee, expiresAtMs });
-  }, refresh);
+  return await postJson("/mint", { chainId, wallet, nonce, timestamp, signature, gasFee, expiresAtMs });
 }
 
-export async function send(to: string, amount: number): Promise<any> {
+/**
+ * NOTE: RBF happens on server when:
+ * - nonce == expectedNonce: new tx
+ * - nonce == expectedNonce-1 AND pending exists: replacement if higher fee
+ */
+export async function send(params: { to: string; amount: number; gasFee: number; serviceFee: number; nonceOverride?: number }): Promise<any> {
   const from = await ensureWalletId();
+
   const status = await getChainStatus();
-  const chainId = String(status?.chainId || "");
+  const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
+  const acct = await getAccount(from);
+  if (!acct.registered) await registerWallet();
+
+  const acct2 = await getAccount(from);
+  const expectedNonce = acct2.nonce;
+
+  const timestamp = Date.now();
+  const amt = Number(params.amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
+
+  const gasFee = Number(params.gasFee);
+  const serviceFee = Number(params.serviceFee);
+
+  const expiresAtMs = timestamp + Number(status.txTtlMs);
+
+  const nonce = Number.isInteger(params.nonceOverride) ? Number(params.nonceOverride) : expectedNonce;
+
   const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "send",
+    from,
+    to: params.to,
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+  });
 
-  const refresh = async () => {
-    const acct = await getAccount(from);
-    if (!acct.registered) await registerWallet();
-  };
+  const signature = signMessage(msg, secretKeyB64);
 
-  return await withNonceRetry(async () => {
-    const acct = await getAccount(from);
-    if (!acct.registered) await registerWallet();
-
-    const acct2 = await getAccount(from);
-    const nonce = acct2.nonce;
-
-    const timestamp = Date.now();
-    const amt = Number(amount);
-    if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
-
-    const gasFee = status.minGasFee ?? DEFAULT_GAS_FEE;
-    const expiresAtMs = timestamp + (status.txTtlMs ?? DEFAULT_TX_TTL_MS);
-
-    const msg = canonicalSignedMessage({
-      chainId,
-      type: "send",
-      from,
-      to,
-      amount: amt,
-      nonce,
-      gasFee,
-      expiresAtMs,
-      timestamp,
-    });
-
-    const signature = signMessage(msg, secretKeyB64);
-
-    return await postJson("/send", { chainId, from, to, amount: amt, nonce, timestamp, signature, gasFee, expiresAtMs });
-  }, refresh);
+  return await postJson("/send", {
+    chainId,
+    from,
+    to: params.to,
+    amount: amt,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+  });
 }
