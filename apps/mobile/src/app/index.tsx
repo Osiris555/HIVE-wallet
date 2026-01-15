@@ -726,8 +726,8 @@ export default function Index() {
                 If you see “nonce mismatch”, the tx is already confirmed or no longer replaceable.
               </Text>
 
-              <View style={{ height: 12 }} />
-              <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+              <View style={{ height: 12 }} />.     
+<View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
   {[1.25, 1.5, 2.0].map((m) => (
     <Pressable
       key={String(m)}
