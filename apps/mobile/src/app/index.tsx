@@ -727,6 +727,22 @@ export default function Index() {
               </Text>
 
               <View style={{ height: 12 }} />
-              <View style={{ flexDirection: "row", gap: 10 }}>
-                {[1.25, 1.5, 2.0].map((m) => (
-                  <View key={String(m)} style={{
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+  {[1.25, 1.5, 2.0].map((m) => (
+    <Pressable
+      key={String(m)}
+      onPress={() => setRbfMultiplier(m)}
+      style={{
+        flex: 1,
+        padding: 12,
+        borderRadius: 12,
+        alignItems: "center",
+        borderWidth: 1,
+        borderColor: rbfMultiplier === m ? T.gold : "rgba(255,255,255,0.14)",
+        backgroundColor: rbfMultiplier === m ? "rgba(202,168,60,0.12)" : "transparent",
+      }}
+    >
+      <Text style={{ color: T.text, fontWeight: "900" }}>{m}×</Text>
+    </Pressable>
+  ))}
+</View>
