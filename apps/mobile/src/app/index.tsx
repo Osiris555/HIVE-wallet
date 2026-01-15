@@ -9,11 +9,14 @@ import {
   quoteSend,
   mint,
   send,
+  computeServiceFee,
 } from "../chain/transactions";
 
 function fmt8(n: number) {
   return Number(n).toFixed(8);
 }
+
+const ONE_SAT = 0.00000001;
 
 export default function Index() {
   const [wallet, setWallet] = useState<string>("");
@@ -121,10 +124,8 @@ export default function Index() {
     try {
       const res = await mint();
       setMessage("Mint submitted (pending until next block) ✅");
-      // optimistic refresh
       await loadBalance();
       await loadTxs();
-      // server returns cooldownSeconds sometimes; if not, keep local at 60
       const cd = Number(res?.cooldownSeconds || 60);
       setMintCooldown(cd);
     } catch (e: any) {
@@ -183,6 +184,84 @@ export default function Index() {
       await loadTxs();
     } catch (e: any) {
       setMessage(`Send failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setSendBusy(false);
+    }
+  }
+
+  /**
+   * ✅ Speed Up (RBF)
+   * Re-submit the same send (same nonce) with a higher fee.
+   * Server will accept if:
+   *   nonce == expectedNonce - 1 AND pending exists AND newTotalFee > oldTotalFee
+   */
+  async function handleSpeedUpRbf(tx: any) {
+    if (sendBusy) return;
+    setSendBusy(true);
+    setMessage("");
+
+    try {
+      if (!tx || tx.type !== "send" || tx.status !== "pending") {
+        setMessage("RBF only works for pending SEND transactions.");
+        return;
+      }
+      if (!wallet || tx.from !== wallet) {
+        setMessage("You can only speed up your own outgoing pending tx.");
+        return;
+      }
+      if (tx.nonce == null) {
+        setMessage("Missing nonce on pending tx (cannot RBF).");
+        return;
+      }
+
+      const status = await getChainStatus();
+      const minGas = Number(status.minGasFee || 0);
+      const rate = Number(status.serviceFeeRate || 0);
+
+      const amt = Number(tx.amount);
+      const toAddr = String(tx.to || "");
+      const nonceOverride = Number(tx.nonce);
+
+      // service fee must remain formula-based (server enforces)
+      const serviceFee = computeServiceFee(amt, rate);
+
+      // old fee info (as shown by server)
+      const oldGas = Number(tx.gasFee || 0);
+      const oldSvc = Number(tx.serviceFee || 0);
+      const oldTotalFee = Number(((oldGas || 0) + (oldSvc || 0)).toFixed(8));
+
+      // bump gas: double it, but never below minGas
+      let newGas = Math.max(minGas, Number((oldGas > 0 ? oldGas * 2 : minGas).toFixed(8)));
+      let newTotalFee = Number((newGas + serviceFee).toFixed(8));
+
+      // ensure strictly higher than old (server requires >)
+      if (newTotalFee <= oldTotalFee) {
+        // add 1 satoshi increments until it clears
+        while (newTotalFee <= oldTotalFee) {
+          newGas = Number((newGas + ONE_SAT).toFixed(8));
+          newTotalFee = Number((newGas + serviceFee).toFixed(8));
+        }
+      }
+
+      const res = await send({
+        to: toAddr,
+        amount: amt,
+        gasFee: newGas,
+        serviceFee,
+        nonceOverride, // ✅ same nonce -> RBF replacement
+      });
+
+      if (res?.isReplacement) {
+        setMessage(`Speed up submitted (RBF) ✅  New fee: ${fmt8(newTotalFee)}`);
+      } else {
+        // can happen if original confirmed already (or no pending found)
+        setMessage("Speed up submitted, but it was not treated as a replacement (already confirmed?).");
+      }
+
+      await loadBalance();
+      await loadTxs();
+    } catch (e: any) {
+      setMessage(`Speed up failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
@@ -306,7 +385,7 @@ export default function Index() {
             alignItems: "center",
           }}
         >
-          <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Sending..." : "Send"}</Text>
+          <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
         </Pressable>
 
         {showHistory ? (
@@ -321,13 +400,42 @@ export default function Index() {
                   ` · ${t.status}` +
                   (t.blockHeight ? ` · block ${t.blockHeight}` : "");
 
+                const showRbf =
+                  t.type === "send" &&
+                  t.status === "pending" &&
+                  wallet &&
+                  t.from === wallet &&
+                  t.nonce != null;
+
                 return (
                   <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#222" }}>
                     <Text style={{ color: "#fff", fontWeight: "800" }}>{title}</Text>
+
                     {t.failReason ? <Text style={{ color: "#ff6b6b" }}>Reason: {t.failReason}</Text> : null}
                     {t.nonce != null ? <Text style={{ color: "#aaa" }}>Nonce: {t.nonce}</Text> : null}
                     <Text style={{ color: "#aaa" }}>From: {t.from || "—"}</Text>
                     <Text style={{ color: "#aaa" }}>To: {t.to}</Text>
+
+                    {showRbf ? (
+                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                        <Pressable
+                          onPress={() => handleSpeedUpRbf(t)}
+                          disabled={sendBusy}
+                          style={{
+                            paddingVertical: 10,
+                            paddingHorizontal: 14,
+                            borderRadius: 10,
+                            backgroundColor: "#2b6fff",
+                            opacity: sendBusy ? 0.6 : 1,
+                            alignSelf: "flex-start",
+                          }}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>
+                            ⚡ Speed Up (RBF)
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
                   </View>
                 );
               })
