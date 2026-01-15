@@ -17,6 +17,7 @@ function fmt8(n: number) {
 }
 
 const ONE_SAT = 0.00000001;
+const FEE_VAULT = "HNY_FEE_VAULT";
 
 export default function Index() {
   const [wallet, setWallet] = useState<string>("");
@@ -25,6 +26,9 @@ export default function Index() {
 
   const [confirmedBalance, setConfirmedBalance] = useState<number>(0);
   const [spendableBalance, setSpendableBalance] = useState<number>(0);
+
+  // Fee vault display
+  const [feeVaultBalance, setFeeVaultBalance] = useState<number | null>(null);
 
   const [to, setTo] = useState<string>("");
   const [amountStr, setAmountStr] = useState<string>("");
@@ -51,6 +55,12 @@ export default function Index() {
 
   const amount = useMemo(() => Number(amountStr || 0), [amountStr]);
 
+  function isNonceMismatchLike(e: any) {
+    const msg = String(e?.message || e || "").toLowerCase();
+    // cover lots of backend wording variants
+    return msg.includes("nonce mismatch") || msg.includes("nonce") || msg.includes("already confirmed") || msg.includes("replaced");
+  }
+
   async function refreshStatus() {
     const s = await getChainStatus();
     setChainHeight(Number(s.chainHeight || 0));
@@ -64,6 +74,16 @@ export default function Index() {
     return w;
   }
 
+  async function loadFeeVaultBalance() {
+    try {
+      const b = await getBalance(FEE_VAULT);
+      setFeeVaultBalance(Number(b.balance || 0));
+    } catch (e) {
+      // Do NOT hide it; show unavailable so you know it's attempting to load.
+      setFeeVaultBalance(null);
+    }
+  }
+
   async function loadBalance() {
     if (!wallet) return;
     try {
@@ -72,6 +92,9 @@ export default function Index() {
       setSpendableBalance(Number(b.spendableBalance || 0));
     } catch (e: any) {
       console.error("Balance fetch failed:", e?.message || e);
+    } finally {
+      // Always attempt fee vault too
+      await loadFeeVaultBalance();
     }
   }
 
@@ -85,9 +108,16 @@ export default function Index() {
     }
   }
 
+  async function refreshAll() {
+    await refreshStatus();
+    await loadBalance();
+    await loadTxs();
+  }
+
   async function bootstrap() {
     await loadWallet();
     await refreshStatus();
+    await loadFeeVaultBalance();
   }
 
   useEffect(() => {
@@ -122,6 +152,16 @@ export default function Index() {
     return () => clearInterval(i);
   }, []);
 
+  // fee vault poll (so you ALWAYS see it appear)
+  useEffect(() => {
+    const i = setInterval(async () => {
+      try {
+        await loadFeeVaultBalance();
+      } catch {}
+    }, 5000);
+    return () => clearInterval(i);
+  }, []);
+
   async function handleMint() {
     if (mintBusy || mintCooldown > 0) return;
     setMessage("");
@@ -129,8 +169,7 @@ export default function Index() {
     try {
       const res = await mint();
       setMessage("Mint submitted (pending until next block) ✅");
-      await loadBalance();
-      await loadTxs();
+      await refreshAll();
       const cd = Number(res?.cooldownSeconds || 60);
       setMintCooldown(cd);
     } catch (e: any) {
@@ -179,12 +218,22 @@ export default function Index() {
 
       setConfirmOpen(false);
 
-      setMessage(res?.isReplacement ? "Send replaced a pending tx with higher fee (RBF) ✅" : "Send submitted (pending until next block) ✅");
+      setMessage(
+        res?.isReplacement
+          ? "Send replaced a pending tx with higher fee (RBF) ✅"
+          : "Send submitted (pending until next block) ✅"
+      );
 
-      await loadBalance();
-      await loadTxs();
+      await refreshAll();
     } catch (e: any) {
-      setMessage(`Send failed: ${e?.message || "Unknown error"}`);
+      // Nice handling for nonce/state races
+      if (e?.status === 409 || isNonceMismatchLike(e)) {
+        setConfirmOpen(false);
+        setMessage("Send could not be submitted — state changed (already confirmed/replaced). Refreshing… ✅");
+        await refreshAll();
+      } else {
+        setMessage(`Send failed: ${e?.message || "Unknown error"}`);
+      }
     } finally {
       setSendBusy(false);
     }
@@ -214,6 +263,7 @@ export default function Index() {
 
     let newTotalFee = Number((newGas + serviceFee).toFixed(8));
 
+    // ensure strictly higher
     if (newTotalFee <= oldTotalFee) {
       while (newTotalFee <= oldTotalFee) {
         newGas = Number((newGas + ONE_SAT).toFixed(8));
@@ -249,23 +299,55 @@ export default function Index() {
     setMessage("");
 
     try {
-      const tx = rbfTx;
+      const originalTx = rbfTx;
 
-      if (tx.type !== "send" || tx.status !== "pending") {
-        setMessage("RBF only works for pending SEND transactions.");
+      if (originalTx.type !== "send") {
+        setMessage("RBF only works for SEND transactions.");
+        setRbfOpen(false);
         return;
       }
-      if (!wallet || tx.from !== wallet) {
-        setMessage("You can only speed up your own outgoing pending tx.");
+      if (!wallet || originalTx.from !== wallet) {
+        setMessage("You can only speed up your own outgoing tx.");
+        setRbfOpen(false);
         return;
       }
-      if (tx.nonce == null) {
-        setMessage("Missing nonce on pending tx (cannot RBF).");
+      if (originalTx.nonce == null) {
+        setMessage("Missing nonce on tx (cannot RBF).");
+        setRbfOpen(false);
+        return;
+      }
+
+      // ✅ PRE-FLIGHT: refresh latest txs right before signing
+      const latestTxs = await getTransactions(wallet);
+      setTxs(latestTxs || []);
+
+      const latestMatch =
+        (latestTxs || []).find((t: any) => t.id === originalTx.id) ||
+        (latestTxs || []).find(
+          (t: any) =>
+            t.type === "send" &&
+            t.from === wallet &&
+            Number(t.nonce) === Number(originalTx.nonce)
+        );
+
+      if (!latestMatch) {
+        setRbfOpen(false);
+        setRbfTx(null);
+        setMessage("Too late to speed up — tx already confirmed/replaced. ✅");
+        await refreshAll();
+        return;
+      }
+
+      if (latestMatch.status !== "pending") {
+        setRbfOpen(false);
+        setRbfTx(null);
+        setMessage("Too late to speed up — tx is no longer pending. ✅");
+        await refreshAll();
         return;
       }
 
       const status = await getChainStatus();
-      const fees = calcRbfFees(tx, status, multiplier);
+      const fees = calcRbfFees(latestMatch, status, multiplier);
 
       let gasFee = fees.newGas;
 
@@ -282,22 +364,33 @@ export default function Index() {
       }
 
       const res = await send({
-        to: String(tx.to),
-        amount: Number(tx.amount),
+        to: String(latestMatch.to),
+        amount: Number(latestMatch.amount),
         gasFee,
         serviceFee: fees.serviceFee,
-        nonceOverride: Number(tx.nonce), // ✅ replace THIS pending nonce
+        nonceOverride: Number(latestMatch.nonce),
       });
 
       setRbfOpen(false);
       setRbfTx(null);
 
-      setMessage(res?.isReplacement ? `Speed up submitted (RBF) ✅  New fee: ${fmt8(totalFee)}` : "Speed up submitted, but not treated as replacement (already confirmed?).");
+      setMessage(
+        res?.isReplacement
+          ? `Speed up submitted (RBF) ✅  New fee: ${fmt8(totalFee)}`
+          : "Speed up submitted, but not treated as replacement (already confirmed?)."
+      );
 
-      await loadBalance();
-      await loadTxs();
+      await refreshAll();
     } catch (e: any) {
-      setMessage(`Speed up failed: ${e?.message || "Unknown error"}`);
+      // ✅ Treat nonce mismatch as a normal race condition (too late)
+      if (e?.status === 409 || isNonceMismatchLike(e)) {
+        setRbfOpen(false);
+        setRbfTx(null);
+        setMessage("Too late to speed up — nonce/state changed (already confirmed/replaced). ✅");
+        await refreshAll();
+      } else {
+        setMessage(`Speed up failed: ${e?.message || "Unknown error"}`);
+      }
     } finally {
       setSendBusy(false);
     }
@@ -321,12 +414,16 @@ export default function Index() {
 
         {wallet ? <Text style={{ color: "#aaa", textAlign: "center" }}>Wallet: {wallet}</Text> : null}
 
-        {/* ✅ show decimals so gas/service fees are visible */}
         <Text style={{ color: "#fff", textAlign: "center", fontSize: 20, marginTop: 6 }}>
           Confirmed: {fmt8(confirmedBalance)} HNY
         </Text>
         <Text style={{ color: "#aaa", textAlign: "center" }}>
           Spendable: {fmt8(spendableBalance)} HNY
+        </Text>
+
+        {/* ✅ ALWAYS show fee vault line */}
+        <Text style={{ color: "#caa83c", textAlign: "center", fontWeight: "800" }}>
+          Fee Vault: {feeVaultBalance == null ? "(unavailable)" : `${fmt8(feeVaultBalance)} HNY`}
         </Text>
 
         {message ? (
@@ -354,10 +451,10 @@ export default function Index() {
 
         <View style={{ flexDirection: "row", gap: 10 }}>
           <Pressable
-            onPress={loadBalance}
+            onPress={refreshAll}
             style={{ flex: 1, borderWidth: 1, borderColor: "#222", padding: 14, borderRadius: 10, alignItems: "center" }}
           >
-            <Text style={{ color: "#fff", fontWeight: "700" }}>Get Balance</Text>
+            <Text style={{ color: "#fff", fontWeight: "700" }}>Refresh</Text>
           </Pressable>
 
           <Pressable
@@ -401,9 +498,13 @@ export default function Index() {
               <Text style={{ color: "#aaa", padding: 14 }}>No transactions yet.</Text>
             ) : (
               txs.map((t, idx) => {
+                const gas = Number(t.gasFee || 0);
+                const svc = Number(t.serviceFee || 0);
+                const totalFee = t.totalFee != null ? Number(t.totalFee) : Number((gas + svc).toFixed(8));
+
                 const title =
                   `${String(t.type).toUpperCase()} · ${t.amount}` +
-                  (t.totalFee != null ? ` · fee ${fmt8(t.totalFee)}` : "") +
+                  ` · fee ${fmt8(totalFee)}` +
                   ` · ${t.status}` +
                   (t.blockHeight ? ` · block ${t.blockHeight}` : "");
 
@@ -412,6 +513,11 @@ export default function Index() {
                 return (
                   <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#222" }}>
                     <Text style={{ color: "#fff", fontWeight: "800" }}>{title}</Text>
+
+                    <Text style={{ color: "#777", marginTop: 6 }}>
+                      Gas: {fmt8(gas)} · Service: {fmt8(svc)} · Total: {fmt8(totalFee)}
+                    </Text>
+
                     {t.failReason ? <Text style={{ color: "#ff6b6b" }}>Reason: {t.failReason}</Text> : null}
                     {t.nonce != null ? <Text style={{ color: "#aaa" }}>Nonce: {t.nonce}</Text> : null}
                     <Text style={{ color: "#aaa" }}>From: {t.from || "—"}</Text>
