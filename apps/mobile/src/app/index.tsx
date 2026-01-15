@@ -89,6 +89,7 @@ export default function Index() {
   const [confirmedBalance, setConfirmedBalance] = useState<number>(0);
   const [spendableBalance, setSpendableBalance] = useState<number>(0);
   const [feeVaultBalance, setFeeVaultBalance] = useState<number>(0);
+  
 
   // send form
   const [to, setTo] = useState<string>("");
@@ -323,7 +324,7 @@ export default function Index() {
     const minGas = Number(status.minGasFee || 0) || ONE_SAT;
     const rate = Number(status.serviceFeeRate || 0);
 
-    const amt = mode === "cancel" ? 0 : Number(tx.amount);
+    const amt = mode === "cancel" ? ONE_SAT : Number(tx.amount);
     const oldGas = Number(tx.gasFee || 0);
     const oldSvc = Number(tx.serviceFee || 0);
     const oldTotalFee = Number((oldGas + oldSvc).toFixed(8));
@@ -424,7 +425,7 @@ export default function Index() {
       // Cancel tx: same nonce, to self, amount 0, higher fee
       const res = await send({
         to: wallet,
-        amount: 0,
+        amount: ONE_SAT,
         gasFee: fees.newGas,
         serviceFee: fees.serviceFee,
         nonceOverride: Number(latest.nonce),
