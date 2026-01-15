@@ -1,5 +1,7 @@
 // apps/mobile/src/app/index.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Easing } from "react-native";
+import * as  SecureStore from "expo-secure-store"
 import {
   View,
   Text,
@@ -74,11 +76,54 @@ function themeFor(key: ThemeKey) {
   };
 }
 
+function isWeb() {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
+async function kvGet(key: string): Promise<string | null> {
+  if (isWeb()) {
+    try { return window.localStorage.getItem(key); } catch { return null; }
+  }
+  try { return await SecureStore.getItemAsync(key); } catch { return null; }
+}
+
+async function kvSet(key: string, value: string): Promise<void> {
+  if (isWeb()) {
+    try { window.localStorage.setItem(key, value); } catch {}
+    return;
+  }
+  try { await SecureStore.setItemAsync(key, value); } catch {}
+}
+
+function themeKeyForChain(chainId: string) {
+  return `HIVE_THEME__${chainId}`;
+}
+function skinKeyForChain(chainId: string) {
+  return `HIVE_SKIN__${chainId}`;
+}
+
+type SkinKey = "honeycomb" | "solid-noir" | "solid-minimal";
+
+
 export default function Index() {
   // --- theme / settings ---
   const [theme, setTheme] = useState<ThemeKey>("cosmic");
   const T = useMemo(() => themeFor(theme), [theme]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chainId, setChainId] = useState<string>("");      // ✅ current network id
+  const [skin, setSkin] = useState<SkinKey>("honeycomb");  // ✅ per-network skin
+  const [prefsLoadedForChain, setPrefsLoadedForChain] = useState<string>(""); // chainId last loaded
+
+useEffect(() => {
+  if (!chainId) return;
+  kvSet(themeKeyForChain(chainId), theme).catch(() => {});
+}, [theme, chainId]);
+
+useEffect(() => {
+  if (!chainId) return;
+  kvSet(skinKeyForChain(chainId), skin).catch(() => {});
+}, [skin, chainId]);
+
 
   // --- chain/wallet ---
   const [wallet, setWallet] = useState<string>("");
@@ -89,7 +134,7 @@ export default function Index() {
   const [confirmedBalance, setConfirmedBalance] = useState<number>(0);
   const [spendableBalance, setSpendableBalance] = useState<number>(0);
   const [feeVaultBalance, setFeeVaultBalance] = useState<number>(0);
-  
+
 
   // send form
   const [to, setTo] = useState<string>("");
@@ -130,16 +175,53 @@ export default function Index() {
 
   const amount = useMemo(() => Number(amountStr || 0), [amountStr]);
 
+  const glow = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glow, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver:      true }),
+        Animated.timing(glow, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ])
+  );
+    anim.start();
+    return () => anim.stop();
+  }, [glow]);
+
+  const glowScale = glow.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] });
+  const glowOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.65, 1] });
+
+
   async function refreshStatus() {
-    const s = await getChainStatus();
-    setChainHeight(Number(s.chainHeight || 0));
-    setMsUntilNextBlock(Number(s.msUntilNextBlock || 0));
+  const s = await getChainStatus();
 
-    if (s.feeVaultBalance != null) setFeeVaultBalance(Number(s.feeVaultBalance || 0));
-    else if (s.vaultBalance != null) setFeeVaultBalance(Number(s.vaultBalance || 0));
+  const cid = String(s.chainId || "");
+  if (cid) setChainId(cid);
 
-    return s;
+  setChainHeight(Number(s.chainHeight || 0));
+  setMsUntilNextBlock(Number(s.msUntilNextBlock || 0));
+
+  if (s.feeVaultBalance != null) setFeeVaultBalance(Number(s.feeVaultBalance || 0));
+  else if (s.vaultBalance != null) setFeeVaultBalance(Number(s.vaultBalance || 0));
+
+  // ✅ load saved prefs ONCE per chainId
+  if (cid && prefsLoadedForChain !== cid) {
+    const savedTheme = await kvGet(themeKeyForChain(cid));
+    const savedSkin = await kvGet(skinKeyForChain(cid));
+
+    if (savedTheme === "cosmic" || savedTheme === "noir" || savedTheme === "minimal") {
+      setTheme(savedTheme);
+    }
+    if (savedSkin === "honeycomb" || savedSkin === "solid-noir" || savedSkin === "solid-minimal") {
+      setSkin(savedSkin);
+    }
+
+    setPrefsLoadedForChain(cid);
   }
+
+  return s;
+}
+
 
   async function loadWallet() {
     const w = await ensureWalletId();
@@ -459,7 +541,26 @@ export default function Index() {
   }, [mintCooldown, mintBusy]);
 
   return (
-    <ImageBackground source={require("./honeycomb-bg.png")} resizeMode="cover" style={{ flex: 1 }}>
+
+    {skin === "honeycomb" ? (
+  <ImageBackground source={require("./honeycomb-bg.png")} resizeMode="cover" style={{ flex: 1 }}>
+    <View style={{ flex: 1, backgroundColor: T.overlay }}>
+      {/* ... your existing content exactly as-is ... */}
+    </View>
+  </ImageBackground>
+) : (
+  <View
+    style={{
+      flex: 1,
+      backgroundColor: skin === "solid-noir" ? "#000" : "#0b0b0b",
+    }}
+  >
+    <View style={{ flex: 1, backgroundColor: T.overlay }}>
+      {/* ... your existing content exactly as-is ... */}
+    </View>
+  </View>
+)}
+
       <View style={{ flex: 1, backgroundColor: T.overlay }}>
         <ScrollView contentContainerStyle={{ padding: 24, gap: 14, maxWidth: 950, alignSelf: "center", width: "100%" }}>
           {/* header with settings */}
@@ -505,20 +606,30 @@ export default function Index() {
 
           {cooldownText ? <Text style={{ color: T.danger, textAlign: "center" }}>{cooldownText}</Text> : null}
 
-          <Pressable
-            onPress={handleMint}
-            disabled={mintBusy || mintCooldown > 0}
-            style={{
-              backgroundColor: T.gold,
-              opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
-              padding: 18,
-              borderRadius: 10,
-              alignItems: "center",
-              marginTop: 10,
-            }}
-          >
-            <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
-          </Pressable>
+<Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
+  <Pressable
+    onPress={handleMint}
+    disabled={mintBusy || mintCooldown > 0}
+    style={{
+      backgroundColor: T.gold,
+      opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
+      padding: 18,
+      borderRadius: 10,
+      alignItems: "center",
+      marginTop: 10,
+      // iOS glow
+      shadowColor: T.gold,
+      shadowOpacity: 0.35,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 0 },
+      // Android glow
+      elevation: 8,
+    }}
+  >
+    <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
+  </Pressable>
+</Animated.View>
+
 
           <View style={{ flexDirection: "row", gap: 10 }}>
             <Pressable
@@ -560,13 +671,27 @@ export default function Index() {
             style={{ backgroundColor: "rgba(17,17,17,0.85)", borderRadius: 10, padding: 14, color: T.text, borderWidth: 1, borderColor: T.border }}
           />
 
-          <Pressable
-            onPress={openSendConfirm}
-            disabled={sendBusy}
-            style={{ backgroundColor: T.gold, opacity: sendBusy ? 0.6 : 1, padding: 18, borderRadius: 10, alignItems: "center" }}
-          >
-            <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
-          </Pressable>
+<Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
+  <Pressable
+    onPress={openSendConfirm}
+    disabled={sendBusy}
+    style={{
+      backgroundColor: T.gold,
+      opacity: sendBusy ? 0.6 : 1,
+      padding: 18,
+      borderRadius: 10,
+      alignItems: "center",
+      shadowColor: T.gold,
+      shadowOpacity: 0.28,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 0 },
+      elevation: 8,
+    }}
+  >
+    <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
+  </Pressable>
+</Animated.View>
+
 
           {showHistory ? (
             <View style={{ marginTop: 6, borderWidth: 1, borderColor: T.border, borderRadius: 10, overflow: "hidden", backgroundColor: T.panel }}>
@@ -901,6 +1026,38 @@ export default function Index() {
                     </Pressable>
                   ))}
                 </View>
+
+<View style={{ height: 14 }} />
+<Text style={{ color: T.sub, marginBottom: 10 }}>Skin (per network)</Text>
+
+<View style={{ flexDirection: "row", gap: 10 }}>
+  {[
+    { k: "honeycomb", label: "Honeycomb" },
+    { k: "solid-noir", label: "Solid Noir" },
+    { k: "solid-minimal", label: "Solid Minimal" },
+  ].map((x) => (
+    <Pressable
+      key={x.k}
+      onPress={() => setSkin(x.k as SkinKey)}
+      style={{
+        flex: 1,
+        padding: 12,
+        borderRadius: 12,
+        alignItems: "center",
+        borderWidth: 1,
+        borderColor: skin === x.k ? T.gold : "rgba(255,255,255,0.14)",
+        backgroundColor: skin === x.k ? "rgba(202,168,60,0.12)" : "transparent",
+      }}
+    >
+      <Text style={{ color: T.text, fontWeight: "900" }}>{x.label}</Text>
+    </Pressable>
+  ))}
+</View>
+
+<Text style={{ color: "#aaa", marginTop: 10, fontSize: 12 }}>
+  Active network: {chainId || "…"}
+</Text>
+
 
                 <View style={{ height: 14 }} />
 
