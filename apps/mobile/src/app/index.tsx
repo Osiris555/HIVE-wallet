@@ -18,6 +18,7 @@ function fmt8(n: number) {
 
 const ONE_SAT = 0.00000001;
 const FEE_VAULT = "HNY_FEE_VAULT";
+const CANCEL_DUST = ONE_SAT; // replacement-to-self uses dust amount (server usually rejects 0)
 
 export default function Index() {
   const [wallet, setWallet] = useState<string>("");
@@ -29,6 +30,12 @@ export default function Index() {
 
   // Fee vault display
   const [feeVaultBalance, setFeeVaultBalance] = useState<number | null>(null);
+
+  // mempool stats (from /status)
+  const [mempoolSize, setMempoolSize] = useState<number>(0);
+  const [maxTxPerBlock, setMaxTxPerBlock] = useState<number>(25);
+  const [minGasFee, setMinGasFee] = useState<number>(0);
+  const [serviceFeeRate, setServiceFeeRate] = useState<number>(0.00005);
 
   const [to, setTo] = useState<string>("");
   const [amountStr, setAmountStr] = useState<string>("");
@@ -48,13 +55,14 @@ export default function Index() {
   const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
   const [quote, setQuote] = useState<any>(null);
 
-  // NEW: fee chooser in confirm modal
+  // fee chooser in confirm modal
   const [confirmStatus, setConfirmStatus] = useState<any>(null);
   const [confirmTier, setConfirmTier] = useState<"low" | "normal" | "fast" | "max">("normal");
-  const [confirmMaxExtraPct, setConfirmMaxExtraPct] = useState<number>(25); // max adds +25% by default
+  const [confirmMaxExtraPct, setConfirmMaxExtraPct] = useState<number>(25); // max adds +25% default
 
-  // RBF fee chooser modal
+  // RBF / Cancel modal (shared)
   const [rbfOpen, setRbfOpen] = useState<boolean>(false);
+  const [rbfMode, setRbfMode] = useState<"speedup" | "cancel">("speedup");
   const [rbfTx, setRbfTx] = useState<any>(null);
   const [rbfMultiplier, setRbfMultiplier] = useState<number>(1.5);
   const [rbfPreviewData, setRbfPreviewData] = useState<any>(null);
@@ -63,13 +71,36 @@ export default function Index() {
 
   function isNonceMismatchLike(e: any) {
     const msg = String(e?.message || e || "").toLowerCase();
-    return msg.includes("nonce mismatch") || msg.includes("nonce") || msg.includes("already confirmed") || msg.includes("replaced");
+    return (
+      msg.includes("nonce mismatch") ||
+      msg.includes("nonce") ||
+      msg.includes("already confirmed") ||
+      msg.includes("replaced") ||
+      msg.includes("conflict")
+    );
+  }
+
+  function safeNum(v: any, fallback = 0) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
   }
 
   async function refreshStatus() {
     const s = await getChainStatus();
-    setChainHeight(Number(s.chainHeight || 0));
-    setMsUntilNextBlock(Number(s.msUntilNextBlock || 0));
+
+    setChainHeight(safeNum(s.chainHeight, 0));
+    setMsUntilNextBlock(safeNum(s.msUntilNextBlock, 0));
+
+    // mempool / fee-market fields (use defaults if server doesn’t include)
+    setMempoolSize(safeNum(s.mempoolSize, 0));
+    setMaxTxPerBlock(Math.max(1, safeNum(s.maxTxPerBlock ?? s.blockTxLimit ?? s.txPerBlock, 25)));
+
+    const mg = safeNum(s.minGasFee, 0);
+    setMinGasFee(mg);
+
+    const rate = safeNum(s.serviceFeeRate, 0.00005);
+    setServiceFeeRate(rate);
+
     return s;
   }
 
@@ -82,7 +113,7 @@ export default function Index() {
   async function loadFeeVaultBalance() {
     try {
       const b = await getBalance(FEE_VAULT);
-      setFeeVaultBalance(Number(b.balance || 0));
+      setFeeVaultBalance(safeNum(b.balance, 0));
     } catch {
       setFeeVaultBalance(null);
     }
@@ -92,8 +123,8 @@ export default function Index() {
     if (!wallet) return;
     try {
       const b = await getBalance(wallet);
-      setConfirmedBalance(Number(b.balance || 0));
-      setSpendableBalance(Number(b.spendableBalance || 0));
+      setConfirmedBalance(safeNum(b.balance, 0));
+      setSpendableBalance(safeNum(b.spendableBalance, 0));
     } catch (e: any) {
       console.error("Balance fetch failed:", e?.message || e);
     } finally {
@@ -173,11 +204,11 @@ export default function Index() {
       const res = await mint();
       setMessage("Mint submitted (pending until next block) ✅");
       await refreshAll();
-      const cd = Number(res?.cooldownSeconds || 60);
+      const cd = safeNum(res?.cooldownSeconds, 60);
       setMintCooldown(cd);
     } catch (e: any) {
       if (e?.status === 429) {
-        const cd = Number(e.cooldownSeconds || 60);
+        const cd = safeNum(e.cooldownSeconds, 60);
         setMintCooldown(cd);
         setMessage(`Cooldown active (${cd}s)`);
       } else {
@@ -213,21 +244,19 @@ export default function Index() {
   }
 
   function computeConfirmGasFee() {
-    const minGas = Number(confirmStatus?.minGasFee || quote?.gasFee || 0);
+    const minGas = safeNum(confirmStatus?.minGasFee ?? quote?.gasFee ?? minGasFee, 0);
     if (!Number.isFinite(minGas) || minGas <= 0) return 0;
 
     if (confirmTier === "low") return Number(minGas.toFixed(8));
     if (confirmTier === "normal") return Number((minGas * 1.5).toFixed(8));
     if (confirmTier === "fast") return Number((minGas * 2.0).toFixed(8));
 
-    // max: minGas * (1 + extraPct/100)
     const m = 1 + Math.max(0, confirmMaxExtraPct) / 100;
     return Number((minGas * m).toFixed(8));
   }
 
   function computeConfirmServiceFee() {
-    // Prefer server-provided rate
-    const rate = Number(confirmStatus?.serviceFeeRate || 0.00005);
+    const rate = safeNum(confirmStatus?.serviceFeeRate ?? serviceFeeRate, 0.00005);
     return computeServiceFee(amount, rate);
   }
 
@@ -237,8 +266,9 @@ export default function Index() {
     const serviceFee = computeConfirmServiceFee();
     const totalFee = Number((gasFee + serviceFee).toFixed(8));
     const totalCost = Number((amount + totalFee).toFixed(8));
-    return { gasFee, serviceFee, totalFee, totalCost, minGas: Number(confirmStatus?.minGasFee || quote?.gasFee || 0) };
-  }, [confirmOpen, confirmTier, confirmMaxExtraPct, confirmStatus, quote, amount]);
+    const minGas = safeNum(confirmStatus?.minGasFee ?? quote?.gasFee ?? minGasFee, 0);
+    return { gasFee, serviceFee, totalFee, totalCost, minGas };
+  }, [confirmOpen, confirmTier, confirmMaxExtraPct, confirmStatus, quote, amount, minGasFee, serviceFeeRate]);
 
   async function handleSendSignedSubmit() {
     if (!quote || !confirmFeePreview) return;
@@ -274,21 +304,59 @@ export default function Index() {
     }
   }
 
-  // ----- RBF -----
-  function openRbfChooser(tx: any) {
+  // ----- MEMPOOL ETA HELPERS -----
+  const mempoolClearBlocks = useMemo(() => {
+    if (maxTxPerBlock <= 0) return 0;
+    return Math.ceil(mempoolSize / maxTxPerBlock);
+  }, [mempoolSize, maxTxPerBlock]);
+
+  function likelyConfirmLabel(tx: any) {
+    if (!tx || tx.status !== "pending") return null;
+
+    // Heuristic: compare tx total fee to "baseline" (minGas + serviceFee)
+    const gas = safeNum(tx.gasFee, 0);
+    const svc = safeNum(tx.serviceFee, 0);
+    const total = tx.totalFee != null ? safeNum(tx.totalFee, gas + svc) : safeNum(gas + svc, 0);
+
+    const baselineSvc = computeServiceFee(safeNum(tx.amount, 0), serviceFeeRate);
+    const baseline = Number((Math.max(minGasFee, ONE_SAT) + baselineSvc).toFixed(8));
+
+    // If mempool is tiny, likely next block anyway
+    if (mempoolSize <= maxTxPerBlock) return "Likely confirm: next block";
+
+    if (baseline <= 0) return "Likely confirm: 1–3 blocks";
+
+    const ratio = total / baseline;
+
+    if (ratio >= 2.0) return "Likely confirm: next block";
+    if (ratio >= 1.5) return "Likely confirm: 1–2 blocks";
+    return "Likely confirm: 3+ blocks";
+  }
+
+  // ----- RBF + CANCEL -----
+  function openSpeedUpChooser(tx: any) {
     setMessage("");
+    setRbfMode("speedup");
     setRbfTx(tx);
     setRbfMultiplier(1.5);
     setRbfOpen(true);
   }
 
-  function calcRbfFees(tx: any, status: any, multiplier: number) {
-    const minGas = Number(status.minGasFee || 0);
-    const rate = Number(status.serviceFeeRate || 0);
+  function openCancelChooser(tx: any) {
+    setMessage("");
+    setRbfMode("cancel");
+    setRbfTx(tx);
+    setRbfMultiplier(2.0); // cancellation should be “aggressive” by default
+    setRbfOpen(true);
+  }
 
-    const amt = Number(tx.amount);
-    const oldGas = Number(tx.gasFee || 0);
-    const oldSvc = Number(tx.serviceFee || 0);
+  function calcRbfFees(tx: any, status: any, multiplier: number) {
+    const minGas = safeNum(status.minGasFee, minGasFee);
+    const rate = safeNum(status.serviceFeeRate, serviceFeeRate);
+
+    const amt = safeNum(tx.amount, 0);
+    const oldGas = safeNum(tx.gasFee, 0);
+    const oldSvc = safeNum(tx.serviceFee, 0);
     const oldTotalFee = Number((oldGas + oldSvc).toFixed(8));
 
     const serviceFee = computeServiceFee(amt, rate);
@@ -323,7 +391,7 @@ export default function Index() {
     };
   }, [rbfTx, rbfMultiplier]);
 
-  async function submitRbf(multiplier: number, isMax: boolean) {
+  async function submitRbfOrCancel(multiplier: number, isMax: boolean) {
     if (sendBusy) return;
     if (!rbfTx) return;
 
@@ -334,21 +402,22 @@ export default function Index() {
       const originalTx = rbfTx;
 
       if (originalTx.type !== "send") {
-        setMessage("RBF only works for SEND transactions.");
+        setMessage("Only SEND transactions can be replaced.");
         setRbfOpen(false);
         return;
       }
       if (!wallet || originalTx.from !== wallet) {
-        setMessage("You can only speed up your own outgoing tx.");
+        setMessage("You can only replace your own outgoing tx.");
         setRbfOpen(false);
         return;
       }
       if (originalTx.nonce == null) {
-        setMessage("Missing nonce on tx (cannot RBF).");
+        setMessage("Missing nonce on tx (cannot replace).");
         setRbfOpen(false);
         return;
       }
 
+      // refresh latest list first
       const latestTxs = await getTransactions(wallet);
       setTxs(latestTxs || []);
 
@@ -359,7 +428,7 @@ export default function Index() {
       if (!latestMatch || latestMatch.status !== "pending") {
         setRbfOpen(false);
         setRbfTx(null);
-        setMessage("Too late to speed up — tx already confirmed/replaced. ✅");
+        setMessage("Too late — tx already confirmed/replaced. ✅");
         await refreshAll();
         return;
       }
@@ -378,28 +447,40 @@ export default function Index() {
         }
       }
 
+      // SPEEDUP: same to/amount
+      // CANCEL: replace with to=self and dust amount
+      const replaceTo = rbfMode === "cancel" ? wallet : String(latestMatch.to);
+      const replaceAmount = rbfMode === "cancel" ? CANCEL_DUST : safeNum(latestMatch.amount, 0);
+
+      const cancelServiceFee = computeServiceFee(replaceAmount, serviceFeeRate);
+      const serviceFeeUsed = rbfMode === "cancel" ? cancelServiceFee : fees.serviceFee;
+
       const res = await send({
-        to: String(latestMatch.to),
-        amount: Number(latestMatch.amount),
+        to: replaceTo,
+        amount: replaceAmount,
         gasFee,
-        serviceFee: fees.serviceFee,
+        serviceFee: serviceFeeUsed,
         nonceOverride: Number(latestMatch.nonce),
       });
 
       setRbfOpen(false);
       setRbfTx(null);
 
-      setMessage(res?.isReplacement ? `Speed up submitted (RBF) ✅  New fee: ${fmt8(totalFee)}` : "Speed up submitted, but not treated as replacement (already confirmed?).");
+      if (rbfMode === "cancel") {
+        setMessage(res?.isReplacement ? `Cancel submitted ✅  Fee: ${fmt8(Number((gasFee + serviceFeeUsed).toFixed(8)))}` : "Cancel submitted, but was not treated as a replacement (already confirmed?).");
+      } else {
+        setMessage(res?.isReplacement ? `Speed up submitted (RBF) ✅  New fee: ${fmt8(totalFee)}` : "Speed up submitted, but not treated as replacement (already confirmed?).");
+      }
 
       await refreshAll();
     } catch (e: any) {
       if (e?.status === 409 || isNonceMismatchLike(e)) {
         setRbfOpen(false);
         setRbfTx(null);
-        setMessage("Too late to speed up — nonce/state changed (already confirmed/replaced). ✅");
+        setMessage("Too late — nonce/state changed (already confirmed/replaced). ✅");
         await refreshAll();
       } else {
-        setMessage(`Speed up failed: ${e?.message || "Unknown error"}`);
+        setMessage(`${rbfMode === "cancel" ? "Cancel" : "Speed up"} failed: ${e?.message || "Unknown error"}`);
       }
     } finally {
       setSendBusy(false);
@@ -420,6 +501,11 @@ export default function Index() {
 
         <Text style={{ color: "#aaa", textAlign: "center" }}>
           Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
+        </Text>
+
+        {/* ✅ mempool + ETA */}
+        <Text style={{ color: "#777", textAlign: "center" }}>
+          Mempool: {mempoolSize} pending · Block cap: {maxTxPerBlock}/block · ETA to clear: ~{mempoolClearBlocks} blocks
         </Text>
 
         {wallet ? <Text style={{ color: "#aaa", textAlign: "center" }}>Wallet: {wallet}</Text> : null}
@@ -507,9 +593,9 @@ export default function Index() {
               <Text style={{ color: "#aaa", padding: 14 }}>No transactions yet.</Text>
             ) : (
               txs.map((t, idx) => {
-                const gas = Number(t.gasFee || 0);
-                const svc = Number(t.serviceFee || 0);
-                const totalFee = t.totalFee != null ? Number(t.totalFee) : Number((gas + svc).toFixed(8));
+                const gas = safeNum(t.gasFee, 0);
+                const svc = safeNum(t.serviceFee, 0);
+                const totalFee = t.totalFee != null ? safeNum(t.totalFee, gas + svc) : safeNum(gas + svc, 0);
 
                 const title =
                   `${String(t.type).toUpperCase()} · ${t.amount}` +
@@ -517,7 +603,10 @@ export default function Index() {
                   ` · ${t.status}` +
                   (t.blockHeight ? ` · block ${t.blockHeight}` : "");
 
-                const showRbf = t.type === "send" && t.status === "pending" && wallet && t.from === wallet && t.nonce != null;
+                const outgoingPendingMine =
+                  t.type === "send" && t.status === "pending" && wallet && t.from === wallet && t.nonce != null;
+
+                const eta = outgoingPendingMine ? likelyConfirmLabel(t) : null;
 
                 return (
                   <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#222" }}>
@@ -527,15 +616,17 @@ export default function Index() {
                       Gas: {fmt8(gas)} · Service: {fmt8(svc)} · Total: {fmt8(totalFee)}
                     </Text>
 
+                    {eta ? <Text style={{ color: "#9aa7ff", marginTop: 4 }}>{eta}</Text> : null}
+
                     {t.failReason ? <Text style={{ color: "#ff6b6b" }}>Reason: {t.failReason}</Text> : null}
                     {t.nonce != null ? <Text style={{ color: "#aaa" }}>Nonce: {t.nonce}</Text> : null}
                     <Text style={{ color: "#aaa" }}>From: {t.from || "—"}</Text>
                     <Text style={{ color: "#aaa" }}>To: {t.to}</Text>
 
-                    {showRbf ? (
-                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                    {outgoingPendingMine ? (
+                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
                         <Pressable
-                          onPress={() => openRbfChooser(t)}
+                          onPress={() => openSpeedUpChooser(t)}
                           disabled={sendBusy}
                           style={{
                             paddingVertical: 10,
@@ -543,10 +634,23 @@ export default function Index() {
                             borderRadius: 10,
                             backgroundColor: "#2b6fff",
                             opacity: sendBusy ? 0.6 : 1,
-                            alignSelf: "flex-start",
                           }}
                         >
-                          <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Speed Up (RBF)</Text>
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Speed Up</Text>
+                        </Pressable>
+
+                        <Pressable
+                          onPress={() => openCancelChooser(t)}
+                          disabled={sendBusy}
+                          style={{
+                            paddingVertical: 10,
+                            paddingHorizontal: 14,
+                            borderRadius: 10,
+                            backgroundColor: "#ff3b3b",
+                            opacity: sendBusy ? 0.6 : 1,
+                          }}
+                        >
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>🛑 Cancel</Text>
                         </Pressable>
                       </View>
                     ) : null}
@@ -558,7 +662,7 @@ export default function Index() {
         ) : null}
       </ScrollView>
 
-      {/* Confirm modal (normal send) */}
+      {/* Confirm modal (normal send w/ custom gas tiers) */}
       <Modal transparent visible={confirmOpen} animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", padding: 20 }}>
           <View style={{ backgroundColor: "#0b0b0b", borderRadius: 14, borderWidth: 1, borderColor: "#222", padding: 16 }}>
@@ -567,11 +671,10 @@ export default function Index() {
             <Text style={{ color: "#aaa" }}>To: {to}</Text>
             <Text style={{ color: "#aaa" }}>Amount: {amount}</Text>
 
-            {/* ✅ NEW: fee tiers */}
             <View style={{ height: 12 }} />
             <Text style={{ color: "#fff", fontWeight: "800" }}>Gas speed</Text>
             <Text style={{ color: "#666" }}>
-              Min gas (fee market): {fmt8(Number(confirmStatus?.minGasFee || quote?.gasFee || 0))}
+              Min gas: {fmt8(safeNum(confirmStatus?.minGasFee ?? quote?.gasFee ?? minGasFee, 0))}
             </Text>
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
@@ -599,7 +702,6 @@ export default function Index() {
               ))}
             </View>
 
-            {/* Max tweak (simple +/-) */}
             {confirmTier === "max" ? (
               <View style={{ marginTop: 10 }}>
                 <Text style={{ color: "#aaa" }}>Max adds +{confirmMaxExtraPct}% over min gas</Text>
@@ -620,7 +722,6 @@ export default function Index() {
               </View>
             ) : null}
 
-            {/* Fee preview */}
             <View style={{ height: 12 }} />
             {confirmFeePreview ? (
               <>
@@ -662,17 +763,19 @@ export default function Index() {
             </View>
 
             <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
-              Tip: Choose Fast/Max to reduce the chance you’ll need RBF later.
+              Tip: Choose Fast/Max to reduce the chance you’ll need Speed Up later.
             </Text>
           </View>
         </View>
       </Modal>
 
-      {/* RBF modal unchanged (kept for rescue speed-ups) */}
+      {/* Speed Up / Cancel modal */}
       <Modal transparent visible={rbfOpen} animationType="fade" onRequestClose={() => setRbfOpen(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", padding: 20 }}>
           <View style={{ backgroundColor: "#0b0b0b", borderRadius: 14, borderWidth: 1, borderColor: "#222", padding: 16 }}>
-            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>Speed Up (RBF)</Text>
+            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
+              {rbfMode === "cancel" ? "Cancel Pending Tx" : "Speed Up (RBF)"}
+            </Text>
 
             {rbfTx ? (
               <>
@@ -682,8 +785,13 @@ export default function Index() {
               </>
             ) : null}
 
-            <View style={{ height: 12 }} />
+            {rbfMode === "cancel" ? (
+              <Text style={{ color: "#ff9b9b", marginTop: 10 }}>
+                This will replace the pending send with a self-send (dust) using the SAME nonce + higher fee.
+              </Text>
+            ) : null}
 
+            <View style={{ height: 12 }} />
             <Text style={{ color: "#fff", fontWeight: "800" }}>Choose bump</Text>
 
             <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
@@ -741,20 +849,29 @@ export default function Index() {
                 disabled={sendBusy}
                 style={{ flex: 1, padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#333", alignItems: "center" }}
               >
-                <Text style={{ color: "#fff", fontWeight: "800" }}>Cancel</Text>
+                <Text style={{ color: "#fff", fontWeight: "800" }}>Back</Text>
               </Pressable>
 
               <Pressable
-                onPress={() => submitRbf(rbfMultiplier === 2.5 ? 2.0 : rbfMultiplier, rbfMultiplier === 2.5)}
+                onPress={() => submitRbfOrCancel(rbfMultiplier === 2.5 ? 2.0 : rbfMultiplier, rbfMultiplier === 2.5)}
                 disabled={sendBusy}
-                style={{ flex: 1, padding: 14, borderRadius: 10, backgroundColor: "#2b6fff", alignItems: "center", opacity: sendBusy ? 0.6 : 1 }}
+                style={{
+                  flex: 1,
+                  padding: 14,
+                  borderRadius: 10,
+                  backgroundColor: rbfMode === "cancel" ? "#ff3b3b" : "#2b6fff",
+                  alignItems: "center",
+                  opacity: sendBusy ? 0.6 : 1,
+                }}
               >
                 <Text style={{ color: "#fff", fontWeight: "900" }}>{sendBusy ? "Submitting..." : "Sign & Submit"}</Text>
               </Pressable>
             </View>
 
             <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
-              This replaces the pending transaction with the same nonce using a higher total fee.
+              {rbfMode === "cancel"
+                ? "Cancel works by replacement (same nonce) with a higher fee."
+                : "Speed Up works by replacement (same nonce) with a higher fee."}
             </Text>
           </View>
         </View>
