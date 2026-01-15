@@ -500,7 +500,7 @@ export default function Index() {
             <Switch value={liveRefresh} onValueChange={setLiveRefresh} />
           </View>
 
-          <<View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
   {[1.25, 1.5, 2.0].map((m) => (
     <Pressable
       key={String(m)}
