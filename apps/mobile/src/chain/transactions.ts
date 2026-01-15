@@ -26,6 +26,9 @@ export type Transaction = {
   timestamp: number;
 };
 
+// Keep compatibility with your UI imports
+export type TxLike = Transaction;
+
 export type ChainStatus = {
   chainId: string;
   chainHeight: number;
@@ -38,13 +41,11 @@ export type ChainStatus = {
   txTtlMs: number;
   serviceFeeRate: number;
 
-  // server may expose vault balance under different names depending on version
   feeVaultBalance?: number;
   feeVault?: number;
   feeVaultBalanceHny?: number;
 };
 
-// ✅ Exported constants/helpers (so UI can safely import them)
 export const ONE_SAT = 0.00000001;
 
 export function fmt8(n: number) {
@@ -53,15 +54,11 @@ export function fmt8(n: number) {
   return x.toFixed(8);
 }
 
-// Web/local storage helpers
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-// ✅ Configurable API base.
-// - Web defaults to localhost.
-// - Native defaults to your LAN IP (for Expo Go on iPhone).
-// - You can override via EXPO_PUBLIC_HIVE_API_BASE if you ever want.
+// Web defaults to localhost; native defaults to your LAN IP for Expo Go iPhone testing.
 const API_BASE =
   ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
   (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
@@ -163,7 +160,7 @@ function pickFeeVaultBalance(status: any): number {
 }
 
 function networkHint() {
-  return `API_BASE=${API_BASE} (web uses localhost; Expo Go iPhone uses LAN IP)`;
+  return `API_BASE=${API_BASE}`;
 }
 
 async function getJson(path: string) {
@@ -198,7 +195,7 @@ async function postJson(path: string, payload: any) {
     throw err;
   }
   if (res.status === 409) {
-    const err: any = makeError(body?.error || "Nonce mismatch", 409, body);
+    const err: any = makeError(body?.error || "Nonce conflict", 409, body);
     err.expectedNonce = body?.expectedNonce;
     err.gotNonce = body?.gotNonce;
     throw err;
@@ -243,7 +240,6 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
-// returns full status JSON and guarantees .feeVaultBalance exists
 export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance: number }> {
   let res: Response;
   try {
@@ -284,21 +280,17 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
-// ✅ rate is optional so UI calls can be simpler; if missing, fee becomes 0.
+// rate optional; if missing -> 0
 export function computeServiceFee(amount: number, rate?: number) {
   const r = Number(rate);
   if (!Number.isFinite(r)) return 0;
   return Number((Number(amount) * r).toFixed(8));
 }
 
-/**
- * Quote helper for confirm screen.
- * You can pass an override gasFee here (custom gas).
- */
 export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverride?: number }) {
   const status = await getChainStatus();
-
   const minGas = Number(status.minGasFee || 0);
+
   const gasFee = Number.isFinite(opts?.gasFeeOverride as any)
     ? Math.max(minGas, Number(opts!.gasFeeOverride))
     : minGas;
@@ -307,15 +299,7 @@ export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverr
   const totalFee = Number((gasFee + serviceFee).toFixed(8));
   const totalCost = Number((amount + totalFee).toFixed(8));
 
-  return {
-    chainId: status.chainId,
-    gasFee,
-    minGasFee: minGas,
-    serviceFee,
-    totalFee,
-    totalCost,
-    status,
-  };
+  return { chainId: status.chainId, gasFee, minGasFee: minGas, serviceFee, totalFee, totalCost, status };
 }
 
 export async function mint(): Promise<any> {
@@ -334,7 +318,7 @@ export async function mint(): Promise<any> {
   const amount = 100;
 
   const gasFee = Number(status.minGasFee);
-  const serviceFee = 0; // mint has no service fee (server enforces)
+  const serviceFee = 0;
   const expiresAtMs = timestamp + Number(status.txTtlMs);
 
   const { secretKeyB64 } = await ensureKeypair();
@@ -364,11 +348,6 @@ export async function mint(): Promise<any> {
   });
 }
 
-/**
- * NOTE: RBF happens on server when:
- * - nonce == expectedNonce: new tx
- * - nonce == expectedNonce-1 AND pending exists: replacement if higher fee
- */
 export async function send(params: {
   to: string;
   amount: number;
@@ -390,11 +369,10 @@ export async function send(params: {
 
   const timestamp = Date.now();
   const amt = Number(params.amount);
-  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
+  if (!Number.isFinite(amt) || amt < 0) throw makeError("Amount must be >= 0", 400);
 
   const gasFee = Number(params.gasFee);
   const serviceFee = Number(params.serviceFee);
-
   const expiresAtMs = timestamp + Number(status.txTtlMs);
 
   const nonce = Number.isInteger(params.nonceOverride) ? Number(params.nonceOverride) : expectedNonce;
@@ -426,5 +404,42 @@ export async function send(params: {
     gasFee,
     serviceFee,
     expiresAtMs,
+  });
+}
+
+/**
+ * ✅ RBF (Replace-By-Fee) for a pending send:
+ * - same nonce
+ * - same to/amount
+ * - higher fee
+ */
+export async function rbfReplacePending(params: {
+  to: string;
+  amount: number;
+  nonce: number;
+  gasFee: number;
+  serviceFee: number;
+}) {
+  return await send({
+    to: params.to,
+    amount: params.amount,
+    nonceOverride: params.nonce,
+    gasFee: params.gasFee,
+    serviceFee: params.serviceFee,
+  });
+}
+
+/**
+ * ✅ Cancel a pending tx:
+ * Most dev chains implement cancel as a same-nonce replacement sending 0 to self with higher fee.
+ */
+export async function cancelPending(params: { nonce: number; gasFee: number; serviceFee: number }) {
+  const from = await ensureWalletId();
+  return await send({
+    to: from,
+    amount: 0,
+    nonceOverride: params.nonce,
+    gasFee: params.gasFee,
+    serviceFee: params.serviceFee,
   });
 }
