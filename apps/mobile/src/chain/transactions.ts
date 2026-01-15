@@ -3,6 +3,7 @@ import nacl from "tweetnacl";
 import * as naclUtil from "tweetnacl-util";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
+import Constants from "expo-constants";
 
 export type TxType = "mint" | "send";
 
@@ -25,9 +26,6 @@ export type Transaction = {
   timestamp: number;
 };
 
-// Convenience alias used by your UI
-export type TxLike = Transaction;
-
 export type ChainStatus = {
   chainId: string;
   chainHeight: number;
@@ -40,13 +38,12 @@ export type ChainStatus = {
   txTtlMs: number;
   serviceFeeRate: number;
 
-  // server may expose vault balance under different names depending on version
   feeVaultBalance?: number;
   feeVault?: number;
   feeVaultBalanceHny?: number;
 };
 
-// ✅ Exported helpers used by UI
+// ✅ Exported constants/helpers
 export const ONE_SAT = 0.00000001;
 
 export function fmt8(n: number) {
@@ -55,18 +52,20 @@ export function fmt8(n: number) {
   return x.toFixed(8);
 }
 
-const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
-const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
-const WALLET_STORAGE = "HIVE_WALLET_ID";
-
+// Web/local storage helpers
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-// ✅ Your preferred setup:
-// - Web (localhost browser) -> localhost:3000
-// - Native (Expo Go iPhone) -> LAN IP:3000
-const API_BASE = isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000";
+// ✅ Keep your hardcoded LAN IP for Expo Go iPhone
+const API_BASE =
+  ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
+  (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
+  (isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000");
+
+const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
+const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
+const WALLET_STORAGE = "HIVE_WALLET_ID";
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
@@ -159,12 +158,16 @@ function pickFeeVaultBalance(status: any): number {
   return Number(v || 0);
 }
 
+function networkHint() {
+  return `API_BASE=${API_BASE}`;
+}
+
 async function getJson(path: string) {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, { method: "GET" });
   } catch (e: any) {
-    throw makeError(`Network error GET ${path} (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error on GET ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
   }
   const body = await readJsonSafe(res);
   if (!res.ok) throw makeError(body?.error || `GET ${path} failed`, res.status, body);
@@ -180,7 +183,7 @@ async function postJson(path: string, payload: any) {
       body: JSON.stringify(payload ?? {}),
     });
   } catch (e: any) {
-    throw makeError(`Network error POST ${path} (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error on POST ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
   }
 
   const body = await readJsonSafe(res);
@@ -236,12 +239,13 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
+// returns full status JSON and guarantees .feeVaultBalance exists
 export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance: number }> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}/status`);
   } catch (e: any) {
-    throw makeError(`Network error GET /status (API_BASE=${API_BASE})`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error on GET /status. ${networkHint()}`, 0, { cause: String(e?.message || e) });
   }
 
   const body = await readJsonSafe(res);
@@ -251,7 +255,10 @@ export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance:
     err.data = body;
     throw err;
   }
-  return { ...body, feeVaultBalance: pickFeeVaultBalance(body) };
+  return {
+    ...body,
+    feeVaultBalance: pickFeeVaultBalance(body),
+  };
 }
 
 export async function getAccount(wallet: string) {
@@ -279,24 +286,16 @@ export function computeServiceFee(amount: number, rate?: number) {
   return Number((Number(amount) * r).toFixed(8));
 }
 
-/**
- * Quote helper for the confirm screen.
- */
-export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverride?: number }) {
+export async function quoteSend(to: string, amount: number) {
   const status = await getChainStatus();
-
-  const minGas = Number(status.minGasFee || 0);
-  const gasFee = Number.isFinite(opts?.gasFeeOverride as any)
-    ? Math.max(minGas, Number(opts!.gasFeeOverride))
-    : minGas;
-
+  const minGas = Number(status.minGasFee || ONE_SAT) || ONE_SAT;
   const serviceFee = computeServiceFee(amount, status.serviceFeeRate);
-  const totalFee = Number((gasFee + serviceFee).toFixed(8));
+  const totalFee = Number((minGas + serviceFee).toFixed(8));
   const totalCost = Number((amount + totalFee).toFixed(8));
 
   return {
     chainId: status.chainId,
-    gasFee,
+    gasFee: minGas,
     minGasFee: minGas,
     serviceFee,
     totalFee,
@@ -320,7 +319,7 @@ export async function mint(): Promise<any> {
   const timestamp = Date.now();
   const amount = 100;
 
-  const gasFee = Number(status.minGasFee);
+  const gasFee = Number(status.minGasFee || ONE_SAT);
   const serviceFee = 0;
   const expiresAtMs = timestamp + Number(status.txTtlMs);
 
@@ -351,9 +350,6 @@ export async function mint(): Promise<any> {
   });
 }
 
-/**
- * Send (also used for RBF replacements when nonce < expectedNonce).
- */
 export async function send(params: {
   to: string;
   amount: number;
@@ -371,7 +367,7 @@ export async function send(params: {
   if (!acct.registered) await registerWallet();
 
   const acct2 = await getAccount(from);
-  const expectedNonce = acct2.nonce;
+  const expectedNonce = Number(acct2.nonce);
 
   const timestamp = Date.now();
   const amt = Number(params.amount);
@@ -379,6 +375,7 @@ export async function send(params: {
 
   const gasFee = Number(params.gasFee);
   const serviceFee = Number(params.serviceFee);
+
   const expiresAtMs = timestamp + Number(status.txTtlMs);
 
   const nonce = Number.isInteger(params.nonceOverride) ? Number(params.nonceOverride) : expectedNonce;
@@ -414,43 +411,56 @@ export async function send(params: {
 }
 
 /**
- * ✅ Replace a pending tx at a specific nonce with higher fee (RBF).
- * This just uses /send with nonceOverride = pending nonce.
+ * ✅ RBF helper
+ * Always replaces nonce = expectedNonce - 1 (server replacement rule).
  */
-export async function rbfReplacePending(args: {
+export async function rbfReplacePending(params: {
   to: string;
   amount: number;
-  nonce: number;
   gasFee: number;
   serviceFee: number;
-}) {
+}): Promise<any> {
+  const from = await ensureWalletId();
+  const acct = await getAccount(from);
+  const expectedNonce = Number(acct.nonce);
+  const replaceNonce = expectedNonce - 1;
+
+  if (!Number.isFinite(replaceNonce) || replaceNonce < 0) {
+    throw makeError("No replaceable nonce available", 400);
+  }
+
   return await send({
-    to: args.to,
-    amount: args.amount,
-    nonceOverride: args.nonce,
-    gasFee: args.gasFee,
-    serviceFee: args.serviceFee,
+    to: params.to,
+    amount: params.amount,
+    gasFee: params.gasFee,
+    serviceFee: params.serviceFee,
+    nonceOverride: replaceNonce,
   });
 }
 
 /**
- * ✅ Cancel a pending tx by replacing it with a tiny self-send (amount must be > 0).
- * Server requires serviceFee matches amount*rate, so we compute it.
+ * ✅ Cancel helper
+ * Cancel = self-send of ONE_SAT using nonce = expectedNonce - 1 with higher gas.
+ * (Server rejects 0 amount.)
  */
-export async function cancelPending(args: { nonce: number; gasFee: number; serviceFee?: number }) {
+export async function cancelPending(params: {
+  gasFee: number;
+  serviceFee: number;
+}): Promise<any> {
   const from = await ensureWalletId();
-  const status = await getChainStatus();
+  const acct = await getAccount(from);
+  const expectedNonce = Number(acct.nonce);
+  const replaceNonce = expectedNonce - 1;
 
-  const amount = ONE_SAT; // tiny dust to satisfy "Amount must be positive"
-  const serviceFee = Number.isFinite(args.serviceFee as any)
-    ? Number(args.serviceFee)
-    : computeServiceFee(amount, status.serviceFeeRate);
+  if (!Number.isFinite(replaceNonce) || replaceNonce < 0) {
+    throw makeError("No replaceable nonce available", 400);
+  }
 
   return await send({
     to: from,
-    amount,
-    nonceOverride: args.nonce,
-    gasFee: args.gasFee,
-    serviceFee,
+    amount: ONE_SAT,
+    gasFee: params.gasFee,
+    serviceFee: params.serviceFee,
+    nonceOverride: replaceNonce,
   });
 }
