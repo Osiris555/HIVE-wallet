@@ -3,6 +3,7 @@ import nacl from "tweetnacl";
 import * as naclUtil from "tweetnacl-util";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
+import Constants from "expo-constants";
 
 export type TxType = "mint" | "send";
 
@@ -43,7 +44,15 @@ export type ChainStatus = {
   feeVaultBalanceHny?: number;
 };
 
-const API_BASE = "http://192.168.0.11:3000";
+// ✅ Configurable API base.
+// - Web defaults to localhost.
+// - Native defaults to your LAN IP (change as needed).
+// - You can override via EXPO_PUBLIC_HIVE_API_BASE (recommended).
+const API_BASE =
+  ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
+  (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
+  (isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000");
+
 
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
