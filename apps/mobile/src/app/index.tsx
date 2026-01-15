@@ -1,15 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-  Platform,
-} from "react-native";
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Platform } from "react-native";
 
-import { getBalance, mint, send, getTransactions, getChainStatus } from "../chain/transactions";
+import { getBalance, mint, send, getTransactions, getChainStatus, getAccount, registerWallet } from "../chain/transactions";
 
 const DEFAULT_WALLET = "demo-wallet-1";
 const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
@@ -38,11 +30,9 @@ export default function IndexScreen() {
   const [showTxs, setShowTxs] = useState<boolean>(true);
   const [txs, setTxs] = useState<any[]>([]);
 
-  // chain status
   const [chainHeight, setChainHeight] = useState<number>(0);
   const [nextBlockSec, setNextBlockSec] = useState<number>(0);
 
-  // cooldown
   const [cooldownEndMs, setCooldownEndMs] = useState<number>(() => {
     const saved = storageGet(STORAGE_COOLDOWN_END);
     return saved ? Number(saved) : 0;
@@ -76,8 +66,15 @@ export default function IndexScreen() {
       const s: any = await getChainStatus();
       setChainHeight(Number(s?.chainHeight || 0));
       setNextBlockSec(Math.ceil(Number(s?.msUntilNextBlock || 0) / 1000));
-    } catch {
-      // ignore chain status errors for now
+    } catch {}
+  }
+
+  async function ensureRegistered() {
+    try {
+      const acct: any = await getAccount(wallet);
+      if (!acct.registered) await registerWallet(wallet);
+    } catch (e: any) {
+      setStatus(e?.message || "Registration failed");
     }
   }
 
@@ -103,10 +100,10 @@ export default function IndexScreen() {
     return list.some((t) => t?.status === "pending");
   }
 
-  // Initial load + keep chain status ticking
   useEffect(() => {
     (async () => {
       setStatus("");
+      await ensureRegistered();
       await loadChainStatus();
       await loadBalance();
       if (showTxs) await loadTxs();
@@ -117,7 +114,6 @@ export default function IndexScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll txs/balance while any pending exists
   useEffect(() => {
     if (!showTxs) return;
     if (!hasPending(txs)) return;
@@ -136,23 +132,22 @@ export default function IndexScreen() {
       setStatus(`Cooldown active: ${secondsLeft}s left`);
       return;
     }
-
     try {
       setStatus("");
       const data: any = await mint(wallet);
-      const secs = Number(data?.cooldownSeconds || 60);
-      startCooldown(secs);
-
-      // After submission, we show pending behavior
+      startCooldown(Number(data?.cooldownSeconds || 60));
       await loadBalance();
       if (showTxs) await loadTxs();
-
-      setStatus("Mint submitted (pending until next block) ✅");
+      setStatus("Mint submitted (signed + nonce protected) ✅");
     } catch (e: any) {
       if (e?.status === 429) {
         const secs = Number(e?.cooldownSeconds || 60);
         startCooldown(secs);
         setStatus(`Cooldown active: ${secs}s left`);
+        return;
+      }
+      if (e?.status === 409) {
+        setStatus(`Nonce mismatch. Expected ${e?.expectedNonce}. Try again.`);
         return;
       }
       setStatus(e?.message || "Mint failed");
@@ -162,21 +157,21 @@ export default function IndexScreen() {
   async function handleSend() {
     const t = to.trim();
     const n = Number(amount);
-
     if (!t) return setStatus("Enter a recipient address.");
     if (!Number.isFinite(n) || n <= 0) return setStatus("Enter a valid amount.");
 
     try {
       setStatus("");
       await send(wallet, t, n);
-
       setAmount("");
-
       await loadBalance();
       if (showTxs) await loadTxs();
-
-      setStatus("Send submitted (pending until next block) ✅");
+      setStatus("Send submitted (signed + nonce protected) ✅");
     } catch (e: any) {
+      if (e?.status === 409) {
+        setStatus(`Nonce mismatch. Expected ${e?.expectedNonce}. Try again.`);
+        return;
+      }
       setStatus(e?.message || "Send failed");
     }
   }
@@ -190,56 +185,28 @@ export default function IndexScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>HIVE Wallet</Text>
-
-      <Text style={styles.chainText}>
-        Chain height: {chainHeight} • Next block: ~{nextBlockSec}s
-      </Text>
+      <Text style={styles.chainText}>Chain height: {chainHeight} • Next block: ~{nextBlockSec}s</Text>
 
       <Text style={styles.balance}>Balance: {balance} HNY</Text>
-
       {!!status && <Text style={styles.status}>{status}</Text>}
 
-      <TouchableOpacity
-        style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]}
-        onPress={handleMint}
-        disabled={isCoolingDown}
-      >
-        <Text style={styles.buttonText}>
-          {isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}
-        </Text>
+      <TouchableOpacity style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]} onPress={handleMint} disabled={isCoolingDown}>
+        <Text style={styles.buttonText}>{isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}</Text>
       </TouchableOpacity>
 
       <View style={styles.row}>
         <TouchableOpacity style={styles.smallButton} onPress={loadBalance}>
           <Text style={styles.smallButtonText}>Get Balance</Text>
         </TouchableOpacity>
-
         <TouchableOpacity style={styles.smallButton} onPress={toggleTxs}>
-          <Text style={styles.smallButtonText}>
-            {showTxs ? "Hide History" : "Transaction History"}
-          </Text>
+          <Text style={styles.smallButtonText}>{showTxs ? "Hide History" : "Transaction History"}</Text>
         </TouchableOpacity>
       </View>
 
       <Text style={styles.sectionTitle}>Send</Text>
 
-      <TextInput
-        style={styles.input}
-        value={to}
-        onChangeText={setTo}
-        placeholder="Recipient address"
-        placeholderTextColor="#777"
-        autoCapitalize="none"
-      />
-
-      <TextInput
-        style={styles.input}
-        value={amount}
-        onChangeText={setAmount}
-        placeholder="Amount"
-        placeholderTextColor="#777"
-        keyboardType="numeric"
-      />
+      <TextInput style={styles.input} value={to} onChangeText={setTo} placeholder="Recipient address" placeholderTextColor="#777" autoCapitalize="none" />
+      <TextInput style={styles.input} value={amount} onChangeText={setAmount} placeholder="Amount" placeholderTextColor="#777" keyboardType="numeric" />
 
       <TouchableOpacity style={styles.button} onPress={handleSend}>
         <Text style={styles.buttonText}>Send</Text>
@@ -259,6 +226,7 @@ export default function IndexScreen() {
                     {String(item.type).toUpperCase()} • {item.amount} • {item.status}
                     {item.status === "confirmed" && item.blockHeight != null ? ` • block ${item.blockHeight}` : ""}
                   </Text>
+                  <Text style={styles.txSub}>Nonce: {item.nonce}</Text>
                   <Text style={styles.txSub}>From: {item.from || "—"}</Text>
                   <Text style={styles.txSub}>To: {item.to}</Text>
                 </View>

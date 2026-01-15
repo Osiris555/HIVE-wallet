@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
+const nacl = require("tweetnacl");
+const naclUtil = require("tweetnacl-util");
 
 const app = express();
 const PORT = 3000;
@@ -17,10 +19,10 @@ app.use(express.json());
 const MINT_AMOUNT = 100;
 const MINT_COOLDOWN_MS = 60 * 1000; // 1 minute
 
-// ✅ Block production (Option B)
-const BLOCK_TIME_MS = 5000; // 5 seconds (tune later)
-const MAX_BLOCK_TXS = 500; // safety for demo
-const MAX_BLOCKS_STORED = 200; // keep memory bounded
+// Blocks
+const BLOCK_TIME_MS = 5000; // 5 seconds
+const MAX_BLOCK_TXS = 500;
+const MAX_BLOCKS_STORED = 200;
 
 /* ======================
    IN-MEMORY STATE
@@ -29,8 +31,12 @@ const balances = {};             // wallet => number
 const transactions = [];         // newest-first list of all txs
 const mintCooldowns = {};        // wallet => lastMintTimeMs
 
-// ✅ Chain state
-let chainHeight = 0;             // increments per block
+// ✅ NEW: accounts
+const publicKeys = {};           // wallet => base64(pubkey 32 bytes)
+const nonces = {};               // wallet => next expected nonce (integer)
+
+// Chain state
+let chainHeight = 0;
 let lastBlockTimeMs = Date.now();
 const blocks = [];               // newest-first
 const mempool = [];              // txs waiting to be included
@@ -50,14 +56,57 @@ function getBalance(wallet) {
   return balances[wallet] || 0;
 }
 
+function getNonce(wallet) {
+  return Number.isInteger(nonces[wallet]) ? nonces[wallet] : 0;
+}
+
+function setNonce(wallet, value) {
+  nonces[wallet] = value;
+}
+
 function sha256Hex(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
-function createTx({ type, from = null, to, amount }) {
-  const ts = now();
+// ✅ Canonical string that gets signed (client + server must match EXACTLY)
+function canonicalMessage({ type, from, to, amount, nonce, timestamp }) {
+  // IMPORTANT: keep separators stable and avoid JSON stringify differences
+  return [
+    String(type),
+    String(from ?? ""),
+    String(to ?? ""),
+    String(amount),
+    String(nonce),
+    String(timestamp),
+  ].join("|");
+}
+
+function verifySignature({ wallet, message, signatureB64 }) {
+  const pubB64 = publicKeys[wallet];
+  if (!pubB64) {
+    return { ok: false, error: "Wallet not registered (missing public key)" };
+  }
+  if (!signatureB64) {
+    return { ok: false, error: "Missing signature" };
+  }
+
+  let pubKey, sig;
+  try {
+    pubKey = naclUtil.decodeBase64(pubB64);      // 32 bytes
+    sig = naclUtil.decodeBase64(signatureB64);   // 64 bytes
+  } catch {
+    return { ok: false, error: "Invalid base64 public key or signature" };
+  }
+
+  const msgBytes = naclUtil.decodeUTF8(message);
+  const ok = nacl.sign.detached.verify(msgBytes, sig, pubKey);
+  if (!ok) return { ok: false, error: "Invalid signature" };
+  return { ok: true };
+}
+
+function createTx({ type, from = null, to, amount, nonce, timestamp }) {
   const id = crypto.randomUUID();
-  const hash = sha256Hex(`${id}:${type}:${from ?? ""}:${to}:${amount}:${ts}:${Math.random()}`);
+  const hash = sha256Hex(`${id}:${type}:${from ?? ""}:${to}:${amount}:${nonce}:${timestamp}`);
 
   return {
     id,
@@ -66,27 +115,25 @@ function createTx({ type, from = null, to, amount }) {
     from,
     to,
     amount,
+    nonce,
     gasFee: 0.000001,
-    status: "pending",          // ✅ pending until included in a block
-    blockHeight: null,          // ✅ set on confirmation
-    blockHash: null,            // ✅ set on confirmation
-    timestamp: ts,
+    status: "pending",
+    blockHeight: null,
+    blockHash: null,
+    timestamp,
   };
 }
 
 function addTx(tx) {
-  // Store globally (newest-first)
   transactions.unshift(tx);
-  // Add to mempool for block inclusion
   mempool.push(tx);
 }
 
 function buildBlockFromMempool() {
-  const txs = mempool.splice(0, MAX_BLOCK_TXS); // take up to MAX_BLOCK_TXS
+  const txs = mempool.splice(0, MAX_BLOCK_TXS);
   const height = ++chainHeight;
   const ts = now();
 
-  // Build a block hash from header + tx hashes
   const header = `${height}:${ts}:${txs.length}:${blocks[0]?.hash || "GENESIS"}`;
   const txRoot = sha256Hex(txs.map((t) => t.hash).join("|"));
   const hash = sha256Hex(`${header}:${txRoot}`);
@@ -97,17 +144,15 @@ function buildBlockFromMempool() {
     timestamp: ts,
     txCount: txs.length,
     txRoot,
-    txs: txs.map((t) => t.id), // store ids to keep block light
+    txs: txs.map((t) => t.id),
   };
 
-  // Confirm txs
   for (const tx of txs) {
     tx.status = "confirmed";
     tx.blockHeight = height;
     tx.blockHash = hash;
   }
 
-  // Store newest-first
   blocks.unshift(block);
   if (blocks.length > MAX_BLOCKS_STORED) blocks.length = MAX_BLOCKS_STORED;
 
@@ -116,11 +161,10 @@ function buildBlockFromMempool() {
 }
 
 /* ======================
-   BLOCK PRODUCER (Option B)
+   BLOCK PRODUCER
 ====================== */
 setInterval(() => {
-  // Produce empty blocks too (useful for chain height ticking like a real network)
-  // If you don't want empty blocks, wrap with: if (mempool.length === 0) return;
+  // Produces empty blocks too (testnet-like)
   buildBlockFromMempool();
 }, BLOCK_TIME_MS);
 
@@ -128,7 +172,6 @@ setInterval(() => {
    ROUTES
 ====================== */
 
-/* Health check */
 app.get("/", (_req, res) => {
   res.json({ status: "HIVE Wallet server running" });
 });
@@ -154,11 +197,49 @@ app.get("/blocks", (req, res) => {
   res.json(blocks.slice(0, limit));
 });
 
-/* ----------------------
-   BALANCE
----------------------- */
+/* ✅ Register wallet pubkey */
+app.post("/register", (req, res) => {
+  const wallet = normalizeWallet(req.body);
+  const publicKey = req.body?.publicKey; // base64
 
-/* Get balance (GET /balance/:wallet) */
+  if (!wallet || !publicKey) {
+    return res.status(400).json({ error: "Missing wallet and/or publicKey" });
+  }
+
+  // Basic validation: should decode to 32 bytes
+  try {
+    const pk = naclUtil.decodeBase64(publicKey);
+    if (pk.length !== 32) throw new Error("bad length");
+  } catch {
+    return res.status(400).json({ error: "Invalid publicKey (must be base64 32 bytes)" });
+  }
+
+  publicKeys[wallet] = publicKey;
+  if (!Number.isInteger(nonces[wallet])) nonces[wallet] = 0;
+  if (!Number.isFinite(balances[wallet])) balances[wallet] = getBalance(wallet);
+
+  res.json({
+    success: true,
+    wallet,
+    nonce: getNonce(wallet),
+    registered: true,
+  });
+});
+
+/* ✅ Account info (balance + nonce + registered) */
+app.get("/account/:wallet", (req, res) => {
+  const wallet = req.params.wallet;
+  if (!wallet) return res.status(400).json({ error: "Missing wallet" });
+
+  res.json({
+    wallet,
+    balance: getBalance(wallet),
+    nonce: getNonce(wallet),
+    registered: !!publicKeys[wallet],
+  });
+});
+
+/* Balance (GET /balance/:wallet) */
 app.get("/balance/:wallet", (req, res) => {
   const wallet = req.params.wallet;
   if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -166,7 +247,7 @@ app.get("/balance/:wallet", (req, res) => {
   res.json({ wallet, balance: getBalance(wallet) });
 });
 
-/* Get balance (POST /balance) */
+/* Balance (POST /balance) */
 app.post("/balance", (req, res) => {
   const wallet = normalizeWallet(req.body);
   if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
@@ -174,11 +255,7 @@ app.post("/balance", (req, res) => {
   res.json({ wallet, balance: getBalance(wallet) });
 });
 
-/* ----------------------
-   TRANSACTIONS
----------------------- */
-
-/* Get transactions (GET /transactions/:wallet) */
+/* Transactions (GET /transactions/:wallet) */
 app.get("/transactions/:wallet", (req, res) => {
   const wallet = req.params.wallet;
   if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -187,7 +264,7 @@ app.get("/transactions/:wallet", (req, res) => {
   res.json(txs);
 });
 
-/* Get transactions (POST /transactions) */
+/* Transactions (POST /transactions) */
 app.post("/transactions", (req, res) => {
   const wallet = normalizeWallet(req.body);
   if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
@@ -196,36 +273,70 @@ app.post("/transactions", (req, res) => {
   res.json(txs);
 });
 
-/* ----------------------
-   MINT
----------------------- */
+/* ======================
+   AUTHENTICATED TX ROUTES
+   (nonce + signature verified)
+====================== */
+
+/* Mint (POST /mint) */
 app.post("/mint", (req, res) => {
   const wallet = normalizeWallet(req.body);
+  const nonce = req.body?.nonce;
+  const timestamp = req.body?.timestamp;
+  const signature = req.body?.signature;
 
-  if (!wallet) {
-    return res.status(400).json({ error: "Missing wallet/address" });
-  }
+  if (!wallet) return res.status(400).json({ error: "Missing wallet/address" });
+  if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+  if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-  const lastMint = mintCooldowns[wallet] || 0;
-  const remaining = lastMint + MINT_COOLDOWN_MS - now();
-
-  if (remaining > 0) {
-    const cooldownSeconds = Math.ceil(remaining / 1000);
-    res.set("Retry-After", String(cooldownSeconds));
-    return res.status(429).json({
-      error: "Cooldown active",
-      cooldownSeconds,
+  // Nonce check
+  const expected = getNonce(wallet);
+  if (nonce !== expected) {
+    return res.status(409).json({
+      error: "Nonce mismatch",
+      expectedNonce: expected,
+      gotNonce: nonce,
     });
   }
 
-  // Update balance immediately (wallet will show value even while tx pending)
+  // Signature check
+  const msg = canonicalMessage({
+    type: "mint",
+    from: "",
+    to: wallet,
+    amount: MINT_AMOUNT,
+    nonce,
+    timestamp,
+  });
+
+  const sigOk = verifySignature({ wallet, message: msg, signatureB64: signature });
+  if (!sigOk.ok) {
+    return res.status(401).json({ error: sigOk.error });
+  }
+
+  // Cooldown check
+  const lastMint = mintCooldowns[wallet] || 0;
+  const remaining = lastMint + MINT_COOLDOWN_MS - now();
+  if (remaining > 0) {
+    const cooldownSeconds = Math.ceil(remaining / 1000);
+    res.set("Retry-After", String(cooldownSeconds));
+    return res.status(429).json({ error: "Cooldown active", cooldownSeconds });
+  }
+
+  // Accept tx: increment nonce (replay protection)
+  setNonce(wallet, expected + 1);
+
+  // Apply balance immediately (optimistic like before)
   balances[wallet] = getBalance(wallet) + MINT_AMOUNT;
   mintCooldowns[wallet] = now();
 
   const tx = createTx({
     type: "mint",
+    from: null,
     to: wallet,
     amount: MINT_AMOUNT,
+    nonce,
+    timestamp,
   });
 
   addTx(tx);
@@ -234,32 +345,57 @@ app.post("/mint", (req, res) => {
     success: true,
     wallet,
     balance: balances[wallet],
+    nonce: getNonce(wallet),
     tx,
     cooldownSeconds: Math.ceil(MINT_COOLDOWN_MS / 1000),
     chainHeight,
   });
 });
 
-/* ----------------------
-   SEND
----------------------- */
+/* Send (POST /send) */
 app.post("/send", (req, res) => {
-  const { from, to, amount } = req.body;
+  const { from, to, amount, nonce, timestamp, signature } = req.body;
 
-  if (!from || !to || amount === undefined || amount === null) {
-    return res.status(400).json({ error: "Missing from, to, or amount" });
-  }
+  if (!from || !to) return res.status(400).json({ error: "Missing from/to" });
 
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     return res.status(400).json({ error: "Amount must be a positive number" });
   }
+  if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+  if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+  // Nonce check (replay protection)
+  const expected = getNonce(from);
+  if (nonce !== expected) {
+    return res.status(409).json({
+      error: "Nonce mismatch",
+      expectedNonce: expected,
+      gotNonce: nonce,
+    });
+  }
+
+  // Signature check (for wallet = from)
+  const msg = canonicalMessage({
+    type: "send",
+    from,
+    to,
+    amount: amt,
+    nonce,
+    timestamp,
+  });
+
+  const sigOk = verifySignature({ wallet: from, message: msg, signatureB64: signature });
+  if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
   if (getBalance(from) < amt) {
     return res.status(400).json({ error: "Insufficient balance" });
   }
 
-  // Apply balances immediately (tx will still be pending until block)
+  // Accept tx: increment nonce
+  setNonce(from, expected + 1);
+
+  // Apply balances immediately
   balances[from] = getBalance(from) - amt;
   balances[to] = getBalance(to) + amt;
 
@@ -268,6 +404,8 @@ app.post("/send", (req, res) => {
     from,
     to,
     amount: amt,
+    nonce,
+    timestamp,
   });
 
   addTx(tx);
@@ -277,6 +415,7 @@ app.post("/send", (req, res) => {
     tx,
     fromBalance: balances[from],
     toBalance: balances[to],
+    fromNonce: getNonce(from),
     chainHeight,
   });
 });
@@ -292,9 +431,6 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-/* ======================
-   START SERVER
-====================== */
 app.listen(PORT, () => {
   console.log(`🚀 HIVE Wallet server running on http://localhost:${PORT}`);
   console.log(`⛓️  Block time: ${BLOCK_TIME_MS}ms`);
