@@ -8,8 +8,6 @@ import {
   getTransactions,
   getChainStatus,
   ensureWalletId,
-  registerWallet,
-  getAccount,
 } from "../chain/transactions";
 
 const STORAGE_COOLDOWN_END = "HIVE_COOLDOWN_END_MS";
@@ -77,11 +75,6 @@ export default function IndexScreen() {
     } catch {}
   }
 
-  async function ensureRegistered(w: string) {
-    const acct: any = await getAccount(w);
-    if (!acct.registered) await registerWallet();
-  }
-
   async function loadBalance(w: string) {
     const data: any = await getBalance(w);
     setBalance(Number(data?.balance || 0));
@@ -100,9 +93,8 @@ export default function IndexScreen() {
     (async () => {
       try {
         setStatus("");
-        const w = await ensureWalletId();
+        const w = await ensureWalletId(); // ✅ comes from server registration
         setWallet(w);
-        await ensureRegistered(w);
         await loadChainStatus();
         await loadBalance(w);
         if (showTxs) await loadTxs(w);
@@ -130,13 +122,14 @@ export default function IndexScreen() {
   }, [showTxs, txs, wallet]);
 
   async function handleMint() {
+    if (!wallet) return;
     if (isCoolingDown) {
       setStatus(`Cooldown active: ${secondsLeft}s left`);
       return;
     }
     try {
       setStatus("");
-      const data: any = await mint();
+      const data: any = await mint(); // ✅ only returns if server accepted it
       startCooldown(Number(data?.cooldownSeconds || 60));
       await loadBalance(wallet);
       if (showTxs) await loadTxs(wallet);
@@ -153,9 +146,11 @@ export default function IndexScreen() {
   }
 
   async function handleSend() {
+    if (!wallet) return;
+
     const t = to.trim();
     const n = Number(amount);
-    if (!t) return setStatus("Enter a recipient address.");
+    if (!t) return setStatus("Enter a recipient address (HNY_...).");
     if (!Number.isFinite(n) || n <= 0) return setStatus("Enter a valid amount.");
 
     try {
@@ -194,7 +189,11 @@ export default function IndexScreen() {
       <Text style={styles.balance}>Balance: {balance} HNY</Text>
       {!!status && <Text style={styles.status}>{status}</Text>}
 
-      <TouchableOpacity style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]} onPress={handleMint} disabled={isCoolingDown || !wallet}>
+      <TouchableOpacity
+        style={[styles.button, isCoolingDown ? styles.buttonDisabled : null]}
+        onPress={handleMint}
+        disabled={isCoolingDown || !wallet}
+      >
         <Text style={styles.buttonText}>{isCoolingDown ? `Mint (${secondsLeft}s)` : "Mint"}</Text>
       </TouchableOpacity>
 
@@ -209,8 +208,22 @@ export default function IndexScreen() {
       </View>
 
       <Text style={styles.sectionTitle}>Send</Text>
-      <TextInput style={styles.input} value={to} onChangeText={setTo} placeholder="Recipient address (HNY_...)" placeholderTextColor="#777" autoCapitalize="none" />
-      <TextInput style={styles.input} value={amount} onChangeText={setAmount} placeholder="Amount" placeholderTextColor="#777" keyboardType="numeric" />
+      <TextInput
+        style={styles.input}
+        value={to}
+        onChangeText={setTo}
+        placeholder="Recipient address (HNY_...)"
+        placeholderTextColor="#777"
+        autoCapitalize="none"
+      />
+      <TextInput
+        style={styles.input}
+        value={amount}
+        onChangeText={setAmount}
+        placeholder="Amount"
+        placeholderTextColor="#777"
+        keyboardType="numeric"
+      />
 
       <TouchableOpacity style={styles.button} onPress={handleSend} disabled={!wallet}>
         <Text style={styles.buttonText}>Send</Text>
