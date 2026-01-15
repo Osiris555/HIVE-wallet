@@ -10,9 +10,6 @@ const { openDb, initDb, run, get, all, DB_PATH } = require("./db");
 const app = express();
 const PORT = 3000;
 
-/* ======================
-   BASIC SETUP
-====================== */
 app.use(cors());
 app.use(express.json());
 
@@ -25,17 +22,17 @@ const MINT_COOLDOWN_MS = 60 * 1000;
 // Blocks
 const BLOCK_TIME_MS = 5000;
 const MAX_BLOCK_TXS = 500;
-const MAX_BLOCKS_RETURN = 200;
 
-// NEW: Testnet-style rules
-const TX_TTL_MS = 60 * 1000; // pending tx expires after 60s
-const MAX_PENDING_PER_WALLET = 20; // "max nonce gap" practical equivalent
-const MAX_TXS_PER_WALLET_PER_BLOCK = 5; // per wallet per block
-const MIN_GAS_FEE = 0.000001; // fee floor
+// Failure rules
+const TX_TTL_MS = 60 * 1000;                  // expiry
+const MAX_PENDING_PER_WALLET = 20;            // pending queue spam limiter
+const MAX_TXS_PER_WALLET_PER_BLOCK = 5;       // per wallet per block
+const MIN_GAS_FEE = 0.000001;                 // fee floor
 
-/* ======================
-   DB
-====================== */
+// ✅ NEW: chainId for replay protection across networks
+// Change this when you launch testnet vs devnet, etc.
+const CHAIN_ID = process.env.HIVE_CHAIN_ID || "hny-devnet-1";
+
 const db = openDb();
 
 /* ======================
@@ -52,13 +49,32 @@ function deriveWalletFromPubKeyB64(pubB64) {
   const hex = sha256Hex(Buffer.from(pubBytes));
   return `HNY_${hex.slice(0, 40)}`;
 }
-function canonicalMessage({ type, from, to, amount, nonce, timestamp }) {
+
+/**
+ * ✅ NEW SIGNED ENVELOPE
+ * Everything that matters is signed:
+ * chainId | type | from | to | amount | nonce | gasFee | expiresAtMs | timestamp
+ */
+function canonicalSignedMessage({
+  chainId,
+  type,
+  from,
+  to,
+  amount,
+  nonce,
+  gasFee,
+  expiresAtMs,
+  timestamp,
+}) {
   return [
+    String(chainId),
     String(type),
     String(from ?? ""),
     String(to ?? ""),
     String(amount),
     String(nonce),
+    String(gasFee),
+    String(expiresAtMs),
     String(timestamp),
   ].join("|");
 }
@@ -66,7 +82,6 @@ function canonicalMessage({ type, from, to, amount, nonce, timestamp }) {
 async function ensureAccountExists(wallet) {
   const row = await get(db, `SELECT wallet FROM accounts WHERE wallet = ?`, [wallet]);
   if (row) return;
-
   await run(
     db,
     `INSERT INTO accounts (wallet, publicKeyB64, balance, nonce, lastMintMs, createdAtMs)
@@ -109,7 +124,7 @@ async function getPendingOutgoing(wallet) {
     db,
     `SELECT COALESCE(SUM(amount), 0) AS s
      FROM transactions
-     WHERE status = 'pending' AND type = 'send' AND fromWallet = ?`,
+     WHERE status='pending' AND type='send' AND fromWallet=?`,
     [wallet]
   );
   return Number(row?.s || 0);
@@ -128,11 +143,6 @@ async function getPendingDelta(wallet) {
   return Number(row?.d || 0);
 }
 
-/**
- * "Max nonce gap" practical control: limit how many pending txs a wallet can have queued.
- * - send: counts pending sends from that wallet
- * - mint: counts pending mints to that wallet (wallet is the "owner")
- */
 async function countPendingForWallet({ type, wallet }) {
   if (type === "send") {
     const r = await get(
@@ -173,7 +183,11 @@ function verifySignature({ walletPubKeyB64, message, signatureB64 }) {
 
 function createTx({ type, from = null, to, amount, nonce, gasFee, timestampMs, expiresAtMs }) {
   const id = crypto.randomUUID();
-  const hash = sha256Hex(`${id}:${type}:${from ?? ""}:${to}:${amount}:${nonce}:${gasFee}:${timestampMs}:${expiresAtMs}`);
+
+  // ✅ hash includes signed fields (good for explorers)
+  const hash = sha256Hex(
+    `${CHAIN_ID}:${id}:${type}:${from ?? ""}:${to}:${amount}:${nonce}:${gasFee}:${expiresAtMs}:${timestampMs}`
+  );
 
   return {
     id,
@@ -219,7 +233,7 @@ async function insertTx(tx) {
 }
 
 /* ======================
-   BLOCK PRODUCER (confirmed-only + failed reasons + rules)
+   BLOCK PRODUCER
 ====================== */
 
 async function getLatestBlock() {
@@ -231,7 +245,7 @@ async function buildBlockWithRules() {
     db,
     `SELECT id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, expiresAtMs, timestampMs
      FROM transactions
-     WHERE status = 'pending'
+     WHERE status='pending'
      ORDER BY timestampMs ASC
      LIMIT ?`,
     [MAX_BLOCK_TXS]
@@ -242,13 +256,10 @@ async function buildBlockWithRules() {
   const height = (latest?.height || 0) + 1;
   const ts = now();
 
-  // We include ONLY confirmed txs in the block body
   const confirmedIds = [];
 
   await run(db, "BEGIN TRANSACTION");
-
   try {
-    // Working balances for involved wallets
     const wallets = new Set();
     for (const tx of pending) {
       if (tx.toWallet) wallets.add(tx.toWallet);
@@ -262,72 +273,64 @@ async function buildBlockWithRules() {
       working[w] = Number(a.balance);
     }
 
-    // Per-wallet confirmation counter for this block
-    const perWalletCount = {}; // wallet -> count
-
-    function bump(wallet) {
-      perWalletCount[wallet] = (perWalletCount[wallet] || 0) + 1;
-      return perWalletCount[wallet];
-    }
-    function isOverLimit(wallet) {
-      return (perWalletCount[wallet] || 0) >= MAX_TXS_PER_WALLET_PER_BLOCK;
-    }
+    const perWalletCount = {};
+    const isOverLimit = (wallet) => (perWalletCount[wallet] || 0) >= MAX_TXS_PER_WALLET_PER_BLOCK;
+    const bump = (wallet) => (perWalletCount[wallet] = (perWalletCount[wallet] || 0) + 1);
 
     for (const tx of pending) {
       const amt = Number(tx.amount);
       const fee = Number(tx.gasFee);
       const exp = tx.expiresAtMs == null ? null : Number(tx.expiresAtMs);
 
-      // Expiry check (NULL means "no expiry" for old DB rows; treat as not expired)
+      // 1) expiry
       if (exp != null && Number.isFinite(exp) && ts > exp) {
         await run(
           db,
           `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-          ["expired", height, "PENDING_HASH", tx.id]
+          ["expired", height, "TBD", tx.id]
         );
         continue;
       }
 
-      // Fee floor check
+      // 4) fee too low
       if (!Number.isFinite(fee) || fee < MIN_GAS_FEE) {
         await run(
           db,
           `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-          ["fee_too_low", height, "PENDING_HASH", tx.id]
+          ["fee_too_low", height, "TBD", tx.id]
         );
         continue;
       }
 
-      // Amount check
       if (!Number.isFinite(amt) || amt <= 0) {
         await run(
           db,
           `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-          ["invalid_amount", height, "PENDING_HASH", tx.id]
+          ["invalid_amount", height, "TBD", tx.id]
         );
         continue;
       }
 
       if (tx.type === "mint") {
-        const wallet = tx.toWallet;
+        const owner = tx.toWallet;
 
-        // Per-wallet-per-block limit (mints count toward the wallet too)
-        if (isOverLimit(wallet)) {
+        // 3) per wallet per block
+        if (isOverLimit(owner)) {
           await run(
             db,
             `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-            ["per_wallet_block_limit", height, "PENDING_HASH", tx.id]
+            ["per_wallet_block_limit", height, "TBD", tx.id]
           );
           continue;
         }
-        bump(wallet);
+        bump(owner);
 
-        working[wallet] = (working[wallet] || 0) + amt;
+        working[owner] = (working[owner] || 0) + amt;
 
         await run(
           db,
           `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`,
-          [height, "PENDING_HASH", tx.id]
+          [height, "TBD", tx.id]
         );
         confirmedIds.push(tx.id);
         continue;
@@ -341,17 +344,17 @@ async function buildBlockWithRules() {
           await run(
             db,
             `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-            ["missing_from_or_to", height, "PENDING_HASH", tx.id]
+            ["missing_from_or_to", height, "TBD", tx.id]
           );
           continue;
         }
 
-        // Per-wallet-per-block limit based on sender
+        // 3) per wallet per block (sender)
         if (isOverLimit(from)) {
           await run(
             db,
             `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-            ["per_wallet_block_limit", height, "PENDING_HASH", tx.id]
+            ["per_wallet_block_limit", height, "TBD", tx.id]
           );
           continue;
         }
@@ -361,7 +364,7 @@ async function buildBlockWithRules() {
           await run(
             db,
             `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-            ["insufficient_confirmed_at_block", height, "PENDING_HASH", tx.id]
+            ["insufficient_confirmed_at_block", height, "TBD", tx.id]
           );
           continue;
         }
@@ -374,7 +377,7 @@ async function buildBlockWithRules() {
         await run(
           db,
           `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`,
-          [height, "PENDING_HASH", tx.id]
+          [height, "TBD", tx.id]
         );
         confirmedIds.push(tx.id);
         continue;
@@ -383,45 +386,29 @@ async function buildBlockWithRules() {
       await run(
         db,
         `UPDATE transactions SET status='failed', failReason=?, blockHeight=?, blockHash=? WHERE id=?`,
-        ["unknown_type", height, "PENDING_HASH", tx.id]
+        ["unknown_type", height, "TBD", tx.id]
       );
     }
 
-    // Apply working balances to DB
     for (const [w, bal] of Object.entries(working)) {
       await updateBalance(w, bal);
     }
 
-    // Build the block hash over confirmed txs only
-    const confirmedRows = pending.filter((t) => confirmedIds.includes(t.id));
-    const confirmedHashes = confirmedRows.map((t) => t.hash);
-
+    const confirmedHashes = pending.filter((t) => confirmedIds.includes(t.id)).map((t) => t.hash);
     const txRoot = sha256Hex(confirmedHashes.join("|"));
     const header = `${height}:${ts}:${confirmedIds.length}:${prevHash}`;
     const blockHash = sha256Hex(`${header}:${txRoot}`);
 
-    // Update txs with final blockHash (both confirmed + failed for grouping)
-    if (confirmedIds.length > 0) {
-      const placeholders = confirmedIds.map(() => "?").join(",");
-      await run(
-        db,
-        `UPDATE transactions SET blockHash=? WHERE id IN (${placeholders})`,
-        [blockHash, ...confirmedIds]
-      );
-    }
-
     const allIds = pending.map((t) => t.id);
-    const failedIds = allIds.filter((id) => !confirmedIds.includes(id));
-    if (failedIds.length > 0) {
-      const placeholders = failedIds.map(() => "?").join(",");
+    if (allIds.length > 0) {
+      const placeholders = allIds.map(() => "?").join(",");
       await run(
         db,
         `UPDATE transactions SET blockHash=? WHERE id IN (${placeholders})`,
-        [blockHash, ...failedIds]
+        [blockHash, ...allIds]
       );
     }
 
-    // Insert block
     await run(
       db,
       `INSERT INTO blocks (height, hash, prevHash, timestampMs, txCount, txRoot, txIdsJson)
@@ -438,7 +425,6 @@ async function buildBlockWithRules() {
 }
 
 let lastBlockTimeMs = now();
-
 async function startBlockProducer() {
   const latest = await getLatestBlock();
   if (latest?.timestampMs) lastBlockTimeMs = latest.timestampMs;
@@ -461,13 +447,8 @@ app.get("/", (_req, res) => {
   res.json({
     status: "HIVE Wallet server running",
     db: DB_PATH,
-    mode: "confirmed-only + failed reasons + ttl + per-block limits + min-fee",
-    rules: {
-      TX_TTL_MS,
-      MAX_PENDING_PER_WALLET,
-      MAX_TXS_PER_WALLET_PER_BLOCK,
-      MIN_GAS_FEE,
-    },
+    chainId: CHAIN_ID,
+    rules: { TX_TTL_MS, MAX_PENDING_PER_WALLET, MAX_TXS_PER_WALLET_PER_BLOCK, MIN_GAS_FEE },
   });
 });
 
@@ -479,10 +460,11 @@ app.get("/status", async (_req, res) => {
     const elapsed = now() - lastBlockTimeMs;
     const msUntilNext = Math.max(0, BLOCK_TIME_MS - (elapsed % BLOCK_TIME_MS));
 
-    const mempoolSizeRow = await get(db, `SELECT COUNT(*) as c FROM transactions WHERE status = 'pending'`);
+    const mempoolSizeRow = await get(db, `SELECT COUNT(*) as c FROM transactions WHERE status='pending'`);
     const mempoolSize = mempoolSizeRow?.c || 0;
 
     res.json({
+      chainId: CHAIN_ID,
       chainHeight,
       lastBlockTimeMs,
       blockTimeMs: BLOCK_TIME_MS,
@@ -512,8 +494,7 @@ app.post("/register", async (req, res) => {
     await setPubKey(wallet, publicKey);
 
     const acct = await getAccountRow(wallet);
-
-    res.json({ success: true, wallet, nonce: acct.nonce, registered: true });
+    res.json({ success: true, wallet, nonce: acct.nonce, registered: true, chainId: CHAIN_ID });
   } catch (e) {
     res.status(500).json({ error: e.message || "register failed" });
   }
@@ -529,6 +510,7 @@ app.get("/account/:wallet", async (req, res) => {
     const pendingOutgoing = await getPendingOutgoing(wallet);
 
     res.json({
+      chainId: CHAIN_ID,
       wallet: acct.wallet,
       balance: Number(acct.balance),
       pendingDelta,
@@ -551,6 +533,7 @@ app.get("/balance/:wallet", async (req, res) => {
     const pendingOutgoing = await getPendingOutgoing(wallet);
 
     res.json({
+      chainId: CHAIN_ID,
       wallet,
       balance: Number(acct.balance),
       pendingDelta,
@@ -569,7 +552,7 @@ app.get("/transactions/:wallet", async (req, res) => {
     const rows = await all(
       db,
       `SELECT * FROM transactions
-       WHERE fromWallet = ? OR toWallet = ?
+       WHERE fromWallet=? OR toWallet=?
        ORDER BY timestampMs DESC
        LIMIT 200`,
       [wallet, wallet]
@@ -599,7 +582,7 @@ app.get("/transactions/:wallet", async (req, res) => {
 });
 
 /* ======================
-   SIGNED TX ROUTES (pending submit)
+   SIGNED TX SUBMISSION
 ====================== */
 
 app.post("/mint", async (req, res) => {
@@ -608,8 +591,12 @@ app.post("/mint", async (req, res) => {
     const nonce = req.body?.nonce;
     const timestamp = req.body?.timestamp;
     const signature = req.body?.signature;
+
     const gasFee = Number(req.body?.gasFee ?? MIN_GAS_FEE);
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    const chainId = String(req.body?.chainId || "");
+
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
 
     if (!wallet) return res.status(400).json({ error: "Missing wallet" });
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
@@ -619,32 +606,31 @@ app.post("/mint", async (req, res) => {
       return res.status(400).json({ error: "Fee too low", minGasFee: MIN_GAS_FEE });
     }
 
-    const ttlMax = now() + TX_TTL_MS * 2; // cap client-provided expiry
+    const ttlMax = now() + TX_TTL_MS * 2;
     if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
       return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
     }
 
     const acct = await getAccountRow(wallet);
 
-    // anti-spam / "nonce gap" practical control
     const pendingCount = await countPendingForWallet({ type: "mint", wallet });
     if (pendingCount >= MAX_PENDING_PER_WALLET) {
-      return res.status(429).json({
-        error: "Too many pending transactions for this wallet",
-        maxPendingPerWallet: MAX_PENDING_PER_WALLET,
-      });
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
     }
 
     if (nonce !== acct.nonce) {
       return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
     }
 
-    const msg = canonicalMessage({
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
       type: "mint",
       from: "",
       to: wallet,
       amount: MINT_AMOUNT,
       nonce,
+      gasFee,
+      expiresAtMs,
       timestamp,
     });
 
@@ -658,7 +644,6 @@ app.post("/mint", async (req, res) => {
       return res.status(429).json({ error: "Cooldown active", cooldownSeconds });
     }
 
-    // consume nonce/cooldown immediately
     await setLastMint(wallet, now());
     await incrementNonce(wallet);
 
@@ -684,6 +669,7 @@ app.post("/mint", async (req, res) => {
 
     res.json({
       success: true,
+      chainId: CHAIN_ID,
       wallet,
       balance: Number(acct2.balance),
       pendingDelta,
@@ -692,7 +678,6 @@ app.post("/mint", async (req, res) => {
       tx,
       cooldownSeconds: Math.ceil(MINT_COOLDOWN_MS / 1000),
       chainHeight,
-      rules: { TX_TTL_MS, MIN_GAS_FEE, MAX_PENDING_PER_WALLET, MAX_TXS_PER_WALLET_PER_BLOCK },
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "mint failed" });
@@ -702,13 +687,17 @@ app.post("/mint", async (req, res) => {
 app.post("/send", async (req, res) => {
   try {
     const { from, to, amount, nonce, timestamp, signature } = req.body;
+
     const gasFee = Number(req.body?.gasFee ?? MIN_GAS_FEE);
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    const chainId = String(req.body?.chainId || "");
+
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
 
     if (!from || !to) return res.status(400).json({ error: "Missing from/to" });
 
     const amt = Number(amount);
-    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be a positive number" });
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be positive" });
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
     if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
@@ -722,28 +711,26 @@ app.post("/send", async (req, res) => {
     }
 
     await ensureAccountExists(to);
-
     const fromAcct = await getAccountRow(from);
 
-    // anti-spam / "nonce gap" practical control
     const pendingCount = await countPendingForWallet({ type: "send", wallet: from });
     if (pendingCount >= MAX_PENDING_PER_WALLET) {
-      return res.status(429).json({
-        error: "Too many pending transactions for this wallet",
-        maxPendingPerWallet: MAX_PENDING_PER_WALLET,
-      });
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
     }
 
     if (nonce !== fromAcct.nonce) {
       return res.status(409).json({ error: "Nonce mismatch", expectedNonce: fromAcct.nonce, gotNonce: nonce });
     }
 
-    const msg = canonicalMessage({
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
       type: "send",
       from,
       to,
       amount: amt,
       nonce,
+      gasFee,
+      expiresAtMs,
       timestamp,
     });
 
@@ -785,13 +772,13 @@ app.post("/send", async (req, res) => {
 
     res.json({
       success: true,
+      chainId: CHAIN_ID,
       tx,
       confirmedBalance: Number(acct2.balance),
       pendingDelta: pendingDelta2,
       spendableBalance: Number(acct2.balance) - pendingOutgoing2,
       fromNonce: acct2.nonce,
       chainHeight,
-      rules: { TX_TTL_MS, MIN_GAS_FEE, MAX_PENDING_PER_WALLET, MAX_TXS_PER_WALLET_PER_BLOCK },
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "send failed" });
@@ -799,7 +786,7 @@ app.post("/send", async (req, res) => {
 });
 
 /* ======================
-   START SERVER
+   START
 ====================== */
 (async () => {
   try {
@@ -809,7 +796,7 @@ app.post("/send", async (req, res) => {
     app.listen(PORT, () => {
       console.log(`🚀 HIVE Wallet server running on http://localhost:${PORT}`);
       console.log(`🗄️  SQLite DB: ${DB_PATH}`);
-      console.log(`⛓️  Block time: ${BLOCK_TIME_MS}ms`);
+      console.log(`⛓️  chainId: ${CHAIN_ID}`);
       console.log(`✅ Rules: TTL=${TX_TTL_MS}ms, MIN_FEE=${MIN_GAS_FEE}, MAX_PENDING=${MAX_PENDING_PER_WALLET}, MAX_PER_BLOCK=${MAX_TXS_PER_WALLET_PER_BLOCK}`);
     });
   } catch (e) {
