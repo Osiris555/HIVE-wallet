@@ -519,7 +519,7 @@ app.get("/status", async (_req, res) => {
       serviceFeeRate: SERVICE_FEE_RATE,
       txTtlMs: TX_TTL_MS,
       latestBlock: latest || null,
-      feeVaultBalance: Number(feeVaultBalance.tofixed(8)),
+      feeVaultBalance: Number(Number(feeVaultBalance || 0).toFixed(8)),
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "status failed" });
