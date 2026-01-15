@@ -726,11 +726,13 @@ export default function Index() {
                 If you see “nonce mismatch”, the tx is already confirmed or no longer replaceable.
               </Text>
 
-              <View style={{ height: 12 }} />.     
+              <View style={{ height: 12 }} />
+<Text style={{ color: T.text, fontWeight: "900" }}>Bump</Text>
+
 <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
   {[1.25, 1.5, 2.0].map((m) => (
     <Pressable
-      key={String(m)}
+      key={`rbf-m-${m}`}
       onPress={() => setRbfMultiplier(m)}
       style={{
         flex: 1,
