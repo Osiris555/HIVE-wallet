@@ -542,6 +542,55 @@ useEffect(() => {
 
   return (
 
+   const Screen = (
+    <View style={{ flex: 1 }}>
+      <ScrollView
+        contentContainerStyle={{
+          padding: 24,
+          gap: 14,
+          maxWidth: 950,
+          alignSelf: "center",
+          width: "100%",
+        }}
+      >
+        {/* 🔽 THIS IS YOUR EXISTING CONTENT — UNCHANGED */}
+        {/* header */}
+        {/* balances */}
+        {/* buttons */}
+        {/* send form */}
+        {/* tx list */}
+      </ScrollView>
+
+      {/* 🔽 ALL YOUR MODALS — UNCHANGED */}
+      {/* Confirm modal */}
+      {/* RBF modal */}
+      {/* Cancel modal */}
+      {/* Settings modal */}
+    </View>
+  );
+
+  return skin === "honeycomb" ? (
+    <ImageBackground
+      source={require("./honeycomb-bg.png")}
+      resizeMode="cover"
+      style={{ flex: 1 }}
+    >
+      <View style={{ flex: 1, backgroundColor: T.overlay }}>
+        {Screen}
+      </View>
+    </ImageBackground>
+  ) : (
+    <View style={{ flex: 1, backgroundColor: "#0b0b0b" }}>
+      <View style={{ flex: 1, backgroundColor: T.overlay }}>
+        {Screen}
+      </View>
+    </View>
+  );
+
+
+<View style={{ flex: 1, backgroundColor: skin === "solid-noir" ? "#000" : "#0b0b0b" }}>
+      <View style={{ flex: 1, backgroundColor: T.overlay }}
+
     {skin === "honeycomb" ? (
   <ImageBackground source={require("./honeycomb-bg.png")} resizeMode="cover" style={{ flex: 1 }}>
     <View style={{ flex: 1, backgroundColor: T.overlay }}>
@@ -1026,38 +1075,6 @@ useEffect(() => {
                     </Pressable>
                   ))}
                 </View>
-
-<View style={{ height: 14 }} />
-<Text style={{ color: T.sub, marginBottom: 10 }}>Skin (per network)</Text>
-
-<View style={{ flexDirection: "row", gap: 10 }}>
-  {[
-    { k: "honeycomb", label: "Honeycomb" },
-    { k: "solid-noir", label: "Solid Noir" },
-    { k: "solid-minimal", label: "Solid Minimal" },
-  ].map((x) => (
-    <Pressable
-      key={x.k}
-      onPress={() => setSkin(x.k as SkinKey)}
-      style={{
-        flex: 1,
-        padding: 12,
-        borderRadius: 12,
-        alignItems: "center",
-        borderWidth: 1,
-        borderColor: skin === x.k ? T.gold : "rgba(255,255,255,0.14)",
-        backgroundColor: skin === x.k ? "rgba(202,168,60,0.12)" : "transparent",
-      }}
-    >
-      <Text style={{ color: T.text, fontWeight: "900" }}>{x.label}</Text>
-    </Pressable>
-  ))}
-</View>
-
-<Text style={{ color: "#aaa", marginTop: 10, fontSize: 12 }}>
-  Active network: {chainId || "…"}
-</Text>
-
 
                 <View style={{ height: 14 }} />
 
