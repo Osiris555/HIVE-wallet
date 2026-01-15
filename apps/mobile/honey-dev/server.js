@@ -77,12 +77,13 @@ async function ensureAccountExists(wallet) {
   );
 }
 
-async function getAccount(wallet) {
+async function getAccountRow(wallet) {
   await ensureAccountExists(wallet);
-  const row = await get(db, `SELECT wallet, publicKeyB64, balance, nonce, lastMintMs FROM accounts WHERE wallet = ?`, [
-    wallet,
-  ]);
-  return row;
+  return await get(
+    db,
+    `SELECT wallet, publicKeyB64, balance, nonce, lastMintMs FROM accounts WHERE wallet = ?`,
+    [wallet]
+  );
 }
 
 async function setPubKey(wallet, publicKeyB64) {
@@ -103,6 +104,36 @@ async function incrementNonce(wallet) {
 async function setLastMint(wallet, ms) {
   await ensureAccountExists(wallet);
   await run(db, `UPDATE accounts SET lastMintMs = ? WHERE wallet = ?`, [ms, wallet]);
+}
+
+/**
+ * Pending deltas:
+ *  - pending outgoing sends reduce spendable
+ *  - pending incoming sends are not spendable, but show as pendingDelta
+ *  - pending mints are not spendable, but show as pendingDelta
+ */
+async function getPendingOutgoing(wallet) {
+  const row = await get(
+    db,
+    `SELECT COALESCE(SUM(amount), 0) AS s
+     FROM transactions
+     WHERE status = 'pending' AND type = 'send' AND fromWallet = ?`,
+    [wallet]
+  );
+  return Number(row?.s || 0);
+}
+
+async function getPendingDelta(wallet) {
+  const row = await get(
+    db,
+    `SELECT
+      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?), 0) +
+      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='send' AND toWallet=?), 0) -
+      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='send' AND fromWallet=?), 0)
+    AS d`,
+    [wallet, wallet, wallet]
+  );
+  return Number(row?.d || 0);
 }
 
 function verifySignature({ walletPubKeyB64, message, signatureB64 }) {
@@ -167,18 +198,19 @@ async function insertTx(tx) {
 }
 
 /* ======================
-   BLOCK PRODUCER (SQLite-backed)
+   BLOCK PRODUCER (confirmed-only balances)
 ====================== */
 
 async function getLatestBlock() {
   return await get(db, `SELECT height, hash, timestampMs FROM blocks ORDER BY height DESC LIMIT 1`);
 }
 
-async function buildBlock() {
-  // Select pending txs (mempool) oldest-first, limit MAX_BLOCK_TXS
+async function buildBlockConfirmedOnly() {
+  // Select pending txs (mempool) oldest-first
   const pending = await all(
     db,
-    `SELECT id, hash FROM transactions
+    `SELECT id, hash, type, fromWallet, toWallet, amount
+     FROM transactions
      WHERE status = 'pending'
      ORDER BY timestampMs ASC
      LIMIT ?`,
@@ -193,30 +225,58 @@ async function buildBlock() {
   const txIds = pending.map((t) => t.id);
   const txRoot = sha256Hex(pending.map((t) => t.hash).join("|"));
   const header = `${height}:${ts}:${txIds.length}:${prevHash}`;
-  const hash = sha256Hex(`${header}:${txRoot}`);
+  const blockHash = sha256Hex(`${header}:${txRoot}`);
 
-  // Confirm selected txs
-  if (txIds.length > 0) {
-    // Use a single SQL statement with IN (...) placeholders
-    const placeholders = txIds.map(() => "?").join(",");
+  // Atomic apply:
+  await run(db, "BEGIN TRANSACTION");
+
+  try {
+    // Apply confirmed-only effects to balances
+    for (const tx of pending) {
+      if (tx.type === "mint") {
+        await ensureAccountExists(tx.toWallet);
+        const acctTo = await getAccountRow(tx.toWallet);
+        await updateBalance(tx.toWallet, Number(acctTo.balance) + Number(tx.amount));
+      } else if (tx.type === "send") {
+        await ensureAccountExists(tx.toWallet);
+        await ensureAccountExists(tx.fromWallet);
+
+        const fromAcct = await getAccountRow(tx.fromWallet);
+        const toAcct = await getAccountRow(tx.toWallet);
+
+        // In real chains you’d handle invalid txs; for now we assume accepted txs are valid.
+        await updateBalance(tx.fromWallet, Number(fromAcct.balance) - Number(tx.amount));
+        await updateBalance(tx.toWallet, Number(toAcct.balance) + Number(tx.amount));
+      }
+    }
+
+    // Mark selected txs confirmed
+    if (txIds.length > 0) {
+      const placeholders = txIds.map(() => "?").join(",");
+      await run(
+        db,
+        `UPDATE transactions
+         SET status = 'confirmed', blockHeight = ?, blockHash = ?
+         WHERE id IN (${placeholders})`,
+        [height, blockHash, ...txIds]
+      );
+    }
+
+    // Insert block
     await run(
       db,
-      `UPDATE transactions
-       SET status = 'confirmed', blockHeight = ?, blockHash = ?
-       WHERE id IN (${placeholders})`,
-      [height, hash, ...txIds]
+      `INSERT INTO blocks (height, hash, prevHash, timestampMs, txCount, txRoot, txIdsJson)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [height, blockHash, prevHash, ts, txIds.length, txRoot, JSON.stringify(txIds)]
     );
+
+    await run(db, "COMMIT");
+  } catch (e) {
+    await run(db, "ROLLBACK");
+    throw e;
   }
 
-  // Insert block
-  await run(
-    db,
-    `INSERT INTO blocks (height, hash, prevHash, timestampMs, txCount, txRoot, txIdsJson)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [height, hash, prevHash, ts, txIds.length, txRoot, JSON.stringify(txIds)]
-  );
-
-  return { height, hash, timestampMs: ts, txCount: txIds.length, txRoot };
+  return { height, hash: blockHash, timestampMs: ts, txCount: txIds.length, txRoot };
 }
 
 let lastBlockTimeMs = now();
@@ -227,7 +287,7 @@ async function startBlockProducer() {
 
   setInterval(async () => {
     try {
-      const block = await buildBlock();
+      const block = await buildBlockConfirmedOnly(); // ✅ confirmed-only balances
       lastBlockTimeMs = block.timestampMs;
     } catch (e) {
       console.error("BLOCK PRODUCER ERROR:", e);
@@ -240,7 +300,7 @@ async function startBlockProducer() {
 ====================== */
 
 app.get("/", (_req, res) => {
-  res.json({ status: "HIVE Wallet server running", db: DB_PATH });
+  res.json({ status: "HIVE Wallet server running", db: DB_PATH, mode: "confirmed-only-balances" });
 });
 
 app.get("/status", async (_req, res) => {
@@ -286,9 +346,8 @@ app.post("/register", async (req, res) => {
     if (!publicKey) return res.status(400).json({ error: "Missing publicKey" });
 
     // Validate pubkey
-    let pk;
     try {
-      pk = naclUtil.decodeBase64(publicKey);
+      const pk = naclUtil.decodeBase64(publicKey);
       if (pk.length !== 32) throw new Error("bad length");
     } catch {
       return res.status(400).json({ error: "Invalid publicKey (must be base64 32 bytes)" });
@@ -298,7 +357,7 @@ app.post("/register", async (req, res) => {
     await ensureAccountExists(wallet);
     await setPubKey(wallet, publicKey);
 
-    const acct = await getAccount(wallet);
+    const acct = await getAccountRow(wallet);
 
     res.json({
       success: true,
@@ -316,11 +375,15 @@ app.get("/account/:wallet", async (req, res) => {
     const wallet = req.params.wallet;
     if (!wallet) return res.status(400).json({ error: "Missing wallet" });
 
-    const acct = await getAccount(wallet);
+    const acct = await getAccountRow(wallet);
+    const pendingDelta = await getPendingDelta(wallet);
+    const pendingOutgoing = await getPendingOutgoing(wallet);
 
     res.json({
       wallet: acct.wallet,
-      balance: acct.balance,
+      balance: Number(acct.balance), // confirmed
+      pendingDelta,
+      spendableBalance: Number(acct.balance) - pendingOutgoing, // confirmed - pending outgoing
       nonce: acct.nonce,
       registered: !!acct.publicKeyB64,
     });
@@ -334,8 +397,16 @@ app.get("/balance/:wallet", async (req, res) => {
     const wallet = req.params.wallet;
     if (!wallet) return res.status(400).json({ error: "Missing wallet" });
 
-    const acct = await getAccount(wallet);
-    res.json({ wallet, balance: acct.balance });
+    const acct = await getAccountRow(wallet);
+    const pendingDelta = await getPendingDelta(wallet);
+    const pendingOutgoing = await getPendingOutgoing(wallet);
+
+    res.json({
+      wallet,
+      balance: Number(acct.balance), // confirmed-only
+      pendingDelta,
+      spendableBalance: Number(acct.balance) - pendingOutgoing,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message || "balance failed" });
   }
@@ -378,6 +449,7 @@ app.get("/transactions/:wallet", async (req, res) => {
 
 /* ======================
    SIGNED TX ROUTES
+   (confirmed-only balance effects)
 ====================== */
 
 app.post("/mint", async (req, res) => {
@@ -391,7 +463,7 @@ app.post("/mint", async (req, res) => {
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
     if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-    const acct = await getAccount(wallet);
+    const acct = await getAccountRow(wallet);
 
     if (nonce !== acct.nonce) {
       return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
@@ -416,9 +488,8 @@ app.post("/mint", async (req, res) => {
       return res.status(429).json({ error: "Cooldown active", cooldownSeconds });
     }
 
-    // Apply state changes (immediate apply; tx confirms when block producer includes it)
-    const newBal = Number(acct.balance) + MINT_AMOUNT;
-    await updateBalance(wallet, newBal);
+    // ✅ confirmed-only: DO NOT change balances here
+    // But DO consume nonce/cooldown immediately to prevent replay/spam
     await setLastMint(wallet, now());
     await incrementNonce(wallet);
 
@@ -433,15 +504,19 @@ app.post("/mint", async (req, res) => {
 
     await insertTx(tx);
 
-    // Return updated
-    const acct2 = await getAccount(wallet);
+    const acct2 = await getAccountRow(wallet);
+    const pendingDelta = await getPendingDelta(wallet);
+    const pendingOutgoing = await getPendingOutgoing(wallet);
+
     const latest = await getLatestBlock();
     const chainHeight = latest?.height || 0;
 
     res.json({
       success: true,
       wallet,
-      balance: acct2.balance,
+      balance: Number(acct2.balance), // confirmed
+      pendingDelta,
+      spendableBalance: Number(acct2.balance) - pendingOutgoing,
       nonce: acct2.nonce,
       tx,
       cooldownSeconds: Math.ceil(MINT_COOLDOWN_MS / 1000),
@@ -465,7 +540,7 @@ app.post("/send", async (req, res) => {
 
     await ensureAccountExists(to);
 
-    const fromAcct = await getAccount(from);
+    const fromAcct = await getAccountRow(from);
 
     if (nonce !== fromAcct.nonce) {
       return res.status(409).json({ error: "Nonce mismatch", expectedNonce: fromAcct.nonce, gotNonce: nonce });
@@ -483,18 +558,20 @@ app.post("/send", async (req, res) => {
     const sigOk = verifySignature({ walletPubKeyB64: fromAcct.publicKeyB64, message: msg, signatureB64: signature });
     if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
-    if (Number(fromAcct.balance) < amt) {
-      return res.status(400).json({ error: "Insufficient balance" });
+    // ✅ confirmed-only spend check: confirmed - pendingOutgoing
+    const pendingOutgoing = await getPendingOutgoing(from);
+    const spendable = Number(fromAcct.balance) - pendingOutgoing;
+    if (spendable < amt) {
+      return res.status(400).json({
+        error: "Insufficient spendable balance (pending outgoing reduces spendable)",
+        confirmedBalance: Number(fromAcct.balance),
+        pendingOutgoing,
+        spendableBalance: spendable,
+      });
     }
 
-    // Apply balances immediately
-    const newFromBal = Number(fromAcct.balance) - amt;
-    await updateBalance(from, newFromBal);
-
-    const toAcct = await getAccount(to);
-    const newToBal = Number(toAcct.balance) + amt;
-    await updateBalance(to, newToBal);
-
+    // ✅ confirmed-only: DO NOT change balances here
+    // But DO consume nonce immediately
     await incrementNonce(from);
 
     const tx = createTx({
@@ -508,15 +585,19 @@ app.post("/send", async (req, res) => {
 
     await insertTx(tx);
 
-    const fromAcct2 = await getAccount(from);
+    const fromAcct2 = await getAccountRow(from);
+    const pendingDelta2 = await getPendingDelta(from);
+    const pendingOutgoing2 = await getPendingOutgoing(from);
+
     const latest = await getLatestBlock();
     const chainHeight = latest?.height || 0;
 
     res.json({
       success: true,
       tx,
-      fromBalance: newFromBal,
-      toBalance: newToBal,
+      confirmedBalance: Number(fromAcct2.balance),
+      pendingDelta: pendingDelta2,
+      spendableBalance: Number(fromAcct2.balance) - pendingOutgoing2,
       fromNonce: fromAcct2.nonce,
       chainHeight,
     });
@@ -537,6 +618,7 @@ app.post("/send", async (req, res) => {
       console.log(`🚀 HIVE Wallet server running on http://localhost:${PORT}`);
       console.log(`🗄️  SQLite DB: ${DB_PATH}`);
       console.log(`⛓️  Block time: ${BLOCK_TIME_MS}ms`);
+      console.log(`✅ Mode: confirmed-only balances`);
     });
   } catch (e) {
     console.error("FATAL STARTUP ERROR:", e);

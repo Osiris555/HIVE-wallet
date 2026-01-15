@@ -27,7 +27,10 @@ function storageRemove(key: string) {
 
 export default function IndexScreen() {
   const [wallet, setWallet] = useState<string>("");
-  const [balance, setBalance] = useState<number>(0);
+  const [balance, setBalance] = useState<number>(0); // confirmed
+  const [pendingDelta, setPendingDelta] = useState<number>(0);
+  const [spendable, setSpendable] = useState<number>(0);
+
   const [status, setStatus] = useState<string>("");
 
   const [to, setTo] = useState<string>("");
@@ -77,7 +80,14 @@ export default function IndexScreen() {
 
   async function loadBalance(w: string) {
     const data: any = await getBalance(w);
-    setBalance(Number(data?.balance || 0));
+    const confirmed = Number(data?.balance || 0);
+    setBalance(confirmed);
+    setPendingDelta(Number(data?.pendingDelta || 0));
+    setSpendable(
+      typeof data?.spendableBalance === "number"
+        ? Number(data.spendableBalance)
+        : confirmed
+    );
   }
 
   async function loadTxs(w: string) {
@@ -93,7 +103,7 @@ export default function IndexScreen() {
     (async () => {
       try {
         setStatus("");
-        const w = await ensureWalletId(); // ✅ comes from server registration
+        const w = await ensureWalletId();
         setWallet(w);
         await loadChainStatus();
         await loadBalance(w);
@@ -108,6 +118,7 @@ export default function IndexScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Poll while pending exists so UI flips to confirmed + balances update after a block
   useEffect(() => {
     if (!showTxs) return;
     if (!hasPending(txs)) return;
@@ -129,11 +140,14 @@ export default function IndexScreen() {
     }
     try {
       setStatus("");
-      const data: any = await mint(); // ✅ only returns if server accepted it
+      const data: any = await mint();
       startCooldown(Number(data?.cooldownSeconds || 60));
+
+      // after submit, pending shows up right away
+      await loadTxs(wallet);
       await loadBalance(wallet);
-      if (showTxs) await loadTxs(wallet);
-      setStatus("Mint submitted (signed + nonce protected) ✅");
+
+      setStatus("Mint submitted (pending until next block) ✅");
     } catch (e: any) {
       if (e?.status === 429) {
         const secs = Number(e?.cooldownSeconds || 60);
@@ -157,9 +171,11 @@ export default function IndexScreen() {
       setStatus("");
       await send(t, n);
       setAmount("");
+
+      await loadTxs(wallet);
       await loadBalance(wallet);
-      if (showTxs) await loadTxs(wallet);
-      setStatus("Send submitted (signed + nonce protected) ✅");
+
+      setStatus("Send submitted (pending until next block) ✅");
     } catch (e: any) {
       setStatus(e?.message || "Send failed");
     }
@@ -177,6 +193,13 @@ export default function IndexScreen() {
     if (next && wallet) await loadTxs(wallet);
   }
 
+  const pendingText =
+    pendingDelta === 0
+      ? ""
+      : pendingDelta > 0
+      ? `Pending: +${pendingDelta} HNY`
+      : `Pending: ${pendingDelta} HNY`;
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>HIVE Wallet</Text>
@@ -186,7 +209,10 @@ export default function IndexScreen() {
         Wallet: {wallet || "loading..."}
       </Text>
 
-      <Text style={styles.balance}>Balance: {balance} HNY</Text>
+      <Text style={styles.balance}>Confirmed: {balance} HNY</Text>
+      {!!pendingText && <Text style={styles.pending}>{pendingText}</Text>}
+      <Text style={styles.spendable}>Spendable: {spendable} HNY</Text>
+
       {!!status && <Text style={styles.status}>{status}</Text>}
 
       <TouchableOpacity
@@ -261,7 +287,11 @@ const styles = StyleSheet.create({
   title: { color: "#fff", fontSize: 28, fontWeight: "700", textAlign: "center", marginBottom: 8 },
   chainText: { color: "#bbb", textAlign: "center", marginBottom: 10 },
   walletText: { color: "#bbb", textAlign: "center", marginBottom: 6 },
-  balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 10 },
+
+  balance: { color: "#fff", fontSize: 18, textAlign: "center", marginBottom: 4 },
+  pending: { color: "#ffd166", textAlign: "center", marginBottom: 2 },
+  spendable: { color: "#bbb", textAlign: "center", marginBottom: 10 },
+
   status: { color: "#ff6b6b", textAlign: "center", marginBottom: 10 },
 
   button: { backgroundColor: "#d1a93a", padding: 14, borderRadius: 12, alignItems: "center", marginTop: 10 },
