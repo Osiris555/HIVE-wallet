@@ -36,6 +36,11 @@ export type ChainStatus = {
   minGasFee: number;
   txTtlMs: number;
   serviceFeeRate: number;
+
+  // ✅ server may expose vault balance under different names depending on version
+  feeVaultBalance?: number;
+  feeVault?: number;
+  feeVaultBalanceHny?: number;
 };
 
 const API_BASE = "http://192.168.0.11:3000";
@@ -50,14 +55,24 @@ function isWeb() {
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
-    try { return window.localStorage.getItem(key); } catch { return null; }
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
   }
-  try { return await SecureStore.getItemAsync(key); } catch { return null; }
+  try {
+    return await SecureStore.getItemAsync(key);
+  } catch {
+    return null;
+  }
 }
 
 async function kvSet(key: string, value: string): Promise<void> {
   if (isWeb()) {
-    try { window.localStorage.setItem(key, value); } catch {}
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {}
     return;
   }
   try {
@@ -114,7 +129,11 @@ function canonicalSignedMessage(params: {
 }
 
 async function readJsonSafe(res: Response) {
-  try { return await res.json(); } catch { return null; }
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 function makeError(message: string, status?: number, data?: any) {
@@ -122,6 +141,16 @@ function makeError(message: string, status?: number, data?: any) {
   err.status = status;
   err.data = data;
   return err;
+}
+
+function pickFeeVaultBalance(status: any): number {
+  // ✅ tolerate different server field names
+  const v =
+    status?.feeVaultBalance ??
+    status?.feeVaultBalanceHny ??
+    status?.feeVault ??
+    0;
+  return Number(v || 0);
 }
 
 async function getJson(path: string) {
@@ -191,16 +220,20 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
-export async function getChainStatus() {
-  // IMPORTANT: return full JSON so index.tsx can see feeVaultBalance
+// ✅ returns the full status JSON and guarantees .feeVaultBalance exists
+export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance: number }> {
   const res = await fetch(`${API_BASE}/status`);
-  const body = await res.json();
+  const body = await readJsonSafe(res);
   if (!res.ok) {
     const err: any = new Error(body?.error || "Chain status failed");
     err.status = res.status;
+    err.data = body;
     throw err;
   }
-  return body;
+  return {
+    ...body,
+    feeVaultBalance: pickFeeVaultBalance(body),
+  };
 }
 
 export async function getAccount(wallet: string) {
@@ -226,13 +259,31 @@ export function computeServiceFee(amount: number, rate: number) {
   return Number((Number(amount) * Number(rate)).toFixed(8));
 }
 
-export async function quoteSend(to: string, amount: number) {
+/**
+ * Quote helper for the confirm screen.
+ * You can pass an override gasFee here (custom gas).
+ */
+export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverride?: number }) {
   const status = await getChainStatus();
-  const gasFee = Number(status.minGasFee);
+
+  const minGas = Number(status.minGasFee || 0);
+  const gasFee = Number.isFinite(opts?.gasFeeOverride as any)
+    ? Math.max(minGas, Number(opts!.gasFeeOverride))
+    : minGas;
+
   const serviceFee = computeServiceFee(amount, status.serviceFeeRate);
   const totalFee = Number((gasFee + serviceFee).toFixed(8));
   const totalCost = Number((amount + totalFee).toFixed(8));
-  return { chainId: status.chainId, gasFee, serviceFee, totalFee, totalCost, status };
+
+  return {
+    chainId: status.chainId,
+    gasFee,
+    minGasFee: minGas,
+    serviceFee,
+    totalFee,
+    totalCost,
+    status,
+  };
 }
 
 export async function mint(): Promise<any> {
@@ -270,7 +321,15 @@ export async function mint(): Promise<any> {
 
   const signature = signMessage(msg, secretKeyB64);
 
-  return await postJson("/mint", { chainId, wallet, nonce, timestamp, signature, gasFee, expiresAtMs });
+  return await postJson("/mint", {
+    chainId,
+    wallet,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
 }
 
 /**
@@ -278,7 +337,13 @@ export async function mint(): Promise<any> {
  * - nonce == expectedNonce: new tx
  * - nonce == expectedNonce-1 AND pending exists: replacement if higher fee
  */
-export async function send(params: { to: string; amount: number; gasFee: number; serviceFee: number; nonceOverride?: number }): Promise<any> {
+export async function send(params: {
+  to: string;
+  amount: number;
+  gasFee: number;
+  serviceFee: number;
+  nonceOverride?: number;
+}): Promise<any> {
   const from = await ensureWalletId();
 
   const status = await getChainStatus();

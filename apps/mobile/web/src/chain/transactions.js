@@ -1,3 +1,4 @@
+// apps/mobile/web/src/chain/transactions.js
 const API_BASE = "http://192.168.0.11:3000";
 
 async function readJsonSafe(res) {
@@ -8,62 +9,85 @@ async function readJsonSafe(res) {
   }
 }
 
-async function handleResponse(res) {
-  const body = await readJsonSafe(res);
-
-  // Your server uses { error: "...", cooldownSeconds: N }
-  if (res.status === 429) {
-    const cooldownSeconds = body?.cooldownSeconds ?? 60;
-    return {
-      ok: false,
-      status: 429,
-      cooldownSeconds,
-      message: body?.error || `Cooldown active. Try again in ${cooldownSeconds}s.`,
-      data: body,
-    };
-  }
-
-  if (!res.ok) {
-    return {
-      ok: false,
-      status: res.status,
-      message: body?.error || body?.message || `Request failed (${res.status})`,
-      data: body,
-    };
-  }
-
-  return {
-    ok: true,
-    status: res.status,
-    message: body?.message || "OK",
-    data: body,
-  };
+function makeError(message, status, data) {
+  const err = new Error(message || "Request failed");
+  err.status = status;
+  err.data = data;
+  return err;
 }
 
-export async function mint(wallet) {
-  const res = await fetch(`${API_BASE}/mint`, {
+function pickFeeVaultBalance(status) {
+  return Number(
+    status?.feeVaultBalance ??
+      status?.feeVaultBalanceHny ??
+      status?.feeVault ??
+      0
+  );
+}
+
+async function getJson(path) {
+  const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+  const body = await readJsonSafe(res);
+  if (!res.ok) throw makeError(body?.error || `GET ${path} failed`, res.status, body);
+  return body;
+}
+
+async function postJson(path, payload) {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet }),
+    body: JSON.stringify(payload ?? {}),
   });
-  return handleResponse(res);
+
+  const body = await readJsonSafe(res);
+
+  if (res.status === 429) {
+    const err = makeError(body?.error || "Cooldown active", 429, body);
+    err.cooldownSeconds = body?.cooldownSeconds ?? 60;
+    throw err;
+  }
+
+  if (res.status === 409) {
+    const err = makeError(body?.error || "Nonce mismatch", 409, body);
+    err.expectedNonce = body?.expectedNonce;
+    err.gotNonce = body?.gotNonce;
+    throw err;
+  }
+
+  if (!res.ok) throw makeError(body?.error || `POST ${path} failed`, res.status, body);
+
+  return body;
+}
+
+// ---- exports that the web UI expects ----
+
+export async function getChainStatus() {
+  const s = await getJson("/status");
+  return { ...s, feeVaultBalance: pickFeeVaultBalance(s) };
+}
+
+export async function getAccount(wallet) {
+  return await getJson(`/account/${encodeURIComponent(wallet)}`);
 }
 
 export async function getBalance(wallet) {
-  const res = await fetch(`${API_BASE}/balance/${encodeURIComponent(wallet)}`);
-  return handleResponse(res);
-}
-
-export async function send({ from, to, amount }) {
-  const res = await fetch(`${API_BASE}/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, amount }),
-  });
-  return handleResponse(res);
+  return await getJson(`/balance/${encodeURIComponent(wallet)}`);
 }
 
 export async function getTransactions(wallet) {
-  const res = await fetch(`${API_BASE}/transactions/${encodeURIComponent(wallet)}`);
-  return handleResponse(res);
+  return await getJson(`/transactions/${encodeURIComponent(wallet)}`);
+}
+
+export async function register(publicKey) {
+  return await postJson("/register", { publicKey });
+}
+
+export async function mint(payload) {
+  // payload should include { chainId, wallet, nonce, timestamp, signature, gasFee, expiresAtMs }
+  return await postJson("/mint", payload ?? {});
+}
+
+export async function send(payload) {
+  // payload should include { chainId, from, to, amount, nonce, timestamp, signature, gasFee, serviceFee, expiresAtMs }
+  return await postJson("/send", payload ?? {});
 }

@@ -133,6 +133,15 @@ async function getAccountRow(wallet) {
   );
 }
 
+async function getFeeVaultBalance() {
+  const row = await get(
+    db,
+    `SELECT balance FROM accounts WHERE wallet = ?`,
+    [FEE_VAULT]
+  );
+  return Number(row?.balance || 0);
+}
+
 async function setPubKey(wallet, publicKeyB64) {
   await ensureAccountExists(wallet);
   await run(db, `UPDATE accounts SET publicKeyB64 = ? WHERE wallet = ?`, [publicKeyB64, wallet]);
@@ -496,6 +505,7 @@ app.get("/status", async (_req, res) => {
     const msUntilNext = Math.max(0, BLOCK_TIME_MS - (elapsed % BLOCK_TIME_MS));
 
     const { mempool, minGasFee } = await currentMinGasFee();
+    const feeVaultBalance = await getFeeVaultBalance();
 
     res.json({
       chainId: CHAIN_ID,
@@ -509,9 +519,22 @@ app.get("/status", async (_req, res) => {
       serviceFeeRate: SERVICE_FEE_RATE,
       txTtlMs: TX_TTL_MS,
       latestBlock: latest || null,
+      feeVaultBalance: Number(feeVaultBalance.tofixed(8)),
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "status failed" });
+  }
+});
+
+app.get("/fee-vault", async (_req, res) => {
+  try {
+    const balance = await getFeeVaultBalance();
+    res.json({
+      wallet: FEE_VAULT,
+      balance: Number(balance.toFixed(8)),
+    });
+  } catch (e) {
+    res.status(500).json({ error: "fee vault read failed" });
   }
 });
 
