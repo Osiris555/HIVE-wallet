@@ -38,29 +38,38 @@ export type ChainStatus = {
   txTtlMs: number;
   serviceFeeRate: number;
 
-  // ✅ server may expose vault balance under different names depending on version
+  // server may expose vault balance under different names depending on version
   feeVaultBalance?: number;
   feeVault?: number;
   feeVaultBalanceHny?: number;
 };
 
+// ✅ Exported constants/helpers (so UI can safely import them)
+export const ONE_SAT = 0.00000001;
+
+export function fmt8(n: number) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0.00000000";
+  return x.toFixed(8);
+}
+
+// Web/local storage helpers
+function isWeb() {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
 // ✅ Configurable API base.
 // - Web defaults to localhost.
-// - Native defaults to your LAN IP (change as needed).
-// - You can override via EXPO_PUBLIC_HIVE_API_BASE (recommended).
+// - Native defaults to your LAN IP (for Expo Go on iPhone).
+// - You can override via EXPO_PUBLIC_HIVE_API_BASE if you ever want.
 const API_BASE =
   ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
   (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
   (isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000");
 
-
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
 const WALLET_STORAGE = "HIVE_WALLET_ID";
-
-function isWeb() {
-  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
-}
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
@@ -101,10 +110,6 @@ function u8ToB64(u8: Uint8Array) {
 async function randomBytes(count: number): Promise<Uint8Array> {
   const bytes = await Crypto.getRandomBytesAsync(count);
   return Uint8Array.from(bytes);
-}
-
-function fmt8(n: number) {
-  return Number(n).toFixed(8);
 }
 
 /**
@@ -153,28 +158,37 @@ function makeError(message: string, status?: number, data?: any) {
 }
 
 function pickFeeVaultBalance(status: any): number {
-  // ✅ tolerate different server field names
-  const v =
-    status?.feeVaultBalance ??
-    status?.feeVaultBalanceHny ??
-    status?.feeVault ??
-    0;
+  const v = status?.feeVaultBalance ?? status?.feeVaultBalanceHny ?? status?.feeVault ?? 0;
   return Number(v || 0);
 }
 
+function networkHint() {
+  return `API_BASE=${API_BASE} (web uses localhost; Expo Go iPhone uses LAN IP)`;
+}
+
 async function getJson(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { method: "GET" });
+  } catch (e: any) {
+    throw makeError(`Network error on GET ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+  }
   const body = await readJsonSafe(res);
   if (!res.ok) throw makeError(body?.error || `GET ${path} failed`, res.status, body);
   return body;
 }
 
 async function postJson(path: string, payload: any) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload ?? {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload ?? {}),
+    });
+  } catch (e: any) {
+    throw makeError(`Network error on POST ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+  }
 
   const body = await readJsonSafe(res);
 
@@ -229,9 +243,15 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
-// ✅ returns the full status JSON and guarantees .feeVaultBalance exists
+// returns full status JSON and guarantees .feeVaultBalance exists
 export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance: number }> {
-  const res = await fetch(`${API_BASE}/status`);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/status`);
+  } catch (e: any) {
+    throw makeError(`Network error on GET /status. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+  }
+
   const body = await readJsonSafe(res);
   if (!res.ok) {
     const err: any = new Error(body?.error || "Chain status failed");
@@ -264,12 +284,15 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
-export function computeServiceFee(amount: number, rate: number) {
-  return Number((Number(amount) * Number(rate)).toFixed(8));
+// ✅ rate is optional so UI calls can be simpler; if missing, fee becomes 0.
+export function computeServiceFee(amount: number, rate?: number) {
+  const r = Number(rate);
+  if (!Number.isFinite(r)) return 0;
+  return Number((Number(amount) * r).toFixed(8));
 }
 
 /**
- * Quote helper for the confirm screen.
+ * Quote helper for confirm screen.
  * You can pass an override gasFee here (custom gas).
  */
 export async function quoteSend(to: string, amount: number, opts?: { gasFeeOverride?: number }) {

@@ -1,74 +1,39 @@
 // apps/mobile/src/app/index.tsx
-import { BlurView } from "expo-blur";
-import * as SecureStore from "expo-secure-store";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Animated, Easing, ImageBackground, Modal,
-  Platform, Pressable,
-  ScrollView, Text,
-  TextInput, View
+  Animated,
+  Easing,
+  ImageBackground,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
+import * as SecureStore from "expo-secure-store";
 
 import {
-  computeServiceFee,
   ensureWalletId,
   getBalance,
-  getChainStatus,
   getTransactions,
-  mint,
+  getChainStatus,
   quoteSend,
+  mint,
   send,
+  computeServiceFee,
+  type Transaction,
 } from "../chain/transactions";
 
+/** ------------------------------------------------------------------ */
+/** Local helpers (do NOT import fmt8/ONE_SAT from transactions.ts)     */
+/** ------------------------------------------------------------------ */
+const ONE_SAT = 0.00000001;
 function fmt8(n: number) {
-  const x = Number(n || 0);
+  const x = Number(n);
   if (!Number.isFinite(x)) return "0.00000000";
   return x.toFixed(8);
-}
-
-const ONE_SAT = 0.00000001;
-
-type ThemeKey = "cosmic" | "noir" | "minimal";
-
-function themeFor(key: ThemeKey) {
-  if (key === "noir") {
-    return {
-      overlay: "rgba(0,0,0,0.80)",
-      panel: "rgba(0,0,0,0.55)",
-      border: "#2a2a2a",
-      text: "#ffffff",
-      sub: "#b0b0b0",
-      gold: "#caa83c",
-      blue: "#2b6fff",
-      danger: "#ff6b6b",
-      ok: "#9dff9d",
-    };
-  }
-  if (key === "minimal") {
-    return {
-      overlay: "rgba(0,0,0,0.55)",
-      panel: "rgba(10,10,10,0.40)",
-      border: "#2a2a2a",
-      text: "#ffffff",
-      sub: "#cfcfcf",
-      gold: "#d6b24a",
-      blue: "#4b87ff",
-      danger: "#ff7a7a",
-      ok: "#b9ffb9",
-    };
-  }
-  // cosmic default
-  return {
-    overlay: "rgba(0,0,0,0.70)",
-    panel: "rgba(0,0,0,0.35)",
-    border: "#222",
-    text: "#ffffff",
-    sub: "#aaa",
-    gold: "#caa83c",
-    blue: "#2b6fff",
-    danger: "#ff6b6b",
-    ok: "#9dff9d",
-  };
 }
 
 function isWeb() {
@@ -76,181 +41,248 @@ function isWeb() {
 }
 
 async function kvGet(key: string): Promise<string | null> {
-  if (isWeb()) {
-    try { return window.localStorage.getItem(key); } catch { return null; }
+  try {
+    if (isWeb()) return window.localStorage.getItem(key);
+    return await SecureStore.getItemAsync(key);
+  } catch {
+    return null;
   }
-  try { return await SecureStore.getItemAsync(key); } catch { return null; }
 }
 
 async function kvSet(key: string, value: string): Promise<void> {
-  if (isWeb()) {
-    try { window.localStorage.setItem(key, value); } catch {}
-    return;
+  try {
+    if (isWeb()) window.localStorage.setItem(key, value);
+    else await SecureStore.setItemAsync(key, value);
+  } catch {}
+}
+
+function GlassCard(props: { children: React.ReactNode; style?: any }) {
+  const webBlur =
+    Platform.OS === "web"
+      ? ({ backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)" } as any)
+      : null;
+
+  return (
+    <View
+      style={[
+        {
+          borderRadius: 18,
+          overflow: "hidden",
+          borderWidth: 1,
+          borderColor: "rgba(255,255,255,0.10)",
+          backgroundColor: "rgba(0,0,0,0.45)",
+        },
+        webBlur,
+        props.style,
+      ]}
+    >
+      {props.children}
+    </View>
+  );
+}
+
+/** ------------------------- THEME / PREFS ------------------------- */
+type ThemeKey = "cosmic" | "noir" | "honey";
+type SkinKey = "matrix-honeycomb" | "solid-noir" | "solid-minimal";
+
+function themeFor(t: ThemeKey) {
+  if (t === "noir") {
+    return {
+      text: "#f5f5f5",
+      sub: "#a9a9a9",
+      purple: "#5e2bff",
+      gold: "#caa83c",
+      green: "#39ff14",
+      blue: "#1f78ff",
+      border: "rgba(255,255,255,0.10)",
+      card: "rgba(0,0,0,0.55)",
+    };
   }
-  try { await SecureStore.setItemAsync(key, value); } catch {}
+  if (t === "honey") {
+    return {
+      text: "#fff5db",
+      sub: "#d7c59a",
+      purple: "#5b2cff",
+      gold: "#ffbf2f",
+      green: "#39ff14",
+      blue: "#2b7cff",
+      border: "rgba(255,255,255,0.12)",
+      card: "rgba(16,6,25,0.55)",
+    };
+  }
+  return {
+    text: "#ffffff",
+    sub: "#bcb4d6",
+    purple: "#7b2cff",
+    gold: "#caa83c",
+    green: "#39ff14",
+    blue: "#2b7cff",
+    border: "rgba(255,255,255,0.10)",
+    card: "rgba(0,0,0,0.40)",
+  };
 }
 
 function themeKeyForChain(chainId: string) {
-  return `HIVE_THEME__${chainId}`;
+  return `hive:theme:${chainId || "default"}`;
 }
 function skinKeyForChain(chainId: string) {
-  return `HIVE_SKIN__${chainId}`;
+  return `hive:skin:${chainId || "default"}`;
 }
 
-type SkinKey = "honeycomb" | "solid-noir" | "solid-minimal";
-
-
+/** ------------------------------ APP ------------------------------ */
 export default function Index() {
-  // --- theme / settings ---
   const [theme, setTheme] = useState<ThemeKey>("cosmic");
+  const [skin, setSkin] = useState<SkinKey>("matrix-honeycomb");
   const T = useMemo(() => themeFor(theme), [theme]);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [chainId, setChainId] = useState<string>("");      // ✅ current network id
-  const [skin, setSkin] = useState<SkinKey>("honeycomb");  // ✅ per-network skin
-  const [prefsLoadedForChain, setPrefsLoadedForChain] = useState<string>(""); // chainId last loaded
 
-useEffect(() => {
-  if (!chainId) return;
-  kvSet(themeKeyForChain(chainId), theme).catch(() => {});
-}, [theme, chainId]);
+  const [chainId, setChainId] = useState<string>("");
+  const [prefsLoadedForChain, setPrefsLoadedForChain] = useState<string>("");
 
-useEffect(() => {
-  if (!chainId) return;
-  kvSet(skinKeyForChain(chainId), skin).catch(() => {});
-}, [skin, chainId]);
-
-
-  // --- chain/wallet ---
+  // wallet/chain
   const [wallet, setWallet] = useState<string>("");
   const [chainHeight, setChainHeight] = useState<number>(0);
   const [msUntilNextBlock, setMsUntilNextBlock] = useState<number>(0);
 
-  // balances
+  // balances + tx
   const [confirmedBalance, setConfirmedBalance] = useState<number>(0);
   const [spendableBalance, setSpendableBalance] = useState<number>(0);
   const [feeVaultBalance, setFeeVaultBalance] = useState<number>(0);
+  const [txs, setTxs] = useState<Transaction[]>([]);
 
+  // UI state
+  const [message, setMessage] = useState<string>("");
+  const [cooldownText, setCooldownText] = useState<string>("");
+
+  // mint
+  const [mintBusy, setMintBusy] = useState(false);
+  const [mintCooldown, setMintCooldown] = useState<number>(0);
 
   // send form
   const [to, setTo] = useState<string>("");
   const [amountStr, setAmountStr] = useState<string>("");
-
-  // txs
-  const [txs, setTxs] = useState<any[]>([]);
-  const [showHistory, setShowHistory] = useState<boolean>(true);
-
-  // status
-  const [message, setMessage] = useState<string>("");
-  const [cooldownText, setCooldownText] = useState<string>("");
-
-  // mint cooldown
-  const [mintCooldown, setMintCooldown] = useState<number>(0);
-  const [mintBusy, setMintBusy] = useState<boolean>(false);
-
-  const [sendBusy, setSendBusy] = useState<boolean>(false);
-
-  // confirm modal (normal send)
-  const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
-  const [quote, setQuote] = useState<any>(null);
-
-  // gas picker for confirm modal
-  const [gasPreset, setGasPreset] = useState<"slow" | "normal" | "fast" | "custom">("normal");
-  const [customGasStr, setCustomGasStr] = useState<string>("");
-
-  // RBF modal
-  const [rbfOpen, setRbfOpen] = useState<boolean>(false);
-  const [rbfTx, setRbfTx] = useState<any>(null);
-  const [rbfMultiplier, setRbfMultiplier] = useState<number>(1.5);
-  const [rbfPreview, setRbfPreview] = useState<any>(null);
-
-  // Cancel modal
-  const [cancelOpen, setCancelOpen] = useState<boolean>(false);
-  const [cancelTx, setCancelTx] = useState<any>(null);
-  const [cancelPreview, setCancelPreview] = useState<any>(null);
-
   const amount = useMemo(() => Number(amountStr || 0), [amountStr]);
 
-  const glow = useRef(new Animated.Value(0)).current;
+  // confirm modal
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [quote, setQuote] = useState<any>(null);
+
+  type GasPreset = "slow" | "normal" | "fast" | "custom";
+  const [gasPreset, setGasPreset] = useState<GasPreset>("normal");
+  const [customGasStr, setCustomGasStr] = useState<string>("");
+
+  const [sendBusy, setSendBusy] = useState(false);
+
+  // boost/cancel modals
+  const [rbfOpen, setRbfOpen] = useState(false);
+  const [rbfTx, setRbfTx] = useState<Transaction | null>(null);
+
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelTx, setCancelTx] = useState<Transaction | null>(null);
+
+  // header pulse
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 1100,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 1100,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  const headerGlow = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.75, 1] });
+
+  /** -------------------- load/save per-chain prefs -------------------- */
+  useEffect(() => {
+    if (!chainId) return;
+    kvSet(themeKeyForChain(chainId), theme).catch(() => {});
+  }, [theme, chainId]);
 
   useEffect(() => {
-    const anim = Animated.loop(
-      Animated.sequence([
-        Animated.timing(glow, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver:      true }),
-        Animated.timing(glow, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-    ])
-  );
-    anim.start();
-    return () => anim.stop();
-  }, [glow]);
+    if (!chainId) return;
+    kvSet(skinKeyForChain(chainId), skin).catch(() => {});
+  }, [skin, chainId]);
 
-  const glowScale = glow.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] });
-  const glowOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.65, 1] });
+  useEffect(() => {
+    (async () => {
+      if (!chainId) return;
+      if (prefsLoadedForChain === chainId) return;
 
+      const savedTheme = await kvGet(themeKeyForChain(chainId));
+      if (savedTheme === "cosmic" || savedTheme === "noir" || savedTheme === "honey") {
+        setTheme(savedTheme);
+      }
 
+      const savedSkin = await kvGet(skinKeyForChain(chainId));
+      if (savedSkin === "matrix-honeycomb" || savedSkin === "solid-noir" || savedSkin === "solid-minimal") {
+        setSkin(savedSkin);
+      }
+
+      setPrefsLoadedForChain(chainId);
+    })().catch(() => {});
+  }, [chainId, prefsLoadedForChain]);
+
+  /** ------------------------------ loaders ------------------------------ */
   async function refreshStatus() {
-  const s = await getChainStatus();
-
-  const cid = String(s.chainId || "");
-  if (cid) setChainId(cid);
-
-  setChainHeight(Number(s.chainHeight || 0));
-  setMsUntilNextBlock(Number(s.msUntilNextBlock || 0));
-
-  if (s.feeVaultBalance != null) setFeeVaultBalance(Number(s.feeVaultBalance || 0));
-  else if (s.vaultBalance != null) setFeeVaultBalance(Number(s.vaultBalance || 0));
-
-  // ✅ load saved prefs ONCE per chainId
-  if (cid && prefsLoadedForChain !== cid) {
-    const savedTheme = await kvGet(themeKeyForChain(cid));
-    const savedSkin = await kvGet(skinKeyForChain(cid));
-
-    if (savedTheme === "cosmic" || savedTheme === "noir" || savedTheme === "minimal") {
-      setTheme(savedTheme);
-    }
-    if (savedSkin === "honeycomb" || savedSkin === "solid-noir" || savedSkin === "solid-minimal") {
-      setSkin(savedSkin);
-    }
-
-    setPrefsLoadedForChain(cid);
+    const st = await getChainStatus();
+    // your server returns chainHeight + msUntilNextBlock
+    setChainHeight(Number((st as any)?.chainHeight || 0));
+    setMsUntilNextBlock(Number((st as any)?.msUntilNextBlock || 0));
+    setChainId(String((st as any)?.chainId || ""));
+    return st;
   }
 
-  return s;
-}
-
-
-  async function loadWallet() {
+  async function loadWalletAndData() {
     const w = await ensureWalletId();
     setWallet(w);
-    return w;
-  }
 
-  async function loadBalance() {
-    if (!wallet) return;
-    const b = await getBalance(wallet);
-    setConfirmedBalance(Number(b.balance || 0));
-    setSpendableBalance(Number(b.spendableBalance || 0));
-  }
+    const b = await getBalance(w);
+    setConfirmedBalance(Number((b as any)?.confirmed || 0));
+    setSpendableBalance(Number((b as any)?.spendable || 0));
+    setFeeVaultBalance(Number((b as any)?.feeVault || 0));
 
-  async function loadTxs() {
-    if (!wallet) return;
-    const list = await getTransactions(wallet);
-    setTxs(list || []);
+    const list = await getTransactions(w);
+    setTxs((list as any) || []);
   }
 
   useEffect(() => {
     (async () => {
-      await loadWallet();
       await refreshStatus();
-    })();
+      await loadWalletAndData();
+    })().catch((e) => setMessage(`Init failed: ${String(e?.message || e)}`));
   }, []);
 
+  // poll status
+  useEffect(() => {
+    const i = setInterval(() => {
+      refreshStatus().catch(() => {});
+    }, 2500);
+    return () => clearInterval(i);
+  }, []);
+
+  // poll balances/tx
   useEffect(() => {
     if (!wallet) return;
-    loadBalance();
-    loadTxs();
+    const i = setInterval(() => {
+      loadWalletAndData().catch(() => {});
+    }, 4000);
+    return () => clearInterval(i);
   }, [wallet]);
 
-  // tick down mint cooldown
+  /** ------------------------------ cooldown ------------------------------ */
   useEffect(() => {
     if (mintCooldown <= 0) return;
     const t = setInterval(() => setMintCooldown((v) => Math.max(0, v - 1)), 1000);
@@ -262,33 +294,22 @@ useEffect(() => {
     else setCooldownText("");
   }, [mintCooldown]);
 
-  // status poll
-  useEffect(() => {
-    const i = setInterval(async () => {
-      try {
-        await refreshStatus();
-      } catch {}
-    }, 1000);
-    return () => clearInterval(i);
-  }, []);
-
+  /** ------------------------------ actions ------------------------------ */
   async function handleMint() {
     if (mintBusy || mintCooldown > 0) return;
     setMessage("");
     setMintBusy(true);
     try {
-      const res = await mint();
+      const res: any = await mint();
       setMessage("Mint submitted (pending until next block) ✅");
-      await loadBalance();
-      await loadTxs();
       await refreshStatus();
-      const cd = Number(res?.cooldownSeconds || 60);
-      setMintCooldown(cd);
+      await loadWalletAndData();
+      setMintCooldown(Number(res?.cooldownSeconds || 60));
     } catch (e: any) {
       if (e?.status === 429) {
-        const cd = Number(e.cooldownSeconds || 60);
+        const cd = Number(e?.cooldownSeconds || 60);
         setMintCooldown(cd);
-        setMessage(`Cooldown active (${cd}s)`);
+        setMessage(`Mint cooldown active (${cd}s)`);
       } else {
         setMessage(`Mint failed: ${e?.message || "Unknown error"}`);
       }
@@ -299,14 +320,9 @@ useEffect(() => {
 
   async function openSendConfirm() {
     setMessage("");
-    if (!to || to.length < 8) {
-      setMessage("Enter a recipient address.");
-      return;
-    }
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setMessage("Enter a valid amount.");
-      return;
-    }
+    if (!to || to.length < 8) return setMessage("Enter a recipient address.");
+    if (!Number.isFinite(amount) || amount <= 0) return setMessage("Enter a valid amount.");
+
     try {
       const q = await quoteSend(to, amount);
       setQuote(q);
@@ -327,7 +343,7 @@ useEffect(() => {
   const computedConfirmFees = useMemo(() => {
     if (!quote) return null;
     const minGas = Number(quote.minGasFee || quote.minGas || 0) || ONE_SAT;
-    const baseGas = Number(quote.gasFee || 0);
+    const baseGas = Number(quote.gasFee || 0) || minGas;
     const serviceFee = Number(quote.serviceFee || 0);
 
     let gasFee = baseGas;
@@ -337,26 +353,28 @@ useEffect(() => {
     if (gasPreset === "custom") gasFee = clampGas(Number(customGasStr || 0), minGas);
 
     const totalFee = Number((gasFee + serviceFee).toFixed(8));
-    const totalCost = Number((Number(quote.amount || amount) + totalFee).toFixed(8));
+    const totalCost = Number((Number(amount) + totalFee).toFixed(8));
     return { minGas, gasFee, serviceFee, totalFee, totalCost };
   }, [quote, gasPreset, customGasStr, amount]);
 
-  async function handleSendSignedSubmit() {
-    if (!quote || !computedConfirmFees) return;
+  async function handleSendSubmit() {
+    if (!computedConfirmFees) return;
+    if (sendBusy) return;
     setSendBusy(true);
     setMessage("");
+
     try {
-      const res = await send({
+      const res: any = await send({
         to,
         amount,
         gasFee: computedConfirmFees.gasFee,
         serviceFee: computedConfirmFees.serviceFee,
       });
+
       setConfirmOpen(false);
       setMessage(res?.isReplacement ? "Send replaced a pending tx (RBF) ✅" : "Send submitted (pending) ✅");
-      await loadBalance();
-      await loadTxs();
       await refreshStatus();
+      await loadWalletAndData();
     } catch (e: any) {
       setMessage(`Send failed: ${e?.message || "Unknown error"}`);
     } finally {
@@ -364,501 +382,654 @@ useEffect(() => {
     }
   }
 
-  // ---------- RBF / Cancel ----------
-  function isMyPendingSend(t: any) {
-    return (
-      t &&
-      t.type === "send" &&
-      t.status === "pending" &&
-      wallet &&
-      t.from === wallet &&
-      t.nonce != null
-    );
+  function shortAddr(a: string) {
+    if (!a) return "";
+    if (a.length <= 14) return a;
+    return `${a.slice(0, 8)}…${a.slice(-6)}`;
   }
 
-  async function openRbf(t: any) {
-    setMessage("");
+  function formatTime(ms: number) {
+    if (!ms || ms <= 0) return "—";
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${s}s`;
+  }
+
+  function isMyPendingSend(t: Transaction) {
+    return t?.type === "send" && t?.status === "pending" && t?.from === wallet && t?.nonce != null;
+  }
+
+  function openBoost(t: Transaction) {
     setRbfTx(t);
-    setRbfMultiplier(1.5);
     setRbfOpen(true);
-
-    const status = await getChainStatus();
-    const fees = calcReplacementFees(t, status, 1.5, "rbf");
-    setRbfPreview({ status, fees });
   }
 
-  async function openCancel(t: any) {
-    setMessage("");
+  function openCancel(t: Transaction) {
     setCancelTx(t);
     setCancelOpen(true);
-
-    const status = await getChainStatus();
-    const fees = calcReplacementFees(t, status, 2.0, "cancel");
-    setCancelPreview({ status, fees });
   }
 
-  function calcReplacementFees(tx: any, status: any, multiplier: number, mode: "rbf" | "cancel") {
-    const minGas = Number(status.minGasFee || 0) || ONE_SAT;
-    const rate = Number(status.serviceFeeRate || 0);
+  async function doBoost(multiplier: number) {
+    if (!rbfTx) return;
+    if (sendBusy) return;
 
-    const amt = mode === "cancel" ? ONE_SAT : Number(tx.amount);
-    const oldGas = Number(tx.gasFee || 0);
-    const oldSvc = Number(tx.serviceFee || 0);
-    const oldTotalFee = Number((oldGas + oldSvc).toFixed(8));
-
-    const serviceFee = computeServiceFee(amt, rate);
-
-    let newGas = Number(((oldGas > 0 ? oldGas : minGas) * multiplier).toFixed(8));
-    newGas = Math.max(minGas, newGas);
-
-    let newTotalFee = Number((newGas + serviceFee).toFixed(8));
-
-    // must strictly exceed old total fee
-    while (newTotalFee <= oldTotalFee) {
-      newGas = Number((newGas + ONE_SAT).toFixed(8));
-      newTotalFee = Number((newGas + serviceFee).toFixed(8));
-    }
-
-    return { minGas, rate, serviceFee, oldTotalFee, newGas, newTotalFee };
-  }
-
-  // update RBF preview when multiplier changes
-  useEffect(() => {
-    (async () => {
-      if (!rbfTx || !rbfOpen) return;
-      const status = await getChainStatus();
-      const fees = calcReplacementFees(rbfTx, status, rbfMultiplier, "rbf");
-      setRbfPreview({ status, fees });
-    })();
-  }, [rbfMultiplier, rbfTx, rbfOpen]);
-
-  async function submitRbf() {
-    if (sendBusy || !rbfTx) return;
     setSendBusy(true);
     setMessage("");
-
     try {
-      // if it’s not pending anymore, show a friendly message
-      const latest = (await getTransactions(wallet)).find((x: any) => x.id === rbfTx.id) || rbfTx;
-      if (latest.status !== "pending") {
-        setMessage("Too late — that transaction is already confirmed (or failed).");
-        setRbfOpen(false);
-        setRbfTx(null);
-        await loadTxs();
-        return;
-      }
+      const status: any = await refreshStatus();
+      const minGas = Number(status?.minGasFee || ONE_SAT);
 
-      const status = await getChainStatus();
-      const fees = calcReplacementFees(latest, status, rbfMultiplier, "rbf");
+      const oldGas = Number(rbfTx.gasFee || minGas);
+      const gasFee = clampGas(oldGas * multiplier, minGas);
 
-      const res = await send({
-        to: String(latest.to),
-        amount: Number(latest.amount),
-        gasFee: fees.newGas,
-        serviceFee: fees.serviceFee,
-        nonceOverride: Number(latest.nonce),
+      const amt = Number(rbfTx.amount || 0);
+      const serviceFee = computeServiceFee(amt, status?.serviceFeeRate);
+
+      const res: any = await send({
+        to: String(rbfTx.to),
+        amount: amt,
+        gasFee,
+        serviceFee,
+        nonceOverride: Number(rbfTx.nonce),
       });
 
       setRbfOpen(false);
-      setRbfTx(null);
-
-      setMessage(res?.isReplacement ? `Speed up submitted ✅ (fee ${fmt8(fees.newTotalFee)})` : "Speed up submitted ✅");
-      await loadBalance();
-      await loadTxs();
-      await refreshStatus();
+      setMessage(res?.isReplacement ? "Boosted pending tx (RBF) ✅" : "Boost submitted ✅");
+      await loadWalletAndData();
     } catch (e: any) {
-      // 409 is expected if mempool state changed; we explain it nicely
-      if (e?.status === 409) {
-        setMessage("Speed up failed: mempool changed (nonce mismatch). Refreshing…");
-        await loadTxs();
-        await loadBalance();
-        await refreshStatus();
-      } else {
-        setMessage(`Speed up failed: ${e?.message || "Unknown error"}`);
-      }
+      setMessage(`Boost failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
   }
 
-  async function submitCancel() {
-    if (sendBusy || !cancelTx) return;
+  // Cancel = replace pending tx by sending ONE_SAT to yourself with same nonce + higher fee.
+  async function doCancel(multiplier: number) {
+    if (!cancelTx) return;
+    if (!wallet) return;
+    if (sendBusy) return;
+
     setSendBusy(true);
     setMessage("");
-
     try {
-      const latest = (await getTransactions(wallet)).find((x: any) => x.id === cancelTx.id) || cancelTx;
-      if (latest.status !== "pending") {
-        setMessage("Too late — that transaction is already confirmed (or failed).");
-        setCancelOpen(false);
-        setCancelTx(null);
-        await loadTxs();
-        return;
-      }
+      const status: any = await refreshStatus();
+      const minGas = Number(status?.minGasFee || ONE_SAT);
 
-      const status = await getChainStatus();
-      const fees = calcReplacementFees(latest, status, 2.0, "cancel");
+      const oldGas = Number(cancelTx.gasFee || minGas);
+      const gasFee = clampGas(oldGas * multiplier, minGas);
 
-      // Cancel tx: same nonce, to self, amount 0, higher fee
-      const res = await send({
-        to: wallet,
-        amount: ONE_SAT,
-        gasFee: fees.newGas,
-        serviceFee: fees.serviceFee,
-        nonceOverride: Number(latest.nonce),
-        isCancel: true,
+      const amt = ONE_SAT; // server requires amount > 0
+      const serviceFee = computeServiceFee(amt, status?.serviceFeeRate);
+
+      const res: any = await send({
+        to: wallet, // send to self
+        amount: amt,
+        gasFee,
+        serviceFee,
+        nonceOverride: Number(cancelTx.nonce),
       });
 
       setCancelOpen(false);
-      setCancelTx(null);
-
-      setMessage(res?.isReplacement ? `Cancel submitted ✅ (fee ${fmt8(fees.newTotalFee)})` : "Cancel submitted ✅");
-      await loadBalance();
-      await loadTxs();
-      await refreshStatus();
+      setMessage(res?.isReplacement ? "Cancel submitted (replacement tx) ✅" : "Cancel submitted ✅");
+      await loadWalletAndData();
     } catch (e: any) {
-      if (e?.status === 409) {
-        setMessage("Cancel failed: mempool changed (nonce mismatch). Refreshing…");
-        await loadTxs();
-        await loadBalance();
-        await refreshStatus();
-      } else {
-        setMessage(`Cancel failed: ${e?.message || "Unknown error"}`);
-      }
+      setMessage(`Cancel failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
   }
 
   const mintLabel = useMemo(() => {
+    if (mintBusy) return "Minting…";
     if (mintCooldown > 0) return `Mint (${mintCooldown}s)`;
-    return mintBusy ? "Minting..." : "Mint";
-  }, [mintCooldown, mintBusy]);
+    return "Mint";
+  }, [mintBusy, mintCooldown]);
 
-    // ---------------------------
-  // ✅ Screen content (skins wrap OUTSIDE this)
-  // ---------------------------
-  const Screen = (
-    <View style={{ flex: 1 }}>
-      <ScrollView
-        contentContainerStyle={{
-          padding: 24,
-          gap: 14,
-          maxWidth: 950,
-          alignSelf: "center",
-          width: "100%",
-        }}
-      >
-        {/* header with settings */}
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center" }}>
-          <View style={{ position: "absolute", right: 0 }}>
-            <Pressable
-              onPress={() => setSettingsOpen(true)}
-              style={{
-                paddingVertical: 8,
-                paddingHorizontal: 12,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: T.border,
-                backgroundColor: "rgba(0,0,0,0.25)",
-              }}
-            >
-              <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
-            </Pressable>
-          </View>
-
-          <Text style={{ color: T.text, fontSize: 34, textAlign: "center", fontWeight: "800", marginTop: 6 }}>
-            HIVE Wallet
+  /** ------------------------------ UI ------------------------------ */
+  const Body = (
+    <View style={{ flex: 1, paddingTop: 18 }}>
+      {/* header */}
+      <View style={{ paddingHorizontal: 16, paddingBottom: 10, flexDirection: "row", alignItems: "center" }}>
+        <Animated.View style={{ flex: 1, opacity: headerGlow }}>
+          <Text style={{ color: T.text, fontSize: 28, fontWeight: "900" }}>HIVE Wallet</Text>
+          <Text style={{ color: T.sub, marginTop: 2 }}>
+            Height: {chainHeight} • Next block: {formatTime(msUntilNextBlock)}
           </Text>
+        </Animated.View>
+
+        <Pressable
+          onPress={() => setSettingsOpen(true)}
+          style={{
+            paddingVertical: 10,
+            paddingHorizontal: 14,
+            borderRadius: 12,
+            borderWidth: 1,
+            borderColor: T.border,
+            backgroundColor: "rgba(0,0,0,0.35)",
+          }}
+        >
+          <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 24 }}>
+        {/* wallet */}
+        <View style={{ borderRadius: 18, padding: 14, borderWidth: 1, borderColor: T.border, backgroundColor: T.card }}>
+          <Text style={{ color: T.sub, marginBottom: 6 }}>Wallet</Text>
+          <Text style={{ color: T.text, fontWeight: "900" }}>{shortAddr(wallet)}</Text>
+
+          {message ? (
+            <View style={{ marginTop: 10 }}>
+              <Text style={{ color: "#ffd56a" }}>{message}</Text>
+            </View>
+          ) : null}
+
+          {cooldownText ? (
+            <View style={{ marginTop: 8 }}>
+              <Text style={{ color: T.sub }}>{cooldownText}</Text>
+            </View>
+          ) : null}
         </View>
 
-        <Text style={{ color: T.sub, textAlign: "center" }}>
-          Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
-        </Text>
+        <View style={{ height: 14 }} />
 
-        {wallet ? <Text style={{ color: T.sub, textAlign: "center" }}>Wallet: {wallet}</Text> : null}
+        {/* balances */}
+        <View style={{ borderRadius: 18, padding: 14, borderWidth: 1, borderColor: T.border, backgroundColor: T.card }}>
+          <Text style={{ color: T.sub, marginBottom: 8 }}>Balances</Text>
 
-        <Text style={{ color: T.text, textAlign: "center", fontSize: 20, marginTop: 6 }}>
-          Confirmed: {fmt8(confirmedBalance)} HNY
-        </Text>
-        <Text style={{ color: T.sub, textAlign: "center" }}>Spendable: {fmt8(spendableBalance)} HNY</Text>
-        <Text style={{ color: T.sub, textAlign: "center" }}>Fee vault: {fmt8(feeVaultBalance)} HNY</Text>
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+            <Text style={{ color: T.text, fontWeight: "900" }}>Confirmed</Text>
+            <Text style={{ color: T.text, fontWeight: "900" }}>{fmt8(confirmedBalance)}</Text>
+          </View>
 
-        {message ? (
-          <Text style={{ color: message.toLowerCase().includes("failed") ? T.danger : T.ok, textAlign: "center" }}>
-            {message}
-          </Text>
-        ) : null}
+          <View style={{ height: 6 }} />
 
-        {cooldownText ? <Text style={{ color: T.danger, textAlign: "center" }}>{cooldownText}</Text> : null}
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+            <Text style={{ color: T.text, fontWeight: "900" }}>Spendable</Text>
+            <Text style={{ color: T.text, fontWeight: "900" }}>{fmt8(spendableBalance)}</Text>
+          </View>
 
-        {/* Mint */}
-        <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
+          <View style={{ height: 6 }} />
+
+          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+            <Text style={{ color: T.sub }}>Fee Vault</Text>
+            <Text style={{ color: T.sub }}>{fmt8(feeVaultBalance)}</Text>
+          </View>
+
+          <View style={{ height: 12 }} />
+
           <Pressable
             onPress={handleMint}
             disabled={mintBusy || mintCooldown > 0}
             style={{
-              backgroundColor: T.gold,
+              paddingVertical: 12,
+              borderRadius: 12,
+              alignItems: "center",
+              backgroundColor: T.purple,
               opacity: mintBusy || mintCooldown > 0 ? 0.5 : 1,
-              padding: 18,
-              borderRadius: 10,
-              alignItems: "center",
-              marginTop: 10,
-              shadowColor: T.gold,
-              shadowOpacity: 0.35,
-              shadowRadius: 12,
-              shadowOffset: { width: 0, height: 0 },
-              elevation: 8,
             }}
           >
-            <Text style={{ fontWeight: "800", fontSize: 18 }}>{mintLabel}</Text>
-          </Pressable>
-        </Animated.View>
-
-        {/* Balance + History buttons */}
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <Pressable
-            onPress={loadBalance}
-            style={{
-              flex: 1,
-              borderWidth: 1,
-              borderColor: T.border,
-              padding: 14,
-              borderRadius: 10,
-              alignItems: "center",
-              backgroundColor: T.panel,
-            }}
-          >
-            <Text style={{ color: T.text, fontWeight: "700" }}>Get Balance</Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => {
-              setShowHistory((v) => !v);
-              if (!showHistory) loadTxs();
-            }}
-            style={{
-              flex: 1,
-              borderWidth: 1,
-              borderColor: T.border,
-              padding: 14,
-              borderRadius: 10,
-              alignItems: "center",
-              backgroundColor: T.panel,
-            }}
-          >
-            <Text style={{ color: T.text, fontWeight: "700" }}>
-              {showHistory ? "Hide History" : "Transaction History"}
-            </Text>
+            <Text style={{ color: "#fff", fontWeight: "900", fontSize: 16 }}>{mintLabel}</Text>
           </Pressable>
         </View>
 
-        <Text style={{ color: T.text, fontWeight: "800", fontSize: 18, marginTop: 10 }}>Send</Text>
+        <View style={{ height: 14 }} />
 
-        <TextInput
-          value={to}
-          onChangeText={setTo}
-          placeholder="Recipient address (HNY_...)"
-          placeholderTextColor="#666"
-          style={{
-            backgroundColor: "rgba(17,17,17,0.85)",
-            borderRadius: 10,
-            padding: 14,
-            color: T.text,
-            borderWidth: 1,
-            borderColor: T.border,
-          }}
-        />
+        {/* send */}
+        <View style={{ borderRadius: 18, padding: 14, borderWidth: 1, borderColor: T.border, backgroundColor: T.card }}>
+          <Text style={{ color: T.sub, marginBottom: 8 }}>Send</Text>
 
-        <TextInput
-          value={amountStr}
-          onChangeText={setAmountStr}
-          placeholder="Amount"
-          placeholderTextColor="#666"
-          keyboardType={Platform.OS === "web" ? "text" : "numeric"}
-          style={{
-            backgroundColor: "rgba(17,17,17,0.85)",
-            borderRadius: 10,
-            padding: 14,
-            color: T.text,
-            borderWidth: 1,
-            borderColor: T.border,
-          }}
-        />
+          <Text style={{ color: T.sub, marginBottom: 6 }}>To</Text>
+          <TextInput
+            value={to}
+            onChangeText={setTo}
+            placeholder="Recipient address"
+            placeholderTextColor="rgba(255,255,255,0.35)"
+            style={{
+              color: T.text,
+              paddingVertical: 10,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              backgroundColor: "rgba(0,0,0,0.35)",
+            }}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
 
-        {/* Send */}
-        <Animated.View style={{ transform: [{ scale: glowScale }], opacity: glowOpacity }}>
+          <View style={{ height: 10 }} />
+
+          <Text style={{ color: T.sub, marginBottom: 6 }}>Amount</Text>
+          <TextInput
+            value={amountStr}
+            onChangeText={setAmountStr}
+            placeholder="0.0"
+            placeholderTextColor="rgba(255,255,255,0.35)"
+            keyboardType="decimal-pad"
+            style={{
+              color: T.text,
+              paddingVertical: 10,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              backgroundColor: "rgba(0,0,0,0.35)",
+            }}
+          />
+
+          <View style={{ height: 12 }} />
+
           <Pressable
             onPress={openSendConfirm}
             disabled={sendBusy}
             style={{
-              backgroundColor: T.gold,
-              opacity: sendBusy ? 0.6 : 1,
-              padding: 18,
-              borderRadius: 10,
+              paddingVertical: 12,
+              borderRadius: 12,
               alignItems: "center",
-              shadowColor: T.gold,
-              shadowOpacity: 0.28,
-              shadowRadius: 12,
-              shadowOffset: { width: 0, height: 0 },
-              elevation: 8,
+              backgroundColor: T.green,
+              opacity: sendBusy ? 0.6 : 1,
             }}
           >
-            <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
+            <Text style={{ color: "#041006", fontWeight: "900", fontSize: 16 }}>Send</Text>
           </Pressable>
-        </Animated.View>
 
-        {/* History */}
-        {showHistory ? (
-          <View
-            style={{
-              marginTop: 6,
-              borderWidth: 1,
-              borderColor: T.border,
-              borderRadius: 10,
-              overflow: "hidden",
-              backgroundColor: T.panel,
-            }}
-          >
-            {txs.length === 0 ? (
-              <Text style={{ color: T.sub, padding: 14 }}>No transactions yet.</Text>
-            ) : (
-              txs.map((t, idx) => {
-                const gasFee = Number(t.gasFee || 0);
-                const serviceFee = Number(t.serviceFee || 0);
-                const totalFee =
-                  t.totalFee != null ? Number(t.totalFee) : Number((gasFee + serviceFee).toFixed(8));
+          <Text style={{ color: T.sub, marginTop: 10 }}>
+            Service fee (est): {fmt8(computeServiceFee(amount))}
+          </Text>
+        </View>
 
-                const title =
-                  `${String(t.type).toUpperCase()} · ${t.amount}` +
-                  ` · fee ${fmt8(totalFee)}` +
-                  ` · ${t.status}` +
-                  (t.blockHeight ? ` · block ${t.blockHeight}` : "");
+        <View style={{ height: 14 }} />
 
-                const showActions = isMyPendingSend(t);
+        {/* tx list */}
+        <View style={{ borderRadius: 18, padding: 14, borderWidth: 1, borderColor: T.border, backgroundColor: T.card }}>
+          <Text style={{ color: T.sub, marginBottom: 8 }}>Transactions</Text>
 
-                return (
-                  <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: T.border }}>
-                    <Text style={{ color: T.text, fontWeight: "800" }}>{title}</Text>
-                    <Text style={{ color: T.sub }}>Gas: {fmt8(gasFee)} · Service: {fmt8(serviceFee)}</Text>
+          {txs.length === 0 ? (
+            <Text style={{ color: T.sub }}>No transactions yet.</Text>
+          ) : (
+            txs.map((t, idx) => {
+              const pending = t?.status === "pending";
+              const minePending = isMyPendingSend(t);
 
-                    {t.failReason ? <Text style={{ color: T.danger }}>Reason: {t.failReason}</Text> : null}
-                    {t.nonce != null ? <Text style={{ color: T.sub }}>Nonce: {t.nonce}</Text> : null}
-                    <Text style={{ color: T.sub }}>From: {t.from || "—"}</Text>
-                    <Text style={{ color: T.sub }}>To: {t.to}</Text>
-
-                    {showActions ? (
-                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-                        <Pressable
-                          onPress={() => openRbf(t)}
-                          disabled={sendBusy}
-                          style={{
-                            paddingVertical: 10,
-                            paddingHorizontal: 14,
-                            borderRadius: 10,
-                            backgroundColor: T.blue,
-                            opacity: sendBusy ? 0.6 : 1,
-                          }}
-                        >
-                          <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Boost (RBF)</Text>
-                        </Pressable>
-
-                        <Pressable
-                          onPress={() => openCancel(t)}
-                          disabled={sendBusy}
-                          style={{
-                            paddingVertical: 10,
-                            paddingHorizontal: 14,
-                            borderRadius: 10,
-                            backgroundColor: "rgba(255,90,90,0.95)",
-                            opacity: sendBusy ? 0.6 : 1,
-                          }}
-                        >
-                          <Text style={{ color: "#fff", fontWeight: "900" }}>✖ Cancel</Text>
-                        </Pressable>
-                      </View>
-                    ) : null}
+              return (
+                <View
+                  key={`${t?.id || idx}`}
+                  style={{
+                    paddingVertical: 10,
+                    borderTopWidth: idx === 0 ? 0 : 1,
+                    borderTopColor: "rgba(255,255,255,0.08)",
+                  }}
+                >
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                    <Text style={{ color: T.text, fontWeight: "900" }}>
+                      {t?.type === "mint" ? "Mint" : "Send"}{" "}
+                      <Text style={{ color: pending ? "#ffd56a" : T.sub }}>{pending ? "(pending)" : "(confirmed)"}</Text>
+                    </Text>
+                    <Text style={{ color: T.sub }}>{fmt8(Number(t?.amount || 0))}</Text>
                   </View>
-                );
-              })
-            )}
-          </View>
-        ) : null}
+
+                  {t?.type === "send" ? (
+                    <Text style={{ color: T.sub, marginTop: 4 }}>
+                      To: {shortAddr(String(t?.to || ""))} • Nonce: {String(t?.nonce ?? "—")}
+                    </Text>
+                  ) : (
+                    <Text style={{ color: T.sub, marginTop: 4 }}>Nonce: {String(t?.nonce ?? "—")}</Text>
+                  )}
+
+                  {minePending ? (
+                    <View style={{ flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                      <Pressable
+                        onPress={() => openBoost(t)}
+                        disabled={sendBusy}
+                        style={{
+                          paddingVertical: 10,
+                          paddingHorizontal: 14,
+                          borderRadius: 10,
+                          backgroundColor: T.blue,
+                          opacity: sendBusy ? 0.6 : 1,
+                        }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Boost (RBF)</Text>
+                      </Pressable>
+
+                      <Pressable
+                        onPress={() => openCancel(t)}
+                        disabled={sendBusy}
+                        style={{
+                          paddingVertical: 10,
+                          paddingHorizontal: 14,
+                          borderRadius: 10,
+                          backgroundColor: "rgba(255,90,90,0.95)",
+                          opacity: sendBusy ? 0.6 : 1,
+                        }}
+                      >
+                        <Text style={{ color: "#fff", fontWeight: "900" }}>✖ Cancel</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })
+          )}
+        </View>
       </ScrollView>
 
-      {/* ✅ MODALS ARE OUTSIDE THE SCROLLVIEW */}
-
-      {/* Confirm modal */}
+      {/* ---------- Confirm Send modal ---------- */}
       <Modal transparent visible={confirmOpen} animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
         <View style={{ flex: 1, justifyContent: "center", padding: 18 }}>
-          <BlurView
-            intensity={35}
-            tint="dark"
-            style={{ borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)" }}
-          >
-            <View style={{ padding: 16, backgroundColor: "rgba(0,0,0,0.45)" }}>
-              {/* ... keep your existing Confirm modal content exactly as you already have it ... */}
+          <GlassCard>
+            <View style={{ padding: 16 }}>
+              <Text style={{ color: T.text, fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
+                Confirm Transaction
+              </Text>
+
+              <Text style={{ color: T.sub }}>To: {to}</Text>
+              <Text style={{ color: T.sub }}>Amount: {amount}</Text>
+
+              <View style={{ height: 10 }} />
+
+              {computedConfirmFees ? (
+                <>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Fees</Text>
+                  <Text style={{ color: T.sub }}>Min gas: {fmt8(computedConfirmFees.minGas)}</Text>
+                  <Text style={{ color: T.sub }}>Gas: {fmt8(computedConfirmFees.gasFee)}</Text>
+                  <Text style={{ color: T.sub }}>Service: {fmt8(computedConfirmFees.serviceFee)}</Text>
+                  <Text style={{ color: T.sub }}>Total fee: {fmt8(computedConfirmFees.totalFee)}</Text>
+                  <Text style={{ color: T.text, fontWeight: "900", marginTop: 8 }}>
+                    Total cost: {fmt8(computedConfirmFees.totalCost)}
+                  </Text>
+                </>
+              ) : (
+                <Text style={{ color: T.sub }}>Loading…</Text>
+              )}
+
+              <View style={{ height: 12 }} />
+              <Text style={{ color: T.text, fontWeight: "900" }}>Gas speed</Text>
+
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                {[
+                  { k: "slow" as const, label: "Slow" },
+                  { k: "normal" as const, label: "Normal" },
+                  { k: "fast" as const, label: "Fast" },
+                  { k: "custom" as const, label: "Custom" },
+                ].map((b) => (
+                  <Pressable
+                    key={b.k}
+                    onPress={() => setGasPreset(b.k)}
+                    style={{
+                      paddingVertical: 10,
+                      paddingHorizontal: 14,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: gasPreset === b.k ? T.gold : "rgba(255,255,255,0.14)",
+                      backgroundColor: gasPreset === b.k ? "rgba(202,168,60,0.12)" : "transparent",
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>{b.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {gasPreset === "custom" && computedConfirmFees ? (
+                <View style={{ marginTop: 10 }}>
+                  <Text style={{ color: T.sub, marginBottom: 6 }}>
+                    Custom gas (min {fmt8(computedConfirmFees.minGas)})
+                  </Text>
+                  <TextInput
+                    value={customGasStr}
+                    onChangeText={setCustomGasStr}
+                    placeholder={`${fmt8(computedConfirmFees.minGas)}`}
+                    placeholderTextColor="rgba(255,255,255,0.35)"
+                    keyboardType="decimal-pad"
+                    style={{
+                      color: T.text,
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                      backgroundColor: "rgba(0,0,0,0.35)",
+                    }}
+                  />
+                </View>
+              ) : null}
+
+              <View style={{ height: 14 }} />
+
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <Pressable
+                  onPress={() => setConfirmOpen(false)}
+                  disabled={sendBusy}
+                  style={{
+                    flex: 1,
+                    paddingVertical: 12,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    borderWidth: 1,
+                    borderColor: T.border,
+                    backgroundColor: "rgba(0,0,0,0.35)",
+                    opacity: sendBusy ? 0.6 : 1,
+                  }}
+                >
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Back</Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={handleSendSubmit}
+                  disabled={sendBusy || !computedConfirmFees}
+                  style={{
+                    flex: 1,
+                    paddingVertical: 12,
+                    borderRadius: 12,
+                    alignItems: "center",
+                    backgroundColor: T.green,
+                    opacity: sendBusy || !computedConfirmFees ? 0.6 : 1,
+                  }}
+                >
+                  <Text style={{ color: "#041006", fontWeight: "900" }}>
+                    {sendBusy ? "Sending…" : "Confirm"}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
-          </BlurView>
+          </GlassCard>
         </View>
       </Modal>
 
-      {/* RBF modal */}
+      {/* ---------- Boost modal ---------- */}
       <Modal transparent visible={rbfOpen} animationType="fade" onRequestClose={() => setRbfOpen(false)}>
         <View style={{ flex: 1, justifyContent: "center", padding: 18 }}>
-          <BlurView
-            intensity={35}
-            tint="dark"
-            style={{ borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)" }}
-          >
-            <View style={{ padding: 16, backgroundColor: "rgba(0,0,0,0.45)" }}>
-              {/* ... keep your existing RBF modal content exactly as you already have it ... */}
+          <GlassCard>
+            <View style={{ padding: 16 }}>
+              <Text style={{ color: T.text, fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
+                Boost Pending Tx (RBF)
+              </Text>
+
+              {rbfTx ? (
+                <>
+                  <Text style={{ color: T.sub }}>To: {String(rbfTx.to)}</Text>
+                  <Text style={{ color: T.sub }}>Amount: {Number(rbfTx.amount)}</Text>
+                  <Text style={{ color: T.sub }}>Nonce: {String(rbfTx.nonce)}</Text>
+                </>
+              ) : null}
+
+              <View style={{ height: 12 }} />
+
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                {[1.25, 1.5, 2.0].map((m) => (
+                  <Pressable
+                    key={String(m)}
+                    onPress={() => doBoost(m)}
+                    disabled={sendBusy}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 12,
+                      borderRadius: 12,
+                      alignItems: "center",
+                      backgroundColor: T.blue,
+                      opacity: sendBusy ? 0.6 : 1,
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "900" }}>{m}×</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <View style={{ height: 12 }} />
+              <Pressable
+                onPress={() => setRbfOpen(false)}
+                disabled={sendBusy}
+                style={{
+                  paddingVertical: 12,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  backgroundColor: "rgba(0,0,0,0.35)",
+                  opacity: sendBusy ? 0.6 : 1,
+                }}
+              >
+                <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+              </Pressable>
             </View>
-          </BlurView>
+          </GlassCard>
         </View>
       </Modal>
 
-      {/* Cancel modal */}
+      {/* ---------- Cancel modal ---------- */}
       <Modal transparent visible={cancelOpen} animationType="fade" onRequestClose={() => setCancelOpen(false)}>
         <View style={{ flex: 1, justifyContent: "center", padding: 18 }}>
-          <BlurView
-            intensity={35}
-            tint="dark"
-            style={{ borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)" }}
-          >
-            <View style={{ padding: 16, backgroundColor: "rgba(0,0,0,0.45)" }}>
-              {/* ... keep your existing Cancel modal content exactly as you already have it ... */}
+          <GlassCard>
+            <View style={{ padding: 16 }}>
+              <Text style={{ color: T.text, fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
+                Cancel Pending Tx
+              </Text>
+
+              <Text style={{ color: T.sub }}>
+                This will replace the pending tx by sending {fmt8(ONE_SAT)} to yourself (same nonce + higher fee).
+              </Text>
+
+              <View style={{ height: 12 }} />
+
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                {[1.25, 1.5, 2.0].map((m) => (
+                  <Pressable
+                    key={String(m)}
+                    onPress={() => doCancel(m)}
+                    disabled={sendBusy}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 12,
+                      borderRadius: 12,
+                      alignItems: "center",
+                      backgroundColor: "rgba(255,90,90,0.95)",
+                      opacity: sendBusy ? 0.6 : 1,
+                    }}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "900" }}>{m}×</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <View style={{ height: 12 }} />
+              <Pressable
+                onPress={() => setCancelOpen(false)}
+                disabled={sendBusy}
+                style={{
+                  paddingVertical: 12,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  backgroundColor: "rgba(0,0,0,0.35)",
+                  opacity: sendBusy ? 0.6 : 1,
+                }}
+              >
+                <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+              </Pressable>
             </View>
-          </BlurView>
+          </GlassCard>
         </View>
       </Modal>
 
-      {/* Settings modal */}
+      {/* ---------- Settings modal ---------- */}
       <Modal transparent visible={settingsOpen} animationType="fade" onRequestClose={() => setSettingsOpen(false)}>
         <View style={{ flex: 1, justifyContent: "center", padding: 18 }}>
-          <BlurView
-            intensity={35}
-            tint="dark"
-            style={{ borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)" }}
-          >
-            <View style={{ padding: 16, backgroundColor: "rgba(0,0,0,0.45)" }}>
-              {/* ... keep your existing Settings modal content exactly as you already have it ... */}
+          <GlassCard>
+            <View style={{ padding: 16 }}>
+              <Text style={{ color: T.text, fontSize: 20, fontWeight: "900", marginBottom: 8 }}>Settings</Text>
+
+              <Text style={{ color: T.sub, marginBottom: 10 }}>Theme</Text>
+              <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
+                {(["cosmic", "noir", "honey"] as ThemeKey[]).map((k) => (
+                  <Pressable
+                    key={k}
+                    onPress={() => setTheme(k)}
+                    style={{
+                      paddingVertical: 10,
+                      paddingHorizontal: 14,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: theme === k ? T.gold : "rgba(255,255,255,0.14)",
+                      backgroundColor: theme === k ? "rgba(202,168,60,0.12)" : "transparent",
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <View style={{ height: 14 }} />
+
+              <Text style={{ color: T.sub, marginBottom: 10 }}>Skin</Text>
+              <View style={{ flexDirection: "row", gap: 10, flexWrap: "wrap" }}>
+                {(["matrix-honeycomb", "solid-noir", "solid-minimal"] as SkinKey[]).map((k) => (
+                  <Pressable
+                    key={k}
+                    onPress={() => setSkin(k)}
+                    style={{
+                      paddingVertical: 10,
+                      paddingHorizontal: 14,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: skin === k ? T.green : "rgba(255,255,255,0.14)",
+                      backgroundColor: skin === k ? "rgba(57,255,20,0.10)" : "transparent",
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>{k}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <View style={{ height: 14 }} />
+              <Pressable
+                onPress={() => setSettingsOpen(false)}
+                style={{
+                  paddingVertical: 12,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  backgroundColor: "rgba(0,0,0,0.35)",
+                }}
+              >
+                <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+              </Pressable>
             </View>
-          </BlurView>
+          </GlassCard>
         </View>
       </Modal>
     </View>
   );
 
-  // ---------------------------
-  // ✅ Final return (skin wrapper)
-  // ---------------------------
-  return skin === "honeycomb" ? (
-    <ImageBackground source={require("./honeycomb-bg.png")} resizeMode="cover" style={{ flex: 1 }}>
-      <View style={{ flex: 1, backgroundColor: T.overlay }}>{Screen}</View>
+  /** ------------------------------ skins ------------------------------ */
+  if (skin === "solid-noir") return <View style={{ flex: 1, backgroundColor: "#050509" }}>{Body}</View>;
+  if (skin === "solid-minimal") return <View style={{ flex: 1, backgroundColor: "#0b0615" }}>{Body}</View>;
+
+  // matrix-honeycomb default
+  return (
+    <ImageBackground source={require("./assets/skins/matrix-honeycomb.png")} resizeMode="cover" style={{ flex: 1 }}>
+      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.22)" }}>{Body}</View>
     </ImageBackground>
-  ) : (
-    <View style={{ flex: 1, backgroundColor: skin === "solid-noir" ? "#000" : "#0b0b0b" }}>
-      <View style={{ flex: 1, backgroundColor: T.overlay }}>{Screen}</View>
-    </View>
-  )}
+  );
+}
