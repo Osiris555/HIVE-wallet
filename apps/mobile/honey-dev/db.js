@@ -37,8 +37,13 @@ function all(db, sql, params = []) {
   });
 }
 
+async function columnExists(db, table, column) {
+  const rows = await all(db, `PRAGMA table_info(${table});`);
+  return rows.some((r) => r.name === column);
+}
+
 async function initDb(db) {
-  // accounts: wallet + optional pubkey + balance + nonce + lastMint
+  // accounts: wallet + optional pubkey + confirmed balance + nonce + lastMint
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS accounts (
@@ -51,7 +56,7 @@ async function initDb(db) {
     );`
   );
 
-  // transactions: store pending + confirmed + block linkage
+  // transactions: store pending + confirmed + failed + block linkage
   await run(
     db,
     `CREATE TABLE IF NOT EXISTS transactions (
@@ -64,6 +69,7 @@ async function initDb(db) {
       nonce INTEGER NOT NULL,
       gasFee REAL NOT NULL,
       status TEXT NOT NULL,
+      failReason TEXT,
       blockHeight INTEGER,
       blockHash TEXT,
       timestampMs INTEGER NOT NULL
@@ -90,6 +96,12 @@ async function initDb(db) {
   );
 
   await run(db, `CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks(timestampMs);`);
+
+  // ---- lightweight migration for older DBs ----
+  const hasFailReason = await columnExists(db, "transactions", "failReason");
+  if (!hasFailReason) {
+    await run(db, `ALTER TABLE transactions ADD COLUMN failReason TEXT;`);
+  }
 }
 
 module.exports = {

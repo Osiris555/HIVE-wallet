@@ -27,7 +27,7 @@ function storageRemove(key: string) {
 
 export default function IndexScreen() {
   const [wallet, setWallet] = useState<string>("");
-  const [balance, setBalance] = useState<number>(0); // confirmed
+  const [balance, setBalance] = useState<number>(0);
   const [pendingDelta, setPendingDelta] = useState<number>(0);
   const [spendable, setSpendable] = useState<number>(0);
 
@@ -118,7 +118,6 @@ export default function IndexScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll while pending exists so UI flips to confirmed + balances update after a block
   useEffect(() => {
     if (!showTxs) return;
     if (!hasPending(txs)) return;
@@ -143,7 +142,6 @@ export default function IndexScreen() {
       const data: any = await mint();
       startCooldown(Number(data?.cooldownSeconds || 60));
 
-      // after submit, pending shows up right away
       await loadTxs(wallet);
       await loadBalance(wallet);
 
@@ -269,6 +267,11 @@ export default function IndexScreen() {
                     {String(item.type).toUpperCase()} • {item.amount} • {item.status}
                     {item.status === "confirmed" && item.blockHeight != null ? ` • block ${item.blockHeight}` : ""}
                   </Text>
+
+                  {item.status === "failed" && item.failReason ? (
+                    <Text style={styles.txFail}>Reason: {String(item.failReason)}</Text>
+                  ) : null}
+
                   <Text style={styles.txSub}>Nonce: {item.nonce}</Text>
                   <Text style={styles.txSub}>From: {item.from || "—"}</Text>
                   <Text style={styles.txSub}>To: {item.to}</Text>
@@ -309,5 +312,6 @@ const styles = StyleSheet.create({
   txEmpty: { color: "#bbb" },
   txRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#222" },
   txMain: { color: "#fff", fontWeight: "700" },
+  txFail: { color: "#ff6b6b", marginTop: 4, fontSize: 12, fontWeight: "700" },
   txSub: { color: "#bbb", marginTop: 2, fontSize: 12 },
 });
