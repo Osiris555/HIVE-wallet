@@ -1,5 +1,6 @@
 import nacl from "tweetnacl";
 import * as naclUtil from "tweetnacl-util";
+import * as Crypto from "expo-crypto";
 
 export type TxType = "mint" | "send";
 
@@ -44,16 +45,19 @@ function isWeb() {
 }
 
 function getStored(key: string) {
-  if (isWeb()) {
-    try { return window.localStorage.getItem(key); } catch { return null; }
+  if (!isWeb()) return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
   }
-  return null;
 }
 
 function setStored(key: string, value: string) {
-  if (isWeb()) {
-    try { window.localStorage.setItem(key, value); } catch {}
-  }
+  if (!isWeb()) return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {}
 }
 
 function b64ToU8(b64: string) {
@@ -82,7 +86,11 @@ function canonicalMessage(params: {
 }
 
 async function readJsonSafe(res: Response) {
-  try { return await res.json(); } catch { return null; }
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 function makeError(message: string, status?: number, data?: any) {
@@ -125,6 +133,13 @@ async function postJson(path: string, payload: any) {
   return body;
 }
 
+// ✅ Native-safe randomness for nacl
+async function randomBytes(count: number): Promise<Uint8Array> {
+  // Expo Crypto gives secure random bytes on native + web
+  const bytes = await Crypto.getRandomBytesAsync(count);
+  return Uint8Array.from(bytes);
+}
+
 // ---- key management ----
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
   // load
@@ -133,8 +148,10 @@ export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKey
 
   if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
 
-  // generate new
-  const kp = nacl.sign.keyPair();
+  // ✅ Generate a deterministic keypair from a securely random seed
+  const seed = await randomBytes(32); // 32-byte seed
+  const kp = nacl.sign.keyPair.fromSeed(seed);
+
   pub = u8ToB64(kp.publicKey);
   priv = u8ToB64(kp.secretKey);
 
@@ -187,7 +204,6 @@ export async function mint(wallet: string): Promise<any> {
   const acct = await getAccount(wallet);
   if (!acct.registered) await registerWallet(wallet);
 
-  // fetch nonce again (in case it changed)
   const acct2 = await getAccount(wallet);
   const nonce = acct2.nonce;
   const timestamp = Date.now();
