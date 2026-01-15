@@ -191,8 +191,16 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
-export async function getChainStatus(): Promise<ChainStatus> {
-  return await getJson("/status");
+export async function getChainStatus() {
+  // IMPORTANT: return full JSON so index.tsx can see feeVaultBalance
+  const res = await fetch(`${API_BASE}/status`);
+  const body = await res.json();
+  if (!res.ok) {
+    const err: any = new Error(body?.error || "Chain status failed");
+    err.status = res.status;
+    throw err;
+  }
+  return body;
 }
 
 export async function getAccount(wallet: string) {
