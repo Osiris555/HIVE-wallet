@@ -190,7 +190,7 @@ export default function Index() {
     }
   }
 
-  // ----- RBF helpers -----
+  // ----- RBF -----
   function openRbfChooser(tx: any) {
     setMessage("");
     setRbfTx(tx);
@@ -209,14 +209,11 @@ export default function Index() {
 
     const serviceFee = computeServiceFee(amt, rate);
 
-    // bump gas by multiplier from oldGas (fallback to minGas)
     let newGas = Number(((oldGas > 0 ? oldGas : minGas) * multiplier).toFixed(8));
     newGas = Math.max(minGas, newGas);
 
-    // For "MAX", we’ll still pass multiplier, but the caller can add extra.
     let newTotalFee = Number((newGas + serviceFee).toFixed(8));
 
-    // ensure strictly higher than old (server requires >)
     if (newTotalFee <= oldTotalFee) {
       while (newTotalFee <= oldTotalFee) {
         newGas = Number((newGas + ONE_SAT).toFixed(8));
@@ -224,8 +221,25 @@ export default function Index() {
       }
     }
 
-    return { minGas, rate, serviceFee, oldTotalFee, oldGas, oldSvc, newGas, newTotalFee };
+    return { minGas, rate, serviceFee, oldTotalFee, newGas, newTotalFee };
   }
+
+  const [rbfPreviewData, setRbfPreviewData] = useState<any>(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!rbfTx) {
+        setRbfPreviewData(null);
+        return;
+      }
+      const s = await getChainStatus();
+      const fees = calcRbfFees(rbfTx, s, rbfMultiplier);
+      if (mounted) setRbfPreviewData({ status: s, fees });
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [rbfTx, rbfMultiplier]);
 
   async function submitRbf(multiplier: number, isMax: boolean) {
     if (sendBusy) return;
@@ -255,12 +269,10 @@ export default function Index() {
 
       let gasFee = fees.newGas;
 
-      // “MAX” adds an extra bump to strongly outbid typical replacements
       if (isMax) {
-        gasFee = Number((gasFee + Math.max(fees.minGas, gasFee) * 0.25).toFixed(8)); // +25%
+        gasFee = Number((gasFee + Math.max(fees.minGas, gasFee) * 0.25).toFixed(8));
       }
 
-      // re-check strict > old total fee after max bump
       let totalFee = Number((gasFee + fees.serviceFee).toFixed(8));
       if (totalFee <= fees.oldTotalFee) {
         while (totalFee <= fees.oldTotalFee) {
@@ -274,7 +286,7 @@ export default function Index() {
         amount: Number(tx.amount),
         gasFee,
         serviceFee: fees.serviceFee,
-        nonceOverride: Number(tx.nonce), // ✅ replacement nonce
+        nonceOverride: Number(tx.nonce), // ✅ replace THIS pending nonce
       });
 
       setRbfOpen(false);
@@ -296,36 +308,6 @@ export default function Index() {
     return mintBusy ? "Minting..." : "Mint";
   }, [mintCooldown, mintBusy]);
 
-  // derived preview for RBF modal
-  const rbfPreview = useMemo(() => {
-    if (!rbfTx) return null;
-    return (async () => {
-      try {
-        const status = await getChainStatus();
-        return { status, fees: calcRbfFees(rbfTx, status, rbfMultiplier) };
-      } catch {
-        return null;
-      }
-    })();
-  }, [rbfTx, rbfMultiplier]);
-
-  const [rbfPreviewData, setRbfPreviewData] = useState<any>(null);
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      if (!rbfTx) {
-        setRbfPreviewData(null);
-        return;
-      }
-      const s = await getChainStatus();
-      const fees = calcRbfFees(rbfTx, s, rbfMultiplier);
-      if (mounted) setRbfPreviewData({ status: s, fees });
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [rbfTx, rbfMultiplier]);
-
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <ScrollView contentContainerStyle={{ padding: 24, gap: 14, maxWidth: 950, alignSelf: "center", width: "100%" }}>
@@ -339,10 +321,13 @@ export default function Index() {
 
         {wallet ? <Text style={{ color: "#aaa", textAlign: "center" }}>Wallet: {wallet}</Text> : null}
 
+        {/* ✅ show decimals so gas/service fees are visible */}
         <Text style={{ color: "#fff", textAlign: "center", fontSize: 20, marginTop: 6 }}>
-          Confirmed: {Math.floor(confirmedBalance)} HNY
+          Confirmed: {fmt8(confirmedBalance)} HNY
         </Text>
-        <Text style={{ color: "#aaa", textAlign: "center" }}>Spendable: {Math.floor(spendableBalance)} HNY</Text>
+        <Text style={{ color: "#aaa", textAlign: "center" }}>
+          Spendable: {fmt8(spendableBalance)} HNY
+        </Text>
 
         {message ? (
           <Text style={{ color: message.toLowerCase().includes("failed") ? "#ff6b6b" : "#9dff9d", textAlign: "center" }}>
@@ -589,7 +574,7 @@ export default function Index() {
             </View>
 
             <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
-              This replaces your pending transaction by reusing the same nonce with a higher fee.
+              This replaces the pending transaction with the same nonce using a higher total fee.
             </Text>
           </View>
         </View>

@@ -23,20 +23,17 @@ const MINT_COOLDOWN_MS = 60 * 1000;
 const BLOCK_TIME_MS = 5000;
 const MAX_BLOCK_TXS = 500;
 
-// Failure rules
+// Failure / queue rules
 const TX_TTL_MS = 60 * 1000;
 const MAX_PENDING_PER_WALLET = 20;
 const MAX_TXS_PER_WALLET_PER_BLOCK = 5;
 
-// Fees
-const MIN_GAS_FEE = 0.000001;
-// ✅ 0.005% = 0.00005
+// Fees (base)
+const BASE_MIN_GAS_FEE = 0.000001;
+// 0.005% = 0.00005
 const SERVICE_FEE_RATE = 0.00005;
 
-// ✅ chainId
 const CHAIN_ID = process.env.HIVE_CHAIN_ID || "hny-devnet-1";
-
-// ✅ fee vault
 const FEE_VAULT = "HNY_FEE_VAULT";
 
 const db = openDb();
@@ -63,8 +60,8 @@ function deriveWalletFromPubKeyB64(pubB64) {
 }
 
 /**
- * ✅ Signed envelope includes serviceFee too:
- * chainId | type | from | to | amount | nonce | gasFee | serviceFee | expiresAtMs | timestamp
+ * Signed envelope:
+ * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp
  */
 function canonicalSignedMessage({
   chainId,
@@ -94,6 +91,27 @@ function canonicalSignedMessage({
 
 function expectedServiceFee(amount) {
   return Number((Number(amount) * SERVICE_FEE_RATE).toFixed(8));
+}
+
+/**
+ * ✅ Fee market (simple, testnet-like):
+ * - minGasFee increases with mempool size
+ * - capped so it doesn't explode
+ */
+async function getMempoolSize() {
+  const r = await get(db, `SELECT COUNT(*) AS c FROM transactions WHERE status='pending'`);
+  return Number(r?.c || 0);
+}
+
+function feeMarketMinGasFee(mempoolSize) {
+  // every +100 pending adds +10% to min gas, capped at 10x
+  const multiplier = Math.min(10, 1 + mempoolSize / 1000); // 0..1000 => 1..2, etc
+  return Number((BASE_MIN_GAS_FEE * multiplier).toFixed(8));
+}
+
+async function currentMinGasFee() {
+  const mempool = await getMempoolSize();
+  return { mempool, minGasFee: feeMarketMinGasFee(mempool) };
 }
 
 async function ensureAccountExists(wallet) {
@@ -131,9 +149,6 @@ async function setLastMint(wallet, ms) {
   await run(db, `UPDATE accounts SET lastMintMs = ? WHERE wallet = ?`, [ms, wallet]);
 }
 
-/**
- * Pending outgoing cost includes amount + gasFee + serviceFee for SEND
- */
 async function getPendingOutgoingCost(wallet) {
   const row = await get(
     db,
@@ -256,9 +271,9 @@ async function failTx(id, height, reason) {
 }
 
 /**
- * ✅ RBF support:
- * If there is a pending SEND tx with same (fromWallet, nonce),
- * allow replacement if newTotalFee > oldTotalFee by at least 1e-8.
+ * ✅ NEW RBF RULE:
+ * You may replace ANY pending SEND tx by providing its nonce,
+ * as long as that nonce is already USED (< account nonce) and a pending tx exists for it.
  */
 async function findPendingByFromNonce(from, nonce) {
   return await get(
@@ -290,7 +305,7 @@ async function getLatestBlock() {
 }
 
 async function buildBlockWithRules() {
-  // ✅ MEMPOOL ORDERING BY TOTAL FEE (DESC), tie-break by timestamp (ASC)
+  // ✅ ORDER MEMPOOL BY TOTAL FEE DESC, tiebreak timestamp ASC
   const pending = await all(
     db,
     `SELECT id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, expiresAtMs, timestampMs
@@ -334,20 +349,24 @@ async function buildBlockWithRules() {
       const totalFee = gasFee + serviceFee;
       const exp = tx.expiresAtMs == null ? null : Number(tx.expiresAtMs);
 
-      // 1) expiry
+      // expiry
       if (exp != null && Number.isFinite(exp) && ts > exp) {
         await failTx(tx.id, height, "expired");
         continue;
       }
 
-      // fee floor
-      if (!Number.isFinite(gasFee) || gasFee < MIN_GAS_FEE) {
-        await failTx(tx.id, height, "fee_too_low");
+      if (!Number.isFinite(amt) || amt <= 0) {
+        await failTx(tx.id, height, "invalid_amount");
         continue;
       }
 
-      if (!Number.isFinite(amt) || amt <= 0) {
-        await failTx(tx.id, height, "invalid_amount");
+      if (!Number.isFinite(gasFee) || gasFee <= 0) {
+        await failTx(tx.id, height, "invalid_gas_fee");
+        continue;
+      }
+
+      if (!Number.isFinite(serviceFee) || serviceFee < 0) {
+        await failTx(tx.id, height, "invalid_service_fee");
         continue;
       }
 
@@ -360,7 +379,6 @@ async function buildBlockWithRules() {
         }
         bump(owner);
 
-        // faucet mints full amount, fees not charged to user (for now)
         working[owner] = (working[owner] || 0) + amt;
 
         await run(
@@ -464,13 +482,15 @@ async function startBlockProducer() {
 /* ======================
    ROUTES
 ====================== */
-app.get("/", (_req, res) => {
+app.get("/", async (_req, res) => {
+  const { mempool, minGasFee } = await currentMinGasFee();
   res.json({
     status: "HIVE Wallet server running",
     db: DB_PATH,
     chainId: CHAIN_ID,
     feeVault: FEE_VAULT,
-    fees: { minGasFee: MIN_GAS_FEE, serviceFeeRate: SERVICE_FEE_RATE },
+    feeMarket: { mempoolSize: mempool, baseMinGasFee: BASE_MIN_GAS_FEE, minGasFee },
+    fees: { serviceFeeRate: SERVICE_FEE_RATE },
     rules: { TX_TTL_MS, MAX_PENDING_PER_WALLET, MAX_TXS_PER_WALLET_PER_BLOCK },
   });
 });
@@ -483,8 +503,7 @@ app.get("/status", async (_req, res) => {
     const elapsed = now() - lastBlockTimeMs;
     const msUntilNext = Math.max(0, BLOCK_TIME_MS - (elapsed % BLOCK_TIME_MS));
 
-    const mempoolSizeRow = await get(db, `SELECT COUNT(*) as c FROM transactions WHERE status='pending'`);
-    const mempoolSize = mempoolSizeRow?.c || 0;
+    const { mempool, minGasFee } = await currentMinGasFee();
 
     res.json({
       chainId: CHAIN_ID,
@@ -492,11 +511,15 @@ app.get("/status", async (_req, res) => {
       lastBlockTimeMs,
       blockTimeMs: BLOCK_TIME_MS,
       msUntilNextBlock: msUntilNext,
-      mempoolSize,
-      latestBlock: latest || null,
-      minGasFee: MIN_GAS_FEE,
-      txTtlMs: TX_TTL_MS,
+      mempoolSize: mempool,
+
+      // ✅ fee market output
+      baseMinGasFee: BASE_MIN_GAS_FEE,
+      minGasFee,
       serviceFeeRate: SERVICE_FEE_RATE,
+
+      txTtlMs: TX_TTL_MS,
+      latestBlock: latest || null,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "status failed" });
@@ -523,29 +546,6 @@ app.post("/register", async (req, res) => {
     res.json({ success: true, wallet, nonce: acct.nonce, registered: true, chainId: CHAIN_ID });
   } catch (e) {
     res.status(500).json({ error: e.message || "register failed" });
-  }
-});
-
-app.get("/account/:wallet", async (req, res) => {
-  try {
-    const wallet = req.params.wallet;
-    if (!wallet) return res.status(400).json({ error: "Missing wallet" });
-
-    const acct = await getAccountRow(wallet);
-    const pendingDelta = await getPendingDelta(wallet);
-    const pendingOutgoingCost = await getPendingOutgoingCost(wallet);
-
-    res.json({
-      chainId: CHAIN_ID,
-      wallet: acct.wallet,
-      balance: Number(acct.balance),
-      pendingDelta,
-      spendableBalance: Number(acct.balance) - pendingOutgoingCost,
-      nonce: acct.nonce,
-      registered: !!acct.publicKeyB64,
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message || "account failed" });
   }
 });
 
@@ -622,7 +622,9 @@ app.post("/mint", async (req, res) => {
     const chainId = String(req.body?.chainId || "");
     if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
 
-    const gasFee = Number(req.body?.gasFee ?? MIN_GAS_FEE);
+    const { minGasFee } = await currentMinGasFee();
+
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
     const serviceFee = 0;
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 
@@ -630,8 +632,8 @@ app.post("/mint", async (req, res) => {
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
     if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-    if (!Number.isFinite(gasFee) || gasFee < MIN_GAS_FEE) {
-      return res.status(400).json({ error: "Fee too low", minGasFee: MIN_GAS_FEE });
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) {
+      return res.status(400).json({ error: "Fee too low", minGasFee });
     }
 
     const ttlMax = now() + TX_TTL_MS * 2;
@@ -707,6 +709,7 @@ app.post("/mint", async (req, res) => {
       tx,
       cooldownSeconds: Math.ceil(MINT_COOLDOWN_MS / 1000),
       chainHeight,
+      minGasFee,
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "mint failed" });
@@ -714,7 +717,7 @@ app.post("/mint", async (req, res) => {
 });
 
 /* ======================
-   SEND (SIGNED + RBF)
+   SEND (SIGNED + RBF ANY PENDING NONCE)
 ====================== */
 app.post("/send", async (req, res) => {
   try {
@@ -730,12 +733,14 @@ app.post("/send", async (req, res) => {
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
     if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-    const gasFee = Number(req.body?.gasFee ?? MIN_GAS_FEE);
+    const { minGasFee } = await currentMinGasFee();
+
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
     const serviceFee = Number(req.body?.serviceFee ?? expectedServiceFee(amt));
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 
-    if (!Number.isFinite(gasFee) || gasFee < MIN_GAS_FEE) {
-      return res.status(400).json({ error: "Fee too low", minGasFee: MIN_GAS_FEE });
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) {
+      return res.status(400).json({ error: "Fee too low", minGasFee });
     }
 
     const svcExpected = expectedServiceFee(amt);
@@ -761,15 +766,20 @@ app.post("/send", async (req, res) => {
       return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
     }
 
-    // ✅ RBF logic
+    // ✅ Decide if this is NEW or RBF
     let isReplacement = false;
 
     if (nonce === fromAcct.nonce) {
-      // normal new tx
-    } else if (nonce === fromAcct.nonce - 1) {
+      // new tx uses next nonce
+    } else if (nonce < fromAcct.nonce) {
+      // ✅ RBF for any already-used nonce if pending exists
       const existing = await findPendingByFromNonce(from, nonce);
       if (!existing) {
-        return res.status(409).json({ error: "Nonce mismatch", expectedNonce: fromAcct.nonce, gotNonce: nonce });
+        return res.status(409).json({
+          error: "Nonce mismatch (no pending tx to replace)",
+          expectedNonce: fromAcct.nonce,
+          gotNonce: nonce,
+        });
       }
 
       const oldTotalFee = Number(existing.gasFee) + Number(existing.serviceFee || 0);
@@ -786,7 +796,12 @@ app.post("/send", async (req, res) => {
       await replacePendingTx(existing.id, "replaced_by_higher_fee");
       isReplacement = true;
     } else {
-      return res.status(409).json({ error: "Nonce mismatch", expectedNonce: fromAcct.nonce, gotNonce: nonce });
+      // nonce > expected -> gap
+      return res.status(409).json({
+        error: "Nonce too high (gap not allowed)",
+        expectedNonce: fromAcct.nonce,
+        gotNonce: nonce,
+      });
     }
 
     // signature verify
@@ -809,6 +824,7 @@ app.post("/send", async (req, res) => {
     // spendable check includes pending outgoing
     const pendingOutgoingCost = await getPendingOutgoingCost(from);
     const spendable = Number(fromAcct.balance) - pendingOutgoingCost;
+
     const totalFee = gasFee + serviceFee;
     const totalCost = amt + totalFee;
 
@@ -858,7 +874,7 @@ app.post("/send", async (req, res) => {
       spendableBalance: Number(acct2.balance) - pendingOutgoingCost2,
       fromNonce: acct2.nonce,
       chainHeight,
-      fees: { gasFee, serviceFee, totalFee, totalCost },
+      fees: { minGasFee, gasFee, serviceFee, totalFee, totalCost },
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "send failed" });
@@ -879,9 +895,9 @@ app.post("/send", async (req, res) => {
       console.log(`🗄️  SQLite DB: ${DB_PATH}`);
       console.log(`⛓️  chainId: ${CHAIN_ID}`);
       console.log(`💰 fee vault: ${FEE_VAULT}`);
-      console.log(`⛽ minGasFee: ${MIN_GAS_FEE}, serviceFeeRate: ${SERVICE_FEE_RATE}`);
       console.log(`🧱 blockTime: ${BLOCK_TIME_MS}ms`);
       console.log(`📥 mempool ordering: totalFee DESC`);
+      console.log(`⛽ baseMinGasFee: ${BASE_MIN_GAS_FEE} (fee market enabled)`);
     });
   } catch (e) {
     console.error("FATAL STARTUP ERROR:", e);
