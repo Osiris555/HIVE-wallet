@@ -53,7 +53,6 @@ function sha256Hex(input) {
 }
 
 function fmt8(n) {
-  // canonical numeric formatting to avoid web/iOS float differences
   return Number(n).toFixed(8);
 }
 
@@ -94,7 +93,6 @@ function canonicalSignedMessage({
 }
 
 function expectedServiceFee(amount) {
-  // rounded to 8 decimals
   return Number((Number(amount) * SERVICE_FEE_RATE).toFixed(8));
 }
 
@@ -121,13 +119,6 @@ async function getAccountRow(wallet) {
 async function setPubKey(wallet, publicKeyB64) {
   await ensureAccountExists(wallet);
   await run(db, `UPDATE accounts SET publicKeyB64 = ? WHERE wallet = ?`, [publicKeyB64, wallet]);
-}
-
-async function updateBalance(wallet, newBalance) {
-  await ensureAccountExists(wallet);
-  await run(db, `UPDATE accounts SET balance = ? WHERE wallet = ?`, [wallet, newBalance].reverse()); // keep older sqlite happy
-  // (same effect as updateBalance(w, bal) - just avoiding accidental param order bugs)
-  await run(db, `UPDATE accounts SET balance = ? WHERE wallet = ?`, [newBalance, wallet]);
 }
 
 async function incrementNonce(wallet) {
@@ -267,7 +258,7 @@ async function failTx(id, height, reason) {
 /**
  * ✅ RBF support:
  * If there is a pending SEND tx with same (fromWallet, nonce),
- * allow replacement if newTotalFee > oldTotalFee by at least 1 satoshi (1e-8).
+ * allow replacement if newTotalFee > oldTotalFee by at least 1e-8.
  */
 async function findPendingByFromNonce(from, nonce) {
   return await get(
@@ -282,7 +273,6 @@ async function findPendingByFromNonce(from, nonce) {
 }
 
 async function replacePendingTx(oldTxId, reason = "replaced_by_higher_fee") {
-  // mark old tx failed immediately (mempool drop)
   await run(
     db,
     `UPDATE transactions
@@ -300,12 +290,13 @@ async function getLatestBlock() {
 }
 
 async function buildBlockWithRules() {
+  // ✅ MEMPOOL ORDERING BY TOTAL FEE (DESC), tie-break by timestamp (ASC)
   const pending = await all(
     db,
     `SELECT id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, expiresAtMs, timestampMs
      FROM transactions
      WHERE status='pending'
-     ORDER BY timestampMs ASC
+     ORDER BY (gasFee + serviceFee) DESC, timestampMs ASC
      LIMIT ?`,
     [MAX_BLOCK_TXS]
   );
@@ -632,7 +623,7 @@ app.post("/mint", async (req, res) => {
     if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
 
     const gasFee = Number(req.body?.gasFee ?? MIN_GAS_FEE);
-    const serviceFee = 0; // faucet mints without service fee
+    const serviceFee = 0;
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 
     if (!wallet) return res.status(400).json({ error: "Missing wallet" });
@@ -765,19 +756,16 @@ app.post("/send", async (req, res) => {
     await ensureAccountExists(to);
     const fromAcct = await getAccountRow(from);
 
-    // pending spam limiter
     const pendingCount = await countPendingForWallet({ type: "send", wallet: from });
     if (pendingCount >= MAX_PENDING_PER_WALLET) {
       return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
     }
 
-    // ✅ RBF logic:
-    // - normal new tx uses nonce == fromAcct.nonce
-    // - replacement uses nonce == fromAcct.nonce - 1 *if* pending tx exists with that nonce
+    // ✅ RBF logic
     let isReplacement = false;
 
     if (nonce === fromAcct.nonce) {
-      // normal path
+      // normal new tx
     } else if (nonce === fromAcct.nonce - 1) {
       const existing = await findPendingByFromNonce(from, nonce);
       if (!existing) {
@@ -787,7 +775,6 @@ app.post("/send", async (req, res) => {
       const oldTotalFee = Number(existing.gasFee) + Number(existing.serviceFee || 0);
       const newTotalFee = Number(gasFee) + Number(serviceFee);
 
-      // require strictly higher by at least 1e-8
       if (Number((newTotalFee - oldTotalFee).toFixed(8)) <= 0) {
         return res.status(400).json({
           error: "RBF requires higher total fee",
@@ -796,7 +783,6 @@ app.post("/send", async (req, res) => {
         });
       }
 
-      // drop old pending tx
       await replacePendingTx(existing.id, "replaced_by_higher_fee");
       isReplacement = true;
     } else {
@@ -820,7 +806,7 @@ app.post("/send", async (req, res) => {
     const sigOk = verifySignature({ walletPubKeyB64: fromAcct.publicKeyB64, message: msg, signatureB64: signature });
     if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
-    // spendable check includes pending outgoing cost
+    // spendable check includes pending outgoing
     const pendingOutgoingCost = await getPendingOutgoingCost(from);
     const spendable = Number(fromAcct.balance) - pendingOutgoingCost;
     const totalFee = gasFee + serviceFee;
@@ -836,9 +822,7 @@ app.post("/send", async (req, res) => {
       });
     }
 
-    // nonce handling:
-    // - new tx increments nonce
-    // - replacement does NOT increment nonce (already reserved)
+    // nonce handling
     if (!isReplacement) {
       await incrementNonce(from);
     }
@@ -897,6 +881,7 @@ app.post("/send", async (req, res) => {
       console.log(`💰 fee vault: ${FEE_VAULT}`);
       console.log(`⛽ minGasFee: ${MIN_GAS_FEE}, serviceFeeRate: ${SERVICE_FEE_RATE}`);
       console.log(`🧱 blockTime: ${BLOCK_TIME_MS}ms`);
+      console.log(`📥 mempool ordering: totalFee DESC`);
     });
   } catch (e) {
     console.error("FATAL STARTUP ERROR:", e);

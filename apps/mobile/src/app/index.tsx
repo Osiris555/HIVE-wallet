@@ -40,9 +40,14 @@ export default function Index() {
 
   const [sendBusy, setSendBusy] = useState<boolean>(false);
 
-  // confirmation modal
+  // confirmation modal (normal send)
   const [confirmOpen, setConfirmOpen] = useState<boolean>(false);
   const [quote, setQuote] = useState<any>(null);
+
+  // RBF fee chooser modal
+  const [rbfOpen, setRbfOpen] = useState<boolean>(false);
+  const [rbfTx, setRbfTx] = useState<any>(null);
+  const [rbfMultiplier, setRbfMultiplier] = useState<number>(1.5);
 
   const amount = useMemo(() => Number(amountStr || 0), [amountStr]);
 
@@ -107,7 +112,7 @@ export default function Index() {
     else setCooldownText("");
   }, [mintCooldown]);
 
-  // status poll (chain height + next block)
+  // status poll
   useEffect(() => {
     const i = setInterval(async () => {
       try {
@@ -174,11 +179,7 @@ export default function Index() {
 
       setConfirmOpen(false);
 
-      if (res?.isReplacement) {
-        setMessage("Send replaced a pending tx with higher fee (RBF) ✅");
-      } else {
-        setMessage("Send submitted (pending until next block) ✅");
-      }
+      setMessage(res?.isReplacement ? "Send replaced a pending tx with higher fee (RBF) ✅" : "Send submitted (pending until next block) ✅");
 
       await loadBalance();
       await loadTxs();
@@ -189,19 +190,54 @@ export default function Index() {
     }
   }
 
-  /**
-   * ✅ Speed Up (RBF)
-   * Re-submit the same send (same nonce) with a higher fee.
-   * Server will accept if:
-   *   nonce == expectedNonce - 1 AND pending exists AND newTotalFee > oldTotalFee
-   */
-  async function handleSpeedUpRbf(tx: any) {
+  // ----- RBF helpers -----
+  function openRbfChooser(tx: any) {
+    setMessage("");
+    setRbfTx(tx);
+    setRbfMultiplier(1.5);
+    setRbfOpen(true);
+  }
+
+  function calcRbfFees(tx: any, status: any, multiplier: number) {
+    const minGas = Number(status.minGasFee || 0);
+    const rate = Number(status.serviceFeeRate || 0);
+
+    const amt = Number(tx.amount);
+    const oldGas = Number(tx.gasFee || 0);
+    const oldSvc = Number(tx.serviceFee || 0);
+    const oldTotalFee = Number((oldGas + oldSvc).toFixed(8));
+
+    const serviceFee = computeServiceFee(amt, rate);
+
+    // bump gas by multiplier from oldGas (fallback to minGas)
+    let newGas = Number(((oldGas > 0 ? oldGas : minGas) * multiplier).toFixed(8));
+    newGas = Math.max(minGas, newGas);
+
+    // For "MAX", we’ll still pass multiplier, but the caller can add extra.
+    let newTotalFee = Number((newGas + serviceFee).toFixed(8));
+
+    // ensure strictly higher than old (server requires >)
+    if (newTotalFee <= oldTotalFee) {
+      while (newTotalFee <= oldTotalFee) {
+        newGas = Number((newGas + ONE_SAT).toFixed(8));
+        newTotalFee = Number((newGas + serviceFee).toFixed(8));
+      }
+    }
+
+    return { minGas, rate, serviceFee, oldTotalFee, oldGas, oldSvc, newGas, newTotalFee };
+  }
+
+  async function submitRbf(multiplier: number, isMax: boolean) {
     if (sendBusy) return;
+    if (!rbfTx) return;
+
     setSendBusy(true);
     setMessage("");
 
     try {
-      if (!tx || tx.type !== "send" || tx.status !== "pending") {
+      const tx = rbfTx;
+
+      if (tx.type !== "send" || tx.status !== "pending") {
         setMessage("RBF only works for pending SEND transactions.");
         return;
       }
@@ -215,48 +251,36 @@ export default function Index() {
       }
 
       const status = await getChainStatus();
-      const minGas = Number(status.minGasFee || 0);
-      const rate = Number(status.serviceFeeRate || 0);
+      const fees = calcRbfFees(tx, status, multiplier);
 
-      const amt = Number(tx.amount);
-      const toAddr = String(tx.to || "");
-      const nonceOverride = Number(tx.nonce);
+      let gasFee = fees.newGas;
 
-      // service fee must remain formula-based (server enforces)
-      const serviceFee = computeServiceFee(amt, rate);
+      // “MAX” adds an extra bump to strongly outbid typical replacements
+      if (isMax) {
+        gasFee = Number((gasFee + Math.max(fees.minGas, gasFee) * 0.25).toFixed(8)); // +25%
+      }
 
-      // old fee info (as shown by server)
-      const oldGas = Number(tx.gasFee || 0);
-      const oldSvc = Number(tx.serviceFee || 0);
-      const oldTotalFee = Number(((oldGas || 0) + (oldSvc || 0)).toFixed(8));
-
-      // bump gas: double it, but never below minGas
-      let newGas = Math.max(minGas, Number((oldGas > 0 ? oldGas * 2 : minGas).toFixed(8)));
-      let newTotalFee = Number((newGas + serviceFee).toFixed(8));
-
-      // ensure strictly higher than old (server requires >)
-      if (newTotalFee <= oldTotalFee) {
-        // add 1 satoshi increments until it clears
-        while (newTotalFee <= oldTotalFee) {
-          newGas = Number((newGas + ONE_SAT).toFixed(8));
-          newTotalFee = Number((newGas + serviceFee).toFixed(8));
+      // re-check strict > old total fee after max bump
+      let totalFee = Number((gasFee + fees.serviceFee).toFixed(8));
+      if (totalFee <= fees.oldTotalFee) {
+        while (totalFee <= fees.oldTotalFee) {
+          gasFee = Number((gasFee + ONE_SAT).toFixed(8));
+          totalFee = Number((gasFee + fees.serviceFee).toFixed(8));
         }
       }
 
       const res = await send({
-        to: toAddr,
-        amount: amt,
-        gasFee: newGas,
-        serviceFee,
-        nonceOverride, // ✅ same nonce -> RBF replacement
+        to: String(tx.to),
+        amount: Number(tx.amount),
+        gasFee,
+        serviceFee: fees.serviceFee,
+        nonceOverride: Number(tx.nonce), // ✅ replacement nonce
       });
 
-      if (res?.isReplacement) {
-        setMessage(`Speed up submitted (RBF) ✅  New fee: ${fmt8(newTotalFee)}`);
-      } else {
-        // can happen if original confirmed already (or no pending found)
-        setMessage("Speed up submitted, but it was not treated as a replacement (already confirmed?).");
-      }
+      setRbfOpen(false);
+      setRbfTx(null);
+
+      setMessage(res?.isReplacement ? `Speed up submitted (RBF) ✅  New fee: ${fmt8(totalFee)}` : "Speed up submitted, but not treated as replacement (already confirmed?).");
 
       await loadBalance();
       await loadTxs();
@@ -272,6 +296,36 @@ export default function Index() {
     return mintBusy ? "Minting..." : "Mint";
   }, [mintCooldown, mintBusy]);
 
+  // derived preview for RBF modal
+  const rbfPreview = useMemo(() => {
+    if (!rbfTx) return null;
+    return (async () => {
+      try {
+        const status = await getChainStatus();
+        return { status, fees: calcRbfFees(rbfTx, status, rbfMultiplier) };
+      } catch {
+        return null;
+      }
+    })();
+  }, [rbfTx, rbfMultiplier]);
+
+  const [rbfPreviewData, setRbfPreviewData] = useState<any>(null);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!rbfTx) {
+        setRbfPreviewData(null);
+        return;
+      }
+      const s = await getChainStatus();
+      const fees = calcRbfFees(rbfTx, s, rbfMultiplier);
+      if (mounted) setRbfPreviewData({ status: s, fees });
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [rbfTx, rbfMultiplier]);
+
   return (
     <View style={{ flex: 1, backgroundColor: "#000" }}>
       <ScrollView contentContainerStyle={{ padding: 24, gap: 14, maxWidth: 950, alignSelf: "center", width: "100%" }}>
@@ -283,30 +337,20 @@ export default function Index() {
           Chain height: {chainHeight} · Next block: ~{Math.ceil(msUntilNextBlock / 1000)}s
         </Text>
 
-        {wallet ? (
-          <Text style={{ color: "#aaa", textAlign: "center" }}>
-            Wallet: {wallet}
-          </Text>
-        ) : null}
+        {wallet ? <Text style={{ color: "#aaa", textAlign: "center" }}>Wallet: {wallet}</Text> : null}
 
         <Text style={{ color: "#fff", textAlign: "center", fontSize: 20, marginTop: 6 }}>
           Confirmed: {Math.floor(confirmedBalance)} HNY
         </Text>
-        <Text style={{ color: "#aaa", textAlign: "center" }}>
-          Spendable: {Math.floor(spendableBalance)} HNY
-        </Text>
+        <Text style={{ color: "#aaa", textAlign: "center" }}>Spendable: {Math.floor(spendableBalance)} HNY</Text>
 
         {message ? (
-          <Text style={{ color: message.includes("failed") ? "#ff6b6b" : "#9dff9d", textAlign: "center" }}>
+          <Text style={{ color: message.toLowerCase().includes("failed") ? "#ff6b6b" : "#9dff9d", textAlign: "center" }}>
             {message}
           </Text>
         ) : null}
 
-        {cooldownText ? (
-          <Text style={{ color: "#ff6b6b", textAlign: "center" }}>
-            {cooldownText}
-          </Text>
-        ) : null}
+        {cooldownText ? <Text style={{ color: "#ff6b6b", textAlign: "center" }}>{cooldownText}</Text> : null}
 
         <Pressable
           onPress={handleMint}
@@ -339,23 +383,14 @@ export default function Index() {
           </Pressable>
         </View>
 
-        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 18, marginTop: 10 }}>
-          Send
-        </Text>
+        <Text style={{ color: "#fff", fontWeight: "800", fontSize: 18, marginTop: 10 }}>Send</Text>
 
         <TextInput
           value={to}
           onChangeText={setTo}
           placeholder="Recipient address (HNY_...)"
           placeholderTextColor="#666"
-          style={{
-            backgroundColor: "#111",
-            borderRadius: 10,
-            padding: 14,
-            color: "#fff",
-            borderWidth: 1,
-            borderColor: "#222",
-          }}
+          style={{ backgroundColor: "#111", borderRadius: 10, padding: 14, color: "#fff", borderWidth: 1, borderColor: "#222" }}
         />
 
         <TextInput
@@ -364,26 +399,13 @@ export default function Index() {
           placeholder="Amount"
           placeholderTextColor="#666"
           keyboardType={Platform.OS === "web" ? "text" : "numeric"}
-          style={{
-            backgroundColor: "#111",
-            borderRadius: 10,
-            padding: 14,
-            color: "#fff",
-            borderWidth: 1,
-            borderColor: "#222",
-          }}
+          style={{ backgroundColor: "#111", borderRadius: 10, padding: 14, color: "#fff", borderWidth: 1, borderColor: "#222" }}
         />
 
         <Pressable
           onPress={openSendConfirm}
           disabled={sendBusy}
-          style={{
-            backgroundColor: "#caa83c",
-            opacity: sendBusy ? 0.6 : 1,
-            padding: 18,
-            borderRadius: 10,
-            alignItems: "center",
-          }}
+          style={{ backgroundColor: "#caa83c", opacity: sendBusy ? 0.6 : 1, padding: 18, borderRadius: 10, alignItems: "center" }}
         >
           <Text style={{ fontWeight: "800", fontSize: 18 }}>{sendBusy ? "Working..." : "Send"}</Text>
         </Pressable>
@@ -400,17 +422,11 @@ export default function Index() {
                   ` · ${t.status}` +
                   (t.blockHeight ? ` · block ${t.blockHeight}` : "");
 
-                const showRbf =
-                  t.type === "send" &&
-                  t.status === "pending" &&
-                  wallet &&
-                  t.from === wallet &&
-                  t.nonce != null;
+                const showRbf = t.type === "send" && t.status === "pending" && wallet && t.from === wallet && t.nonce != null;
 
                 return (
                   <View key={t.id || idx} style={{ padding: 14, borderBottomWidth: 1, borderBottomColor: "#222" }}>
                     <Text style={{ color: "#fff", fontWeight: "800" }}>{title}</Text>
-
                     {t.failReason ? <Text style={{ color: "#ff6b6b" }}>Reason: {t.failReason}</Text> : null}
                     {t.nonce != null ? <Text style={{ color: "#aaa" }}>Nonce: {t.nonce}</Text> : null}
                     <Text style={{ color: "#aaa" }}>From: {t.from || "—"}</Text>
@@ -419,7 +435,7 @@ export default function Index() {
                     {showRbf ? (
                       <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
                         <Pressable
-                          onPress={() => handleSpeedUpRbf(t)}
+                          onPress={() => openRbfChooser(t)}
                           disabled={sendBusy}
                           style={{
                             paddingVertical: 10,
@@ -430,9 +446,7 @@ export default function Index() {
                             alignSelf: "flex-start",
                           }}
                         >
-                          <Text style={{ color: "#fff", fontWeight: "900" }}>
-                            ⚡ Speed Up (RBF)
-                          </Text>
+                          <Text style={{ color: "#fff", fontWeight: "900" }}>⚡ Speed Up (RBF)</Text>
                         </Pressable>
                       </View>
                     ) : null}
@@ -444,13 +458,11 @@ export default function Index() {
         ) : null}
       </ScrollView>
 
-      {/* Confirm modal */}
+      {/* Confirm modal (normal send) */}
       <Modal transparent visible={confirmOpen} animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
         <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", padding: 20 }}>
           <View style={{ backgroundColor: "#0b0b0b", borderRadius: 14, borderWidth: 1, borderColor: "#222", padding: 16 }}>
-            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>
-              Confirm Transaction
-            </Text>
+            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>Confirm Transaction</Text>
 
             <Text style={{ color: "#aaa" }}>To: {to}</Text>
             <Text style={{ color: "#aaa" }}>Amount: {amount}</Text>
@@ -462,9 +474,7 @@ export default function Index() {
                 <Text style={{ color: "#aaa" }}>Gas fee: {fmt8(quote.gasFee)}</Text>
                 <Text style={{ color: "#aaa" }}>Service fee (0.005%): {fmt8(quote.serviceFee)}</Text>
                 <Text style={{ color: "#aaa" }}>Total fee: {fmt8(quote.totalFee)}</Text>
-                <Text style={{ color: "#fff", marginTop: 6, fontWeight: "900" }}>
-                  Total cost: {fmt8(quote.totalCost)} HNY
-                </Text>
+                <Text style={{ color: "#fff", marginTop: 6, fontWeight: "900" }}>Total cost: {fmt8(quote.totalCost)} HNY</Text>
               </>
             ) : null}
 
@@ -488,6 +498,98 @@ export default function Index() {
 
             <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
               Your device signs this transaction locally using your stored private key.
+            </Text>
+          </View>
+        </View>
+      </Modal>
+
+      {/* RBF Fee chooser modal */}
+      <Modal transparent visible={rbfOpen} animationType="fade" onRequestClose={() => setRbfOpen(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", padding: 20 }}>
+          <View style={{ backgroundColor: "#0b0b0b", borderRadius: 14, borderWidth: 1, borderColor: "#222", padding: 16 }}>
+            <Text style={{ color: "#fff", fontSize: 20, fontWeight: "900", marginBottom: 8 }}>Speed Up (RBF)</Text>
+
+            {rbfTx ? (
+              <>
+                <Text style={{ color: "#aaa" }}>To: {String(rbfTx.to)}</Text>
+                <Text style={{ color: "#aaa" }}>Amount: {Number(rbfTx.amount)}</Text>
+                <Text style={{ color: "#aaa" }}>Nonce: {rbfTx.nonce}</Text>
+              </>
+            ) : null}
+
+            <View style={{ height: 12 }} />
+
+            <Text style={{ color: "#fff", fontWeight: "800" }}>Choose bump</Text>
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+              {[1.25, 1.5, 2.0].map((m) => (
+                <Pressable
+                  key={String(m)}
+                  onPress={() => setRbfMultiplier(m)}
+                  style={{
+                    flex: 1,
+                    padding: 12,
+                    borderRadius: 10,
+                    alignItems: "center",
+                    borderWidth: 1,
+                    borderColor: rbfMultiplier === m ? "#caa83c" : "#333",
+                    backgroundColor: rbfMultiplier === m ? "#1a1405" : "transparent",
+                  }}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "900" }}>{m}×</Text>
+                </Pressable>
+              ))}
+              <Pressable
+                onPress={() => setRbfMultiplier(2.5)}
+                style={{
+                  flex: 1,
+                  padding: 12,
+                  borderRadius: 10,
+                  alignItems: "center",
+                  borderWidth: 1,
+                  borderColor: rbfMultiplier === 2.5 ? "#caa83c" : "#333",
+                  backgroundColor: rbfMultiplier === 2.5 ? "#1a1405" : "transparent",
+                }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "900" }}>MAX</Text>
+              </Pressable>
+            </View>
+
+            <View style={{ height: 12 }} />
+
+            {rbfPreviewData?.fees ? (
+              <>
+                <Text style={{ color: "#aaa" }}>Old total fee: {fmt8(rbfPreviewData.fees.oldTotalFee)}</Text>
+                <Text style={{ color: "#aaa" }}>New gas fee: {fmt8(rbfPreviewData.fees.newGas)}</Text>
+                <Text style={{ color: "#aaa" }}>Service fee: {fmt8(rbfPreviewData.fees.serviceFee)}</Text>
+                <Text style={{ color: "#fff", fontWeight: "900", marginTop: 6 }}>
+                  New total fee: {fmt8(rbfPreviewData.fees.newTotalFee)}
+                </Text>
+              </>
+            ) : (
+              <Text style={{ color: "#666" }}>Loading fee preview…</Text>
+            )}
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 14 }}>
+              <Pressable
+                onPress={() => setRbfOpen(false)}
+                disabled={sendBusy}
+                style={{ flex: 1, padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#333", alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800" }}>Cancel</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => submitRbf(rbfMultiplier === 2.5 ? 2.0 : rbfMultiplier, rbfMultiplier === 2.5)}
+                disabled={sendBusy}
+                style={{ flex: 1, padding: 14, borderRadius: 10, backgroundColor: "#2b6fff", alignItems: "center", opacity: sendBusy ? 0.6 : 1 }}
+              >
+                <Text style={{ color: "#fff", fontWeight: "900" }}>{sendBusy ? "Submitting..." : "Sign & Submit"}</Text>
+              </Pressable>
+            </View>
+
+            <Text style={{ color: "#666", marginTop: 10, fontSize: 12 }}>
+              This replaces your pending transaction by reusing the same nonce with a higher fee.
             </Text>
           </View>
         </View>
