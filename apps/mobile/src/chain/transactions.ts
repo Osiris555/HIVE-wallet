@@ -26,6 +26,10 @@ export type Transaction = {
   timestamp: number;
 };
 
+// NOTE: Boost/Cancel support
+// - rbfReplacePending replaces an existing *pending* send with the same nonce ("RBF" style).
+// - cancelPending replaces an existing *pending* send with a self-send (net 0 amount), paying only fees.
+
 export type ChainStatus = {
   chainId: string;
   chainHeight: number;
@@ -37,13 +41,9 @@ export type ChainStatus = {
   minGasFee: number;
   txTtlMs: number;
   serviceFeeRate: number;
-
   feeVaultBalance?: number;
-  feeVault?: number;
-  feeVaultBalanceHny?: number;
 };
 
-// ✅ Exported constants/helpers
 export const ONE_SAT = 0.00000001;
 
 export function fmt8(n: number) {
@@ -52,12 +52,10 @@ export function fmt8(n: number) {
   return x.toFixed(8);
 }
 
-// Web/local storage helpers
 function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-// ✅ Keep your hardcoded LAN IP for Expo Go iPhone
 const API_BASE =
   ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
   (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
@@ -153,21 +151,12 @@ function makeError(message: string, status?: number, data?: any) {
   return err;
 }
 
-function pickFeeVaultBalance(status: any): number {
-  const v = status?.feeVaultBalance ?? status?.feeVaultBalanceHny ?? status?.feeVault ?? 0;
-  return Number(v || 0);
-}
-
-function networkHint() {
-  return `API_BASE=${API_BASE}`;
-}
-
 async function getJson(path: string) {
   let res: Response;
   try {
     res = await fetch(`${API_BASE}${path}`, { method: "GET" });
   } catch (e: any) {
-    throw makeError(`Network error on GET ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error on GET ${path}. API_BASE=${API_BASE}`, 0, { cause: String(e?.message || e) });
   }
   const body = await readJsonSafe(res);
   if (!res.ok) throw makeError(body?.error || `GET ${path} failed`, res.status, body);
@@ -183,7 +172,7 @@ async function postJson(path: string, payload: any) {
       body: JSON.stringify(payload ?? {}),
     });
   } catch (e: any) {
-    throw makeError(`Network error on POST ${path}. ${networkHint()}`, 0, { cause: String(e?.message || e) });
+    throw makeError(`Network error on POST ${path}. API_BASE=${API_BASE}`, 0, { cause: String(e?.message || e) });
   }
 
   const body = await readJsonSafe(res);
@@ -202,6 +191,19 @@ async function postJson(path: string, payload: any) {
   if (!res.ok) throw makeError(body?.error || `POST ${path} failed`, res.status, body);
 
   return body;
+}
+
+async function getByWalletFlexible(route: string, wallet: string) {
+  const w = encodeURIComponent(wallet);
+  try {
+    return await getJson(`/${route}/${w}`);
+  } catch (e1: any) {
+    try {
+      return await getJson(`/${route}?wallet=${w}`);
+    } catch (e2: any) {
+      throw makeError(e2?.message || e1?.message || `${route} failed`, e2?.status || e1?.status || 500);
+    }
+  }
 }
 
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
@@ -239,38 +241,22 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
-// returns full status JSON and guarantees .feeVaultBalance exists
-export async function getChainStatus(): Promise<ChainStatus & { feeVaultBalance: number }> {
-  let res: Response;
-  try {
-    res = await fetch(`${API_BASE}/status`);
-  } catch (e: any) {
-    throw makeError(`Network error on GET /status. ${networkHint()}`, 0, { cause: String(e?.message || e) });
-  }
-
-  const body = await readJsonSafe(res);
-  if (!res.ok) {
-    const err: any = new Error(body?.error || "Chain status failed");
-    err.status = res.status;
-    err.data = body;
-    throw err;
-  }
-  return {
-    ...body,
-    feeVaultBalance: pickFeeVaultBalance(body),
-  };
+export async function getChainStatus(): Promise<ChainStatus> {
+  return await getJson(`/status`);
 }
 
 export async function getAccount(wallet: string) {
-  return await getJson(`/account/${encodeURIComponent(wallet)}`);
+  return await getByWalletFlexible("account", wallet);
 }
 
 export async function getBalance(wallet: string) {
-  return await getJson(`/balance/${encodeURIComponent(wallet)}`);
+  return await getByWalletFlexible("balance", wallet);
 }
 
 export async function getTransactions(wallet: string): Promise<Transaction[]> {
-  return await getJson(`/transactions/${encodeURIComponent(wallet)}`);
+  const out = await getByWalletFlexible("transactions", wallet);
+  if (Array.isArray(out)) return out;
+  return out?.transactions || out?.txs || [];
 }
 
 function signMessage(message: string, secretKeyB64: string) {
@@ -311,17 +297,17 @@ export async function mint(): Promise<any> {
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
   const acct = await getAccount(wallet);
-  if (!acct.registered) await registerWallet();
+  if (!acct?.registered) await registerWallet();
 
   const acct2 = await getAccount(wallet);
-  const nonce = acct2.nonce;
+  const nonce = Number(acct2?.nonce ?? 0);
 
   const timestamp = Date.now();
   const amount = 100;
 
-  const gasFee = Number(status.minGasFee || ONE_SAT);
+  const gasFee = Number(status.minGasFee || ONE_SAT) || ONE_SAT;
   const serviceFee = 0;
-  const expiresAtMs = timestamp + Number(status.txTtlMs);
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalSignedMessage({
@@ -355,7 +341,6 @@ export async function send(params: {
   amount: number;
   gasFee: number;
   serviceFee: number;
-  nonceOverride?: number;
 }): Promise<any> {
   const from = await ensureWalletId();
 
@@ -364,10 +349,10 @@ export async function send(params: {
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
   const acct = await getAccount(from);
-  if (!acct.registered) await registerWallet();
+  if (!acct?.registered) await registerWallet();
 
   const acct2 = await getAccount(from);
-  const expectedNonce = Number(acct2.nonce);
+  const nonce = Number(acct2?.nonce ?? 0);
 
   const timestamp = Date.now();
   const amt = Number(params.amount);
@@ -375,10 +360,7 @@ export async function send(params: {
 
   const gasFee = Number(params.gasFee);
   const serviceFee = Number(params.serviceFee);
-
-  const expiresAtMs = timestamp + Number(status.txTtlMs);
-
-  const nonce = Number.isInteger(params.nonceOverride) ? Number(params.nonceOverride) : expectedNonce;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalSignedMessage({
@@ -411,56 +393,111 @@ export async function send(params: {
 }
 
 /**
- * ✅ RBF helper
- * Always replaces nonce = expectedNonce - 1 (server replacement rule).
+ * Replace an existing pending send (same from + nonce) with a higher-fee version.
+ * Server will validate that a pending tx exists and that gasFee increased.
  */
 export async function rbfReplacePending(params: {
   to: string;
   amount: number;
+  nonce: number;
   gasFee: number;
   serviceFee: number;
 }): Promise<any> {
   const from = await ensureWalletId();
+
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
   const acct = await getAccount(from);
-  const expectedNonce = Number(acct.nonce);
-  const replaceNonce = expectedNonce - 1;
+  if (!acct?.registered) await registerWallet();
 
-  if (!Number.isFinite(replaceNonce) || replaceNonce < 0) {
-    throw makeError("No replaceable nonce available", 400);
-  }
+  const nonce = Number(params.nonce);
+  if (!Number.isInteger(nonce) || nonce < 0) throw makeError("Missing/invalid nonce", 400);
 
-  return await send({
+  const timestamp = Date.now();
+  const amt = Number(params.amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
+
+  const gasFee = Number(params.gasFee);
+  const serviceFee = Number(params.serviceFee);
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "send",
+    from,
     to: params.to,
-    amount: params.amount,
-    gasFee: params.gasFee,
-    serviceFee: params.serviceFee,
-    nonceOverride: replaceNonce,
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/rbf", {
+    chainId,
+    from,
+    to: params.to,
+    amount: amt,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
   });
 }
 
 /**
- * ✅ Cancel helper
- * Cancel = self-send of ONE_SAT using nonce = expectedNonce - 1 with higher gas.
- * (Server rejects 0 amount.)
+ * Cancel an existing pending send by replacing it with a self-send (net 0 transfer), paying only fees.
  */
-export async function cancelPending(params: {
-  gasFee: number;
-  serviceFee: number;
-}): Promise<any> {
+export async function cancelPending(params: { nonce: number; gasFee: number; serviceFee: number }): Promise<any> {
   const from = await ensureWalletId();
+
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
   const acct = await getAccount(from);
-  const expectedNonce = Number(acct.nonce);
-  const replaceNonce = expectedNonce - 1;
+  if (!acct?.registered) await registerWallet();
 
-  if (!Number.isFinite(replaceNonce) || replaceNonce < 0) {
-    throw makeError("No replaceable nonce available", 400);
-  }
+  const nonce = Number(params.nonce);
+  if (!Number.isInteger(nonce) || nonce < 0) throw makeError("Missing/invalid nonce", 400);
 
-  return await send({
+  const timestamp = Date.now();
+  const amt = ONE_SAT; // self-send dust, net 0 transfer
+
+  const gasFee = Number(params.gasFee);
+  const serviceFee = Number(params.serviceFee);
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "send",
+    from,
     to: from,
-    amount: ONE_SAT,
-    gasFee: params.gasFee,
-    serviceFee: params.serviceFee,
-    nonceOverride: replaceNonce,
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/cancel", {
+    chainId,
+    from,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
   });
 }
