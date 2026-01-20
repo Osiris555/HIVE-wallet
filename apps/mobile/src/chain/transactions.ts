@@ -130,7 +130,7 @@ export function preflightSend(args: {
 
   const amount = Number(amtCheck.value || 0);
   const serviceFee = computeServiceFee(amount, args.serviceFeeRate);
-  const gasFee = Number(args.chosenGas || 0);
+  const gasFee = Number((args as any).chosenGasFee ?? (args as any).chosenGas ?? 0);
 
   if (!Number.isFinite(gasFee) || gasFee < args.minGasFee) {
     return { ok: false as const, reason: `Gas fee must be at least ${args.minGasFee}.` };
