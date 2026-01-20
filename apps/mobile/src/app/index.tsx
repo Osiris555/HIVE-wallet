@@ -1,20 +1,24 @@
 // apps/mobile/src/app/index.tsx
+
 import * as SecureStore from "expo-secure-store";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as Clipboard from "expo-clipboard";
+import QRCode from "react-native-qrcode-svg";
+import { Ionicons } from "@expo/vector-icons";
 import {
-  Animated,
-  Easing,
-  ImageBackground,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 
 import {
+  preflightSend,
   cancelPending,
   computeServiceFee,
   ensureWalletId,
@@ -27,6 +31,7 @@ import {
   rbfReplacePending,
   send,
   type Transaction as TxLike,
+  parseAmount8,
 } from "../chain/transactions";
 
 /* ======================
@@ -51,17 +56,17 @@ async function kvSet(key: string, value: string): Promise<void> {
 }
 
 /* ======================
-   Theme + skin
+   Theme + Skin
 ====================== */
-type ThemeKey = "noir" | "honey" | "matrix";
-type SkinKey = "matrix-honeycomb" | "solid-noir";
+type ThemeKey = "matrix" | "noir" | "honey";
+type SkinKey = "matrix-honey-coin" | "matrix-honeycomb" | "solid-noir";
 
 function themeFor(t: ThemeKey) {
   const neon = "#39ff14";
   if (t === "noir") {
     return {
       text: "#f6f6f6",
-      sub: "rgba(255,255,255,0.70)",
+      sub: "rgba(255,255,255,0.7)",
       border: "rgba(57,255,20,0.22)",
       glass: "rgba(0,0,0,0.55)",
       glass2: "rgba(0,0,0,0.35)",
@@ -77,7 +82,7 @@ function themeFor(t: ThemeKey) {
     return {
       text: "#fff5db",
       sub: "rgba(255,245,219,0.72)",
-      border: "rgba(255,191,47,0.20)",
+      border: "rgba(255,191,47,0.2)",
       glass: "rgba(12,6,18,0.58)",
       glass2: "rgba(12,6,18,0.38)",
       purple: "#6a2cff",
@@ -90,10 +95,10 @@ function themeFor(t: ThemeKey) {
   }
   return {
     text: "#ffffff",
-    sub: "rgba(255,255,255,0.70)",
+    sub: "rgba(255,255,255,0.7)",
     border: "rgba(57,255,20,0.18)",
     glass: "rgba(0,0,0,0.45)",
-    glass2: "rgba(0,0,0,0.30)",
+    glass2: "rgba(0,0,0,0.3)",
     purple: "#7b2cff",
     gold: "#caa83c",
     green: neon,
@@ -103,15 +108,8 @@ function themeFor(t: ThemeKey) {
   };
 }
 
-function skinKeyForChain(chainId: string) {
-  return `hive:skin:${chainId || "default"}`;
-}
-function themeKeyForChain(chainId: string) {
-  return `hive:theme:${chainId || "default"}`;
-}
-
 /* ======================
-   UI helpers
+   UI primitives (module scope)
 ====================== */
 function GlassCard(props: { children: React.ReactNode; style?: any }) {
   const webBlur =
@@ -126,6 +124,67 @@ function GlassCard(props: { children: React.ReactNode; style?: any }) {
   );
 }
 
+const Card = React.memo(function Card({
+  children,
+  style,
+  T,
+}: {
+  children: React.ReactNode;
+  style?: any;
+  T: ReturnType<typeof themeFor>;
+}) {
+  return (
+    <GlassCard style={[{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }, style]}>
+      <View style={{ padding: 14 }}>{children}</View>
+    </GlassCard>
+  );
+});
+
+const Button = React.memo(function Button({
+  label,
+  onPress,
+  disabled,
+  variant,
+  T,
+}: {
+  label: string;
+  onPress?: () => void;
+  disabled?: boolean;
+  variant?: "green" | "purple" | "outline" | "danger" | "blue";
+  T: ReturnType<typeof themeFor>;
+}) {
+  const bg =
+    variant === "green"
+      ? T.green
+      : variant === "purple"
+      ? T.purple
+      : variant === "danger"
+      ? T.danger
+      : variant === "blue"
+      ? T.blue
+      : "transparent";
+
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={{
+        paddingVertical: 12,
+        borderRadius: 12,
+        alignItems: "center",
+        backgroundColor: bg,
+        borderWidth: variant === "outline" ? 1 : 0,
+        borderColor: T.border,
+        opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      <Text style={{ color: "#fff", fontWeight: "900", fontSize: 16 }}>{label}</Text>
+    </Pressable>
+  );
+});
+/* ======================
+   Small helpers
+====================== */
 function shortAddr(a: string) {
   if (!a) return "";
   if (a.length <= 14) return a;
@@ -144,6 +203,29 @@ function fmt8(n: number) {
   return x.toFixed(8);
 }
 
+/** Removes whitespace + zero-width characters that break HNY_ validation */
+function sanitizeAddressInfo(input: string) {
+  const raw = String(input ?? "");
+  const cleaned = raw
+    .replace(/[\u200B-\u200D\uFEFF]/g, "") // zero-width chars
+    .replace(/\u00A0/g, " ") // NBSP -> space
+    .replace(/\s+/g, "") // remove whitespace
+    .trim();
+
+  const changed = cleaned !== raw;
+  return { cleaned, changed, rawLen: raw.length, cleanLen: cleaned.length };
+}
+function sanitizeAddress(input: string) {
+  return sanitizeAddressInfo(input).cleaned;
+}
+
+function themeKeyForChain(chainId: string) {
+  return `hive:theme:${chainId || "default"}`;
+}
+function skinKeyForChain(chainId: string) {
+  return `hive:skin:${chainId || "default"}`;
+}
+
 /** Full-screen modal overlay */
 function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
   return (
@@ -160,19 +242,26 @@ function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
         backgroundColor: "rgba(0,0,0,0.65)",
         zIndex: 9999,
       }}
+      pointerEvents="auto"
     >
-      <Pressable onPress={props.onClose} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }} />
-      <View style={{ width: "100%", maxWidth: 900 }}>{props.children}</View>
+      <Pressable onPress={props.onClose} style={StyleSheet.absoluteFillObject} />
+      <View style={{ width: "100%", maxWidth: 900 }} pointerEvents="auto">
+        {props.children}
+      </View>
     </View>
   );
 }
 
 export default function Index() {
-  /* ============
-     Core state
-  ============ */
+  /* ======================
+     Core state (NO DUPLICATES)
+  ====================== */
   const [theme, setTheme] = useState<ThemeKey>("matrix");
-  const [skin, setSkin] = useState<SkinKey>("matrix-honeycomb");
+  const MIN_GAS_FEE_FLOOR = 0.000001; // hard minimum (chain rule / preflight rule)
+  const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
+
+  type SpeedKey = "slow" | "normal" | "fast";
+  const [speed, setSpeed] = useState<SpeedKey>("normal");
 
   const [chainId, setChainId] = useState("");
   const [chainHeight, setChainHeight] = useState(0);
@@ -191,33 +280,19 @@ export default function Index() {
   const [lastRefresh, setLastRefresh] = useState(0);
 
   const [message, setMessage] = useState("");
-  const [mintBusy, setMintBusy] = useState(false);
-  const [mintCooldown, setMintCooldown] = useState(0);
+  const [mintCooldown, setMintCooldown] = useState<number>(0);
+  const [mintBusy, setMintBusy] = useState<boolean>(false);
 
-  // ✅ Uncontrolled input refs (fixes typing on web + iOS)
-  const toRef = useRef("");
-  const amountRef = useRef("");
+  // ✅ Inputs (recipient and amount are separate!)
+  const [toText, setToText] = useState("");
+  const [amountText, setAmountText] = useState("");
 
-  // Priority fee speed (gas)
-  type SpeedKey = "slow" | "normal" | "fast";
-  const [speed, setSpeed] = useState<SpeedKey>("normal");
+  // Gas is derived from speed + minGasFee
+  const [gasFeeText, setGasFeeText] = useState("");
 
-  function feeMultiplier(s: SpeedKey) {
-    if (s === "slow") return 1.0;
-    if (s === "normal") return 1.25;
-    return 1.6; // fast
-  }
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  function computeChosenGas(minGas: number) {
-    return Number((minGas * feeMultiplier(speed)).toFixed(8));
-  }
-
-  // Tip presets + custom tip
-  type TipKey = "none" | "small" | "medium" | "large" | "custom";
-  const [tipMode, setTipMode] = useState<TipKey>("none");
-  const customTipRef = useRef("");
-
-  // Confirm + history + settings
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [quote, setQuote] = useState<any>(null);
   const [sendBusy, setSendBusy] = useState(false);
@@ -225,77 +300,61 @@ export default function Index() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Boost / cancel
   const [rbfOpen, setRbfOpen] = useState(false);
   const [rbfTx, setRbfTx] = useState<any>(null);
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelTx, setCancelTx] = useState<any>(null);
 
-  // Pause polling while modals open (prevents UI churn during confirm/edit)
+  // ✅ Toast exists (fixes "toast is not defined")
+  const [toast, setToast] = useState<{ text: string; kind?: "info" | "warn" } | null>(null);
+
+  // Focus/poll guards
+  const editingRef = useRef(false);
   const pausePollingRef = useRef(false);
+
+  const anyModalOpen =
+    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen;
+
+  const sendFormDirty = !!toText || !!amountText;
 
   const T = themeFor(theme);
 
-  const matrixBg = useMemo(() => require("./assets/skins/matrix-honeycomb.png"), []);
-  const bgSource = skin === "matrix-honeycomb" ? matrixBg : null;
+  /* ======================
+     Background skin images
+  ====================== */
+  const honeyCoinBg = useMemo(() => require("./assets/skins/matrix-honey-coin.png"), []);
+  const honeycombBg = useMemo(() => require("./assets/skins/matrix-honeycomb.png"), []);
+
+  const bgSource = useMemo(() => {
+    if (skin === "matrix-honey-coin") return honeyCoinBg;
+    if (skin === "matrix-honeycomb") return honeycombBg;
+    return null;
+  }, [skin, honeyCoinBg, honeycombBg]);
+
   const bgOverlayOpacity = Platform.OS === "web" ? 0.55 : 0.32;
 
-  // Send glow pulse (web-safe)
-  const pulse = useRef(new Animated.Value(0)).current;
+  function showToast(text: string, kind: "info" | "warn" = "info") {
+    setToast({ text, kind });
+    setTimeout(() => setToast(null), 1400);
+  }
+
+  function feeMultiplier(s: SpeedKey) {
+    if (s === "slow") return 1.0;
+    if (s === "normal") return 1.25;
+    return 1.6;
+  }
+  function computeChosenGas(minGas: number) {
+    const mg = Math.max(Number(minGas || 0), MIN_GAS_FEE_FLOOR);
+    return Number((mg * feeMultiplier(speed)).toFixed(8));
+  }
+
+
+  // ✅ keep derived gas text updated (never user typed)
   useEffect(() => {
-    const useNativeDriver = Platform.OS !== "web";
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver }),
-        Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse]);
-
-  const sendGlowOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.12, 0.45] });
-  const sendGlowScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] });
-
-  function Card(props: { children: React.ReactNode; style?: any }) {
-    return (
-      <GlassCard style={[{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }, props.style]}>
-        <View style={{ padding: 14 }}>{props.children}</View>
-      </GlassCard>
-    );
-  }
-
-  function Button(props: {
-    label: string;
-    onPress: () => void;
-    disabled?: boolean;
-    variant?: "green" | "purple" | "outline" | "danger" | "blue";
-  }) {
-    const v = props.variant || "green";
-    const bg =
-      v === "green" ? T.green : v === "purple" ? T.purple : v === "danger" ? T.danger : v === "blue" ? T.blue : "transparent";
-    const fg = v === "green" ? "#041006" : v === "outline" ? T.text : "#fff";
-    const border = v === "outline" ? T.border : "transparent";
-
-    return (
-      <Pressable
-        onPress={props.onPress}
-        disabled={props.disabled}
-        style={{
-          paddingVertical: 12,
-          borderRadius: 12,
-          alignItems: "center",
-          backgroundColor: bg,
-          borderWidth: v === "outline" ? 1 : 0,
-          borderColor: border,
-          opacity: props.disabled ? 0.55 : 1,
-        }}
-      >
-        <Text style={{ color: fg, fontWeight: "900", fontSize: 16 }}>{props.label}</Text>
-      </Pressable>
-    );
-  }
+    const v = computeChosenGas(Number(minGasFee || ONE_SAT));
+    setGasFeeText(fmt8(v));
+  }, [speed, minGasFee]);
 
   /* ======================
      Data loading
@@ -311,7 +370,8 @@ export default function Index() {
     setChainHeight(Number(st?.chainHeight || st?.height || 0));
     setMsUntilNextBlock(Number(st?.msUntilNextBlock || 0));
     setServiceFeeRate(Number(st?.serviceFeeRate || 0));
-    setMinGasFee(Number(st?.minGasFee || ONE_SAT));
+    // ✅ never allow 0 min gas
+    setMinGasFee(Math.max(Number(st?.minGasFee || 0), MIN_GAS_FEE_FLOOR));
     setFeeVaultBalance(Number(st?.feeVaultBalance || st?.feeVault || 0));
   }
 
@@ -368,23 +428,28 @@ export default function Index() {
 
     const i = setInterval(async () => {
       if (pausePollingRef.current) return;
+      if (editingRef.current) return;
+      if (anyModalOpen) return;
+      if (sendFormDirty) return;
+
       try {
         await refreshStatus();
         await loadBalance();
         await loadTxs();
         setLastRefresh(Date.now());
-      } catch (e: any) {
-        setMessage(`Live refresh failed: ${e?.message || "Unknown error"}`);
-      }
+      } catch {}
     }, 2500);
 
     return () => clearInterval(i);
-  }, [wallet, liveRefresh]);
+  }, [wallet, liveRefresh, anyModalOpen, sendFormDirty]);
 
-  // Mint cooldown
+  // mint cooldown ticker
   useEffect(() => {
     if (mintCooldown <= 0) return;
-    const t = setInterval(() => setMintCooldown((v) => Math.max(0, v - 1)), 1000);
+    const t = setInterval(() => {
+      if (editingRef.current) return;
+      setMintCooldown((v) => Math.max(0, v - 1));
+    }, 1000);
     return () => clearInterval(t);
   }, [mintCooldown]);
 
@@ -396,10 +461,14 @@ export default function Index() {
       if (!chainId) return;
 
       const savedTheme = await kvGet(themeKeyForChain(chainId));
-      if (savedTheme === "matrix" || savedTheme === "noir" || savedTheme === "honey") setTheme(savedTheme as ThemeKey);
+      if (savedTheme === "matrix" || savedTheme === "noir" || savedTheme === "honey") {
+        setTheme(savedTheme as ThemeKey);
+      }
 
       const savedSkin = await kvGet(skinKeyForChain(chainId));
-      if (savedSkin === "matrix-honeycomb" || savedSkin === "solid-noir") setSkin(savedSkin as SkinKey);
+      if (savedSkin === "matrix-honey-coin" || savedSkin === "matrix-honeycomb" || savedSkin === "solid-noir") {
+        setSkin(savedSkin as SkinKey);
+      }
     })().catch(() => {});
   }, [chainId]);
 
@@ -416,6 +485,42 @@ export default function Index() {
   /* ======================
      Actions
   ====================== */
+  async function copyWalletToClipboard() {
+    if (!wallet) {
+      setMessage("Wallet not ready yet.");
+      return;
+    }
+    const w = String(wallet).trim();
+    await Clipboard.setStringAsync(w);
+    setCopied(true);
+    setMessage("Wallet copied ✅");
+    setTimeout(() => setCopied(false), 1200);
+  }
+
+  function closeAllModals(opts?: { keepMessage?: boolean }) {
+    setConfirmOpen(false);
+    setHistoryOpen(false);
+    setSettingsOpen(false);
+    setRbfOpen(false);
+    setCancelOpen(false);
+    setReceiveOpen(false);
+
+    setQuote(null);
+    setRbfTx(null);
+    setCancelTx(null);
+
+    pausePollingRef.current = false;
+    if (!opts?.keepMessage) setMessage("");
+  }
+
+  function normalizeAmountText(s: string) {
+    return String(s ?? "")
+      .replace(",", ".")
+      .replace(/[^\d.]/g, "")
+      .replace(/(\..*)\./g, "$1")
+      .trim();
+  }
+
   async function handleMint() {
     if (mintBusy) return;
     if (mintCooldown > 0) {
@@ -425,68 +530,89 @@ export default function Index() {
     setMessage("");
     setMintBusy(true);
     try {
-      const res = await mint();
+      const res: any = await mint();
       setMessage("Mint submitted ✅");
       await hardRefreshAll();
       setMintCooldown(Number(res?.cooldownSeconds || 60));
     } catch (e: any) {
-      if (e?.status === 429) {
-        setMintCooldown(Number(e.cooldownSeconds || 60));
-        setMessage(`Mint cooldown active (${Number(e.cooldownSeconds || 60)}s)`);
-      } else {
-        setMessage(`Mint failed: ${e?.message || "Unknown error"}`);
-      }
+      setMessage(`Mint failed: ${e?.message || "Unknown error"}`);
     } finally {
       setMintBusy(false);
     }
   }
 
-  function computeTipAmount(): number {
-    if (tipMode === "none") return 0;
-    if (tipMode === "small") return ONE_SAT; // 0.00000001
-    if (tipMode === "medium") return Number((ONE_SAT * 10).toFixed(8)); // 0.00000010
-    if (tipMode === "large") return Number((ONE_SAT * 100).toFixed(8)); // 0.00000100
-
-    // custom
-    const ct = Number(customTipRef.current || 0);
-    if (!Number.isFinite(ct) || ct <= 0) return 0;
-    return Number(ct.toFixed(8));
-  }
-
+  /* ======================
+     Send flow (confirm modal)
+  ====================== */
   async function openSendConfirm() {
     setMessage("");
 
-    const to = String(toRef.current || "").trim();
-    const baseAmt = Number(amountRef.current || 0);
+    // Recipient
+    const toRaw = String(toText ?? "");
 
-    if (!to || to.length < 8) return setMessage("Enter a recipient address.");
-    if (!Number.isFinite(baseAmt) || baseAmt <= 0) return setMessage("Enter a valid amount.");
+    // 🔎 Detect shortened UI addresses like HNY_abc…123
+    if (toRaw.includes("…") || toRaw.includes("...")) {
+      setMessage(
+        "That looks like a shortened address (with …). Open Receive and use Copy to get the full HNY_<40hex> address."
+      );
+      return;
+    }
 
-    const tipAmt = computeTipAmount();
-    const totalAmt = Number((baseAmt + tipAmt).toFixed(8));
+    const to = sanitizeAddress(toRaw)
+      .replace(/^hny_/i, "HNY_")
+      .replace(/^HNY_0x/i, "HNY_");
+
+    // ✅ STRICT final validation (40 hex chars)
+    if (!/^HNY_[0-9a-fA-F]{40}$/.test(to)) {
+      setMessage("Recipient address must be HNY_<40hex>.");
+      return;
+    }
+
+
+    // Amount
+    const amtTextClean = normalizeAmountText(amountText);
+    const amtCheck = parseAmount8(amtTextClean);
+    if (!amtCheck.ok || Number(amtCheck.value) <= 0) {
+      setMessage("Amount is required.");
+      return;
+    }
+    const totalAmt = Number(amtCheck.value);
+
+    // Gas derived
+    const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
+    const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+
+
+    // Preflight
+    const pf = preflightSend({
+      to,
+      amountText: amtTextClean,
+      spendableBalance,
+      minGasFee: minGas,
+      serviceFeeRate,
+      chosenGasFee: chosenGas,
+    });
+
+    if (!pf.ok) {
+      setMessage(pf.reason || "Preflight failed");
+      return;
+    }
+
+    const serviceFee = computeServiceFee(totalAmt, serviceFeeRate);
+    const totalCost = Number((totalAmt + chosenGas + serviceFee).toFixed(8));
 
     try {
       pausePollingRef.current = true;
-
       const q = await quoteSend(to, totalAmt);
-      const minGas = Number(q?.minGasFee ?? q?.gasFee ?? minGasFee ?? ONE_SAT);
-      const chosenGas = computeChosenGas(minGas);
-
-      const serviceFee = computeServiceFee(totalAmt, serviceFeeRate);
-      const totalFee = Number((chosenGas + serviceFee).toFixed(8));
-      const totalCost = Number((totalAmt + totalFee).toFixed(8));
 
       setQuote({
-        ...q,
+        q,
         to,
-        baseAmt,
-        tipAmt,
+        baseAmt: totalAmt,
         totalAmt,
         chosenGas,
         serviceFee,
-        totalFee,
         totalCost,
-        speed,
       });
 
       setConfirmOpen(true);
@@ -505,458 +631,493 @@ export default function Index() {
 
     try {
       await send({
-        to: String(quote.to),
+        to: sanitizeAddress(String(quote.to)).replace(/^hny_/i, "HNY_"),
         amount: Number(quote.totalAmt),
         gasFee: Number(quote.chosenGas),
         serviceFee: Number(quote.serviceFee),
       });
 
-      setConfirmOpen(false);
-      pausePollingRef.current = false;
+      closeAllModals({ keepMessage: true });
       setMessage("Send submitted ✅");
       await hardRefreshAll();
     } catch (e: any) {
+      closeAllModals({ keepMessage: true });
       setMessage(`Send failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
   }
 
+  /* ======================
+     RBF (boost) flow
+  ====================== */
   async function doRbf(multiplier: number) {
     if (!rbfTx) return;
+    if (sendBusy) return;
+
     setSendBusy(true);
     setMessage("");
 
     try {
-      const baseGas = Number(rbfTx.gasFee || minGasFee || ONE_SAT);
-      const gasFee = Math.max(minGasFee || ONE_SAT, Number((baseGas * multiplier).toFixed(8)));
+      const mg = Math.max(Number(minGasFee || ONE_SAT), ONE_SAT);
+      const baseGas = Math.max(mg, Number(rbfTx.gasFee || mg));
+      const gasFee = Math.max(mg, Number((baseGas * multiplier).toFixed(8)));
       const svc = computeServiceFee(Number(rbfTx.amount || 0), serviceFeeRate);
 
       await rbfReplacePending({
         to: String(rbfTx.to),
         amount: Number(rbfTx.amount),
+        nonce: Number(rbfTx.nonce),
         gasFee,
         serviceFee: svc,
-      });
+      } as any);
 
-      setRbfOpen(false);
-      pausePollingRef.current = false;
+      closeAllModals({ keepMessage: true });
       setMessage("Boost submitted (RBF) ✅");
       await hardRefreshAll();
     } catch (e: any) {
+      closeAllModals({ keepMessage: true });
       setMessage(`RBF failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
   }
 
+  /* ======================
+     Cancel flow
+  ====================== */
   async function doCancel(multiplier: number) {
     if (!cancelTx) return;
+    if (sendBusy) return;
+
     setSendBusy(true);
     setMessage("");
 
     try {
-      const baseGas = Number(cancelTx.gasFee || minGasFee || ONE_SAT);
-      const gasFee = Math.max(minGasFee || ONE_SAT, Number((baseGas * multiplier).toFixed(8)));
+      const mg = Math.max(Number(minGasFee || ONE_SAT), ONE_SAT);
+      const baseGas = Math.max(mg, Number(cancelTx.gasFee || mg));
+      const gasFee = Math.max(mg, Number((baseGas * multiplier).toFixed(8)));
       const svc = computeServiceFee(ONE_SAT, serviceFeeRate);
 
-      await cancelPending({ gasFee, serviceFee: svc });
+      await cancelPending({
+        nonce: Number(cancelTx.nonce),
+        gasFee,
+        serviceFee: svc,
+      } as any);
 
-      setCancelOpen(false);
-      pausePollingRef.current = false;
+      closeAllModals({ keepMessage: true });
       setMessage("Cancel submitted ✅");
       await hardRefreshAll();
     } catch (e: any) {
+      closeAllModals({ keepMessage: true });
       setMessage(`Cancel failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSendBusy(false);
     }
   }
 
+  /* ======================
+     Derived lists / labels
+  ====================== */
+  const displayTxs = useMemo(() => {
+    const arr = [...(txs || [])];
+    arr.sort((a: any, b: any) => {
+      const ap = String(a?.status || "") === "pending" ? 1 : 0;
+      const bp = String(b?.status || "") === "pending" ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      const at = Number(a?.time || a?.timestamp || a?.createdAt || 0);
+      const bt = Number(b?.time || b?.timestamp || b?.createdAt || 0);
+      return bt - at;
+    });
+    return arr;
+  }, [txs]);
+
+  const pendingCount = useMemo(
+    () => displayTxs.filter((t: any) => String(t?.status || "") === "pending").length,
+    [displayTxs]
+  );
+
   const mintLabel = useMemo(() => {
     if (mintBusy) return "Minting…";
     if (mintCooldown > 0) return `Mint (${mintCooldown}s)`;
     return "Mint";
   }, [mintCooldown, mintBusy]);
-
-  const pendingTxs = useMemo(() => (txs || []).filter((t: any) => String(t?.status || "") === "pending"), [txs]);
-
-  /* ======================
-     Screen content
-  ====================== */
-  const content = (
-    <ScrollView keyboardShouldPersistTaps="always" keyboardDismissMode="none" contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}>
-      {/* Header */}
-      <View style={{ paddingTop: 18, paddingBottom: 10, flexDirection: "row", alignItems: "center" }}>
-        <View style={{ flex: 1 }} />
-        <Text style={{ color: T.text, fontSize: 28, fontWeight: "900" }}>HIVE Wallet</Text>
-        <View style={{ flex: 1 }} />
-
-        <Pressable
-          onPress={() => {
-            pausePollingRef.current = true;
-            setHistoryOpen(true);
-          }}
-          style={{
-            marginRight: 10,
-            paddingVertical: 10,
-            paddingHorizontal: 14,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: T.border,
-            backgroundColor: T.glass2,
-          }}
-        >
-          <Text style={{ color: T.text, fontWeight: "900" }}>📜</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => {
-            pausePollingRef.current = true;
-            setSettingsOpen(true);
-          }}
-          style={{
-            paddingVertical: 10,
-            paddingHorizontal: 14,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: T.border,
-            backgroundColor: T.glass2,
-          }}
-        >
-          <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
-        </Pressable>
-      </View>
-
-      <Text style={{ color: T.sub, marginTop: 2 }}>
-        Height: {chainHeight} • Next block: {formatTime(msUntilNextBlock)} • Chain: {chainId || "—"}
-      </Text>
-
-      {!!message && (
-        <Card style={{ marginTop: 12 }}>
-          <Text style={{ color: T.text, fontWeight: "900" }}>{message}</Text>
-        </Card>
-      )}
-
-      {/* Wallet + balances */}
-      <Card style={{ marginTop: 12 }}>
-        <Text style={{ color: T.sub, fontWeight: "800" }}>Wallet</Text>
-        <Text style={{ color: T.text, fontSize: 16, fontWeight: "900", marginTop: 4 }}>{wallet ? shortAddr(wallet) : "Loading…"}</Text>
-
-        <View style={{ height: 12 }} />
-
-        <Text style={{ color: T.sub, fontWeight: "800" }}>Balances</Text>
-        <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Confirmed: {confirmedBalance}</Text>
-        <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {spendableBalance}</Text>
-        <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Pending Δ: {pendingDelta}</Text>
-        <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Fee Vault: {feeVaultBalance}</Text>
-
-        <View style={{ height: 14 }} />
-
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <View style={{ flex: 1 }}>
-            <Button label="Refresh" variant="outline" onPress={hardRefreshAll} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label={mintLabel} variant="purple" disabled={mintBusy || mintCooldown > 0} onPress={handleMint} />
-          </View>
-        </View>
-
-        <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-          Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleTimeString() : "—"}
-        </Text>
-      </Card>
-
-      {/* Send */}
-      <Card style={{ marginTop: 12 }}>
-        <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Send</Text>
-
-        <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
-        <TextInput
-          defaultValue=""
-          onChangeText={(t) => (toRef.current = t)}
-          placeholder="Recipient address"
-          placeholderTextColor={"rgba(255,255,255,0.35)"}
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          style={{
-            marginTop: 8,
-            paddingVertical: 12,
-            paddingHorizontal: 12,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: T.border,
-            color: T.text,
-            backgroundColor: T.glass2,
-            fontWeight: "800",
-          }}
-        />
-
-        <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
-        <TextInput
-          defaultValue=""
-          onChangeText={(t) => (amountRef.current = t)}
-          placeholder="0"
-          placeholderTextColor={"rgba(255,255,255,0.35)"}
-          keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-          style={{
-            marginTop: 8,
-            paddingVertical: 12,
-            paddingHorizontal: 12,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: T.border,
-            color: T.text,
-            backgroundColor: T.glass2,
-            fontWeight: "800",
-          }}
-        />
-
-        {/* Tip presets */}
-        <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Tip (optional)</Text>
-
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-          <View style={{ flex: 1 }}>
-            <Button label="0" variant={tipMode === "none" ? "blue" : "outline"} onPress={() => setTipMode("none")} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label="Small" variant={tipMode === "small" ? "blue" : "outline"} onPress={() => setTipMode("small")} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label="Medium" variant={tipMode === "medium" ? "blue" : "outline"} onPress={() => setTipMode("medium")} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label="Large" variant={tipMode === "large" ? "blue" : "outline"} onPress={() => setTipMode("large")} />
-          </View>
-        </View>
-
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-          <View style={{ flex: 1 }}>
-            <Button label="Custom Tip" variant={tipMode === "custom" ? "purple" : "outline"} onPress={() => setTipMode("custom")} />
-          </View>
-        </View>
-
-        {tipMode === "custom" && (
-          <>
-            <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Custom Tip Amount</Text>
-            <TextInput
-              defaultValue=""
-              onChangeText={(t) => (customTipRef.current = t)}
-              placeholder="0"
-              placeholderTextColor={"rgba(255,255,255,0.35)"}
-              keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-              style={{
-                marginTop: 8,
-                paddingVertical: 12,
-                paddingHorizontal: 12,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: T.border,
-                color: T.text,
-                backgroundColor: T.glass2,
-                fontWeight: "800",
-              }}
-            />
-          </>
-        )}
-
-        {/* Priority fee speed */}
-        <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Priority Fee</Text>
-
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-          <View style={{ flex: 1 }}>
-            <Button label="Slow" variant={speed === "slow" ? "blue" : "outline"} onPress={() => setSpeed("slow")} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label="Normal" variant={speed === "normal" ? "blue" : "outline"} onPress={() => setSpeed("normal")} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Button label="Fast" variant={speed === "fast" ? "blue" : "outline"} onPress={() => setSpeed("fast")} />
-          </View>
-        </View>
-
-        <View style={{ height: 14 }} />
-
-        {/* Glow-backed Send */}
-        <View style={{ position: "relative" as any }}>
-          <Animated.View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              borderRadius: 12,
-              opacity: sendGlowOpacity as any,
-              transform: [{ scale: sendGlowScale as any }],
-              backgroundColor: T.green,
-              pointerEvents: "none",
-            }}
-          />
-          <Button label={sendBusy ? "Sending…" : "Send"} variant="green" disabled={sendBusy} onPress={openSendConfirm} />
-        </View>
-
-        <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-          Min gas: {fmt8(minGasFee)} • Service fee rate: {serviceFeeRate}
-        </Text>
-      </Card>
-
-      {/* Live tx list under send */}
-      <Card style={{ marginTop: 12 }}>
-        <View style={{ flexDirection: "row", alignItems: "center" }}>
-          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Transactions</Text>
-          <Button label={liveRefresh ? "Live: ON" : "Live: OFF"} variant={liveRefresh ? "blue" : "outline"} onPress={() => setLiveRefresh((v) => !v)} />
-        </View>
-
-        <View style={{ height: 12 }} />
-
-        {txs.length === 0 ? (
-          <Text style={{ color: T.sub, fontWeight: "800" }}>No transactions yet.</Text>
-        ) : (
-          <View style={{ gap: 10 }}>
-            {txs.slice(0, 12).map((tx: any, idx: number) => {
-              const status = String(tx?.status || "unknown");
-              const isPending = status === "pending";
-              return (
-                <View
-                  key={String(tx?.id || idx)}
-                  style={{
-                    borderWidth: 1,
-                    borderColor: T.border,
-                    borderRadius: 12,
-                    padding: 12,
-                    backgroundColor: T.glass2,
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900" }}>
-                    {String(tx?.type || "tx").toUpperCase()} • {status}
-                  </Text>
-                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>To: {shortAddr(String(tx?.to || ""))}</Text>
-                  <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Amount: {Number(tx?.amount || 0)}</Text>
-                  <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                    Gas: {Number(tx?.gasFee || 0)} • Service: {Number(tx?.serviceFee || 0)}
-                  </Text>
-
-                  {isPending && (
-                    <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-                      <View style={{ flex: 1 }}>
-                        <Button
-                          label="Boost"
-                          variant="blue"
-                          onPress={() => {
-                            pausePollingRef.current = true;
-                            setRbfTx(tx);
-                            setRbfOpen(true);
-                          }}
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Button
-                          label="Cancel"
-                          variant="danger"
-                          onPress={() => {
-                            pausePollingRef.current = true;
-                            setCancelTx(tx);
-                            setCancelOpen(true);
-                          }}
-                        />
-                      </View>
-                    </View>
-                  )}
-                </View>
-              );
-            })}
-          </View>
-        )}
-
-        {pendingTxs.length > 0 && (
-          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>
-            Pending: {pendingTxs.length} (use Boost/Cancel on pending txs above)
-          </Text>
-        )}
-      </Card>
-    </ScrollView>
-  );
-
   /* ======================
      Render
   ====================== */
   return (
     <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: T.bg, minHeight: Platform.OS === "web" ? ("100vh" as any) : undefined }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      style={{
+        flex: 1,
+        backgroundColor: T.bg,
+        minHeight: Platform.OS === "web" ? ("100vh" as any) : undefined,
+      }}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
-      {bgSource ? (
-        <ImageBackground source={bgSource} resizeMode="cover" style={{ flex: 1 }}>
-          {/* visual overlay must not intercept touches */}
-          <View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: "black",
-              opacity: bgOverlayOpacity,
-              pointerEvents: "none",
-            }}
+      {/* Background skin */}
+      {bgSource && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          <Image
+            source={bgSource}
+            resizeMode="cover"
+            style={[StyleSheet.absoluteFill, { opacity: 1 }]}
           />
-          {content}
-        </ImageBackground>
-      ) : (
-        content
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: "black", opacity: bgOverlayOpacity },
+            ]}
+          />
+        </View>
       )}
 
-      {/* Confirm */}
+      <ScrollView
+        keyboardShouldPersistTaps="always"
+        keyboardDismissMode="none"
+        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}
+      >
+        {/* Header */}
+        <View style={{ paddingTop: 18, paddingBottom: 10, flexDirection: "row", alignItems: "center" }}>
+          <View style={{ flex: 1 }} />
+          <Text style={{ color: T.text, fontSize: 28, fontWeight: "900" }}>HIVE Wallet</Text>
+          <View style={{ flex: 1 }} />
+
+          <Pressable
+            onPress={() => {
+              pausePollingRef.current = true;
+              setHistoryOpen(true);
+            }}
+            style={{
+              marginRight: 10,
+              paddingVertical: 10,
+              paddingHorizontal: 14,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              backgroundColor: T.glass2,
+            }}
+          >
+            <Text style={{ color: T.text, fontWeight: "900" }}>📜</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => {
+              pausePollingRef.current = true;
+              setSettingsOpen(true);
+            }}
+            style={{
+              paddingVertical: 10,
+              paddingHorizontal: 14,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              backgroundColor: T.glass2,
+            }}
+          >
+            <Text style={{ color: T.text, fontWeight: "900" }}>⚙️</Text>
+          </Pressable>
+        </View>
+
+        <Text style={{ color: T.sub, marginTop: 2 }}>
+          Height: {chainHeight} • Next block: {formatTime(msUntilNextBlock)} • Chain: {chainId || "—"}
+        </Text>
+
+        {!!message && (
+          <Card T={T} style={{ marginTop: 12 }}>
+            <Text style={{ color: T.text, fontWeight: "900" }}>{message}</Text>
+          </Card>
+        )}
+
+        {/* Wallet + balances */}
+        <Card T={T} style={{ marginTop: 12 }}>
+          <Text style={{ color: T.sub, fontWeight: "800" }}>Wallet</Text>
+
+          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 6 }}>
+            <Text style={{ color: T.text, fontSize: 16, fontWeight: "900", flex: 1 }}>
+              {wallet ? shortAddr(wallet) : "Loading…"}
+            </Text>
+
+            {!!wallet && (
+              <Pressable
+                onPress={copyWalletToClipboard}
+                hitSlop={10}
+                style={{
+                  padding: 6,
+                  marginLeft: 6,
+                  borderRadius: 8,
+                  backgroundColor: "rgba(0,0,0,0.25)",
+                  borderWidth: 1,
+                  borderColor: T.border,
+                }}
+              >
+                <Ionicons name="copy-outline" size={18} color={T.text} />
+              </Pressable>
+            )}
+          </View>
+
+          <View style={{ height: 12 }} />
+
+          <Text style={{ color: T.sub, fontWeight: "800" }}>Balances</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Confirmed: {confirmedBalance}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {spendableBalance}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Pending Δ: {pendingDelta}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Fee Vault: {feeVaultBalance}</Text>
+
+          <View style={{ height: 14 }} />
+
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Refresh" variant="outline" onPress={hardRefreshAll} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                T={T}
+                label="Receive"
+                variant="blue"
+                onPress={() => {
+                  pausePollingRef.current = true;
+                  setReceiveOpen(true);
+                }}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                T={T}
+                label={mintLabel}
+                variant="purple"
+                disabled={mintBusy || mintCooldown > 0}
+                onPress={handleMint}
+              />
+            </View>
+          </View>
+
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+            Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleTimeString() : "—"}
+          </Text>
+        </Card>
+
+        {/* Send */}
+        <Card T={T} style={{ marginTop: 12 }}>
+          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Send</Text>
+
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
+          <TextInput
+            value={toText}
+            onChangeText={(t) => setToText(sanitizeAddress(t))}
+            onFocus={() => (editingRef.current = true)}
+            onBlur={() => (editingRef.current = false)}
+            placeholder="HNY_<40 hex>"
+            placeholderTextColor={"rgba(255,255,255,0.35)"}
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            style={{
+              marginTop: 8,
+              paddingVertical: 12,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              color: T.text,
+              backgroundColor: T.glass2,
+              fontWeight: "800",
+            }}
+          />
+
+          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
+          <TextInput
+            value={amountText}
+            onChangeText={(t) => setAmountText(normalizeAmountText(t))}
+            onFocus={() => (editingRef.current = true)}
+            onBlur={() => (editingRef.current = false)}
+            placeholder="0.00"
+            placeholderTextColor={"rgba(255,255,255,0.35)"}
+            keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+            style={{
+              marginTop: 8,
+              paddingVertical: 12,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              color: T.text,
+              backgroundColor: T.glass2,
+              fontWeight: "800",
+            }}
+          />
+
+          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Priority Fee</Text>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Slow" variant={speed === "slow" ? "blue" : "outline"} onPress={() => setSpeed("slow")} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Normal" variant={speed === "normal" ? "blue" : "outline"} onPress={() => setSpeed("normal")} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Fast" variant={speed === "fast" ? "blue" : "outline"} onPress={() => setSpeed("fast")} />
+            </View>
+          </View>
+
+          <View style={{ height: 12 }} />
+
+          <Button
+            T={T}
+            label={sendBusy ? "Sending…" : "Send"}
+            variant="green"
+            disabled={sendBusy}
+            onPress={openSendConfirm}
+          />
+
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
+          </Text>
+        </Card>
+
+        {/* Transactions */}
+        <Card T={T} style={{ marginTop: 12 }}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Transactions</Text>
+            <Button
+              T={T}
+              label={liveRefresh ? "Live: ON" : "Live: OFF"}
+              variant={liveRefresh ? "blue" : "outline"}
+              onPress={() => setLiveRefresh((v) => !v)}
+            />
+          </View>
+
+          <View style={{ height: 12 }} />
+
+          {displayTxs.length === 0 ? (
+            <Text style={{ color: T.sub, fontWeight: "800" }}>No transactions yet.</Text>
+          ) : (
+            <View style={{ gap: 10 }}>
+              {displayTxs.slice(0, 20).map((tx: any, idx: number) => {
+                const status = String(tx?.status || "unknown");
+                const isPending = status === "pending";
+                const w = (wallet || "").trim();
+                const from = String(tx?.from || "").trim();
+                const to = String(tx?.to || "").trim();
+
+                const direction =
+                  w && from === w ? "Sent" : w && to === w ? "Received" : String(tx?.type || "Tx");
+
+                const amt = Number(tx?.amount || 0);
+                const signedAmount = direction === "Sent" ? -amt : direction === "Received" ? amt : amt;
+
+                return (
+                  <View
+                    key={String(tx?.id || idx)}
+                    style={{
+                      borderWidth: 1,
+                      borderColor: T.border,
+                      borderRadius: 12,
+                      padding: 12,
+                      backgroundColor: T.glass2,
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>
+                      {direction} • {status}
+                    </Text>
+
+                    <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+                      From: {shortAddr(String(tx?.from || ""))}
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      To: {shortAddr(String(tx?.to || ""))}
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      Amount: {signedAmount}
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      Nonce: {String(tx?.nonce ?? "—")}
+                    </Text>
+
+                    {isPending && (
+                      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                        <View style={{ flex: 1 }}>
+                          <Button
+                            T={T}
+                            label="Boost"
+                            variant="blue"
+                            onPress={() => {
+                              pausePollingRef.current = true;
+                              setRbfTx(tx);
+                              setRbfOpen(true);
+                            }}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Button
+                            T={T}
+                            label="Cancel"
+                            variant="danger"
+                            onPress={() => {
+                              pausePollingRef.current = true;
+                              setCancelTx(tx);
+                              setCancelOpen(true);
+                            }}
+                          />
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
+          {pendingCount > 0 && (
+            <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>
+              Pending: {pendingCount} (Boost/Cancel available)
+            </Text>
+          )}
+        </Card>
+      </ScrollView>
+
+      {/* Confirm modal */}
       {confirmOpen && quote && (
-        <Overlay
-          onClose={() => {
-            setConfirmOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
+        <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Confirm Send</Text>
-                <Pressable
-                  onPress={() => {
-                    setConfirmOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>✕</Text>
+                <Pressable onPress={() => closeAllModals()}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
                 </Pressable>
               </View>
 
-              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>To: {shortAddr(String(quote.to || ""))}</Text>
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+                To: {shortAddr(String(quote.to || ""))}
+              </Text>
               <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
-                Amount: {quote.baseAmt} • Tip: {quote.tipAmt} • Total sent: {quote.totalAmt}
+                Amount: {quote.baseAmt}
               </Text>
 
               <View style={{ height: 12 }} />
-
-              <Text style={{ color: T.sub, fontWeight: "800" }}>Priority: {String(quote.speed || "normal")}</Text>
-              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Gas fee: {fmt8(Number(quote.chosenGas || 0))}</Text>
-              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Service fee: {fmt8(Number(quote.serviceFee || 0))}</Text>
-              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Total fee: {fmt8(Number(quote.totalFee || 0))}</Text>
-              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Total cost: {fmt8(Number(quote.totalCost || 0))}</Text>
+              <Text style={{ color: T.sub, fontWeight: "800" }}>
+                Gas fee: {fmt8(Number(quote.chosenGas || 0))}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                Service fee: {fmt8(Number(quote.serviceFee || 0))}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                Total cost: {fmt8(Number(quote.totalCost || 0))}
+              </Text>
 
               <View style={{ height: 14 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    label="Back"
-                    variant="outline"
-                    onPress={() => {
-                      setConfirmOpen(false);
-                      pausePollingRef.current = false;
-                    }}
-                  />
+                  <Button T={T} label="Back" variant="outline" onPress={closeAllModals} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label={sendBusy ? "Submitting…" : "Confirm"} variant="green" disabled={sendBusy} onPress={handleSendSubmit} />
+                  <Button
+                    T={T}
+                    label={sendBusy ? "Submitting…" : "Confirm"}
+                    variant="green"
+                    disabled={sendBusy}
+                    onPress={handleSendSubmit}
+                  />
                 </View>
               </View>
             </View>
@@ -964,54 +1125,28 @@ export default function Index() {
         </Overlay>
       )}
 
-      {/* RBF Boost modal */}
+      {/* RBF modal */}
       {rbfOpen && rbfTx && (
-        <Overlay
-          onClose={() => {
-            setRbfOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
+        <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Boost Pending (RBF)</Text>
-                <Pressable
-                  onPress={() => {
-                    setRbfOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>✕</Text>
-                </Pressable>
-              </View>
-
-              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-                Current gas: {fmt8(Number(rbfTx?.gasFee || 0))} • Min gas: {fmt8(minGasFee)}
-              </Text>
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Boost Pending (RBF)</Text>
 
               <View style={{ height: 12 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button label="+10%" variant="outline" onPress={() => doRbf(1.1)} />
+                  <Button T={T} label="+10%" variant="outline" onPress={() => doRbf(1.1)} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label="+25%" variant="outline" onPress={() => doRbf(1.25)} />
+                  <Button T={T} label="+25%" variant="outline" onPress={() => doRbf(1.25)} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label="+50%" variant="outline" onPress={() => doRbf(1.5)} />
+                  <Button T={T} label="+50%" variant="outline" onPress={() => doRbf(1.5)} />
                 </View>
               </View>
 
               <View style={{ height: 12 }} />
-              <Button
-                label="Close"
-                variant="outline"
-                onPress={() => {
-                  setRbfOpen(false);
-                  pausePollingRef.current = false;
-                }}
-              />
+              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
             </View>
           </GlassCard>
         </Overlay>
@@ -1019,49 +1154,23 @@ export default function Index() {
 
       {/* Cancel modal */}
       {cancelOpen && cancelTx && (
-        <Overlay
-          onClose={() => {
-            setCancelOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
+        <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Cancel Pending Tx</Text>
-                <Pressable
-                  onPress={() => {
-                    setCancelOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>✕</Text>
-                </Pressable>
-              </View>
-
-              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-                Cancel uses a self-send with higher gas. Current gas: {fmt8(Number(cancelTx?.gasFee || 0))}
-              </Text>
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Cancel Pending Tx</Text>
 
               <View style={{ height: 12 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button label="Cancel w/+25%" variant="danger" onPress={() => doCancel(1.25)} />
+                  <Button T={T} label="Cancel +25%" variant="danger" onPress={() => doCancel(1.25)} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label="Cancel w/+50%" variant="danger" onPress={() => doCancel(1.5)} />
+                  <Button T={T} label="Cancel +50%" variant="danger" onPress={() => doCancel(1.5)} />
                 </View>
               </View>
 
               <View style={{ height: 12 }} />
-              <Button
-                label="Close"
-                variant="outline"
-                onPress={() => {
-                  setCancelOpen(false);
-                  pausePollingRef.current = false;
-                }}
-              />
+              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
             </View>
           </GlassCard>
         </Overlay>
@@ -1069,34 +1178,18 @@ export default function Index() {
 
       {/* History modal */}
       {historyOpen && (
-        <Overlay
-          onClose={() => {
-            setHistoryOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
+        <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Transaction History</Text>
-                <Pressable
-                  onPress={() => {
-                    setHistoryOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>✕</Text>
-                </Pressable>
-              </View>
-
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Transaction History</Text>
               <View style={{ height: 12 }} />
 
               <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="always">
-                {txs.length === 0 ? (
+                {displayTxs.length === 0 ? (
                   <Text style={{ color: T.sub, fontWeight: "800" }}>No transactions yet.</Text>
                 ) : (
                   <View style={{ gap: 10 }}>
-                    {txs.slice(0, 100).map((tx: any, idx: number) => (
+                    {displayTxs.slice(0, 100).map((tx: any, idx: number) => (
                       <View
                         key={String(tx?.id || idx)}
                         style={{
@@ -1110,10 +1203,11 @@ export default function Index() {
                         <Text style={{ color: T.text, fontWeight: "900" }}>
                           {String(tx?.type || "tx").toUpperCase()} • {String(tx?.status || "unknown")}
                         </Text>
-                        <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>To: {shortAddr(String(tx?.to || ""))}</Text>
-                        <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Amount: {Number(tx?.amount || 0)}</Text>
+                        <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+                          To: {shortAddr(String(tx?.to || ""))}
+                        </Text>
                         <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                          Gas: {Number(tx?.gasFee || 0)} • Service: {Number(tx?.serviceFee || 0)}
+                          Amount: {Number(tx?.amount || 0)}
                         </Text>
                       </View>
                     ))}
@@ -1122,14 +1216,76 @@ export default function Index() {
               </ScrollView>
 
               <View style={{ height: 12 }} />
-              <Button
-                label="Close"
-                variant="outline"
-                onPress={() => {
-                  setHistoryOpen(false);
-                  pausePollingRef.current = false;
+              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* Receive modal */}
+      {receiveOpen && (
+        <Overlay onClose={closeAllModals}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Receive HNY</Text>
+                <Pressable onPress={() => closeAllModals()}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Wallet address</Text>
+
+              <View
+                style={{
+                  marginTop: 12,
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 14,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  backgroundColor: "rgba(0,0,0,0.25)",
                 }}
-              />
+              >
+                {!!wallet ? (
+                  <QRCode value={String(wallet).trim()} size={220} />
+                ) : (
+                  <Text style={{ color: T.sub, fontWeight: "800" }}>Loading wallet…</Text>
+                )}
+              </View>
+
+              <Text
+                selectable
+                style={{
+                  marginTop: 14,
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  color: T.text,
+                  backgroundColor: T.glass2,
+                  fontWeight: "800",
+                }}
+              >
+                {wallet || "—"}
+              </Text>
+
+              <View style={{ height: 12 }} />
+
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label={copied ? "Copied ✅" : "Copy"} variant="green" onPress={copyWalletToClipboard} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
+                </View>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+                Tip: open the app in an incognito window to create a second wallet and test sending between two addresses.
+              </Text>
             </View>
           </GlassCard>
         </Overlay>
@@ -1137,25 +1293,10 @@ export default function Index() {
 
       {/* Settings modal */}
       {settingsOpen && (
-        <Overlay
-          onClose={() => {
-            setSettingsOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
+        <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Settings</Text>
-                <Pressable
-                  onPress={() => {
-                    setSettingsOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 18 }}>✕</Text>
-                </Pressable>
-              </View>
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Settings</Text>
 
               <View style={{ height: 14 }} />
               <Text style={{ color: T.sub, fontWeight: "800" }}>Theme</Text>
@@ -1163,13 +1304,13 @@ export default function Index() {
 
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button label="Matrix" variant={theme === "matrix" ? "blue" : "outline"} onPress={() => setTheme("matrix")} />
+                  <Button T={T} label="Matrix" variant={theme === "matrix" ? "blue" : "outline"} onPress={() => setTheme("matrix")} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label="Noir" variant={theme === "noir" ? "blue" : "outline"} onPress={() => setTheme("noir")} />
+                  <Button T={T} label="Noir" variant={theme === "noir" ? "blue" : "outline"} onPress={() => setTheme("noir")} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button label="Honey" variant={theme === "honey" ? "blue" : "outline"} onPress={() => setTheme("honey")} />
+                  <Button T={T} label="Honey" variant={theme === "honey" ? "blue" : "outline"} onPress={() => setTheme("honey")} />
                 </View>
               </View>
 
@@ -1180,14 +1321,28 @@ export default function Index() {
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
                   <Button
+                    T={T}
+                    label="Honey Coin"
+                    variant={skin === "matrix-honey-coin" ? "purple" : "outline"}
+                    onPress={() => setSkin("matrix-honey-coin")}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
                     label="Matrix Honeycomb"
                     variant={skin === "matrix-honeycomb" ? "purple" : "outline"}
                     onPress={() => setSkin("matrix-honeycomb")}
                   />
                 </View>
+              </View>
+
+              <View style={{ height: 10 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
                   <Button
-                    label="Solid Noir"
+                    T={T}
+                    label="No Background"
                     variant={skin === "solid-noir" ? "purple" : "outline"}
                     onPress={() => setSkin("solid-noir")}
                   />
@@ -1195,19 +1350,42 @@ export default function Index() {
               </View>
 
               <View style={{ height: 14 }} />
-              <Button label="Hard Refresh Now" variant="outline" onPress={hardRefreshAll} />
-              <View style={{ height: 12 }} />
-              <Button
-                label="Close"
-                variant="outline"
-                onPress={() => {
-                  setSettingsOpen(false);
-                  pausePollingRef.current = false;
-                }}
-              />
+              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
             </View>
           </GlassCard>
         </Overlay>
+      )}
+
+      {/* Toast (global) */}
+      {toast && (
+        <View
+          pointerEvents="none"
+          style={{
+            position: "absolute",
+            bottom: 22,
+            left: 16,
+            right: 16,
+            alignItems: "center",
+            zIndex: 99999,
+          }}
+        >
+          <View
+            style={{
+              maxWidth: 900,
+              width: "100%",
+              paddingVertical: 10,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              backgroundColor: toast.kind === "warn" ? "rgba(255,90,90,0.18)" : T.glass,
+            }}
+          >
+            <Text style={{ color: T.text, fontWeight: "900", textAlign: "center" }}>
+              {toast.text}
+            </Text>
+          </View>
+        </View>
       )}
     </KeyboardAvoidingView>
   );

@@ -1,4 +1,4 @@
-export const SERVER = "http://192.168.0.11:3000";
+export const SERVER = "http://192.168.0.15:3000";
 export const WALLET = "HNY1_DEV_WALLET";
 
 /**

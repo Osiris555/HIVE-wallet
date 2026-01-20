@@ -6,7 +6,7 @@ import {
   StyleSheet,
 } from "react-native";
 
-const SERVER = "http://192.168.0.11:3000";
+const SERVER = "http://192.168.0.15:3000";
 const WALLET = "HNY1_DEV_WALLET";
 
 export default function WalletScreen({ navigation }: any) {

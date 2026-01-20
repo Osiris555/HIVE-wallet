@@ -59,11 +59,104 @@ function isWeb() {
 const API_BASE =
   ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
   (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
-  (isWeb() ? "http://localhost:3000" : "http://192.168.0.11:3000");
+  (isWeb() ? "http://localhost:3000" : "http://192.168.0.15:3000");
 
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
 const WALLET_STORAGE = "HIVE_WALLET_ID";
+
+// --- Address + amount validation helpers ---
+// Adjust these to your chain’s actual address format.
+// Right now: we enforce hex-like strings with a minimum length and optional prefix.
+
+export function validateRecipientAddress(addr: string): { ok: boolean; reason?: string } {
+  const a = String(addr || "").trim();
+
+  // Accept HNY_<40 hex>
+  // Allow case-insensitive prefix, but require underscore
+  const m = a.match(/^hny_([0-9a-fA-F]{40})$/i);
+  if (!m) {
+    return { ok: false, reason: "Recipient address format must be HNY_<40 hex>." };
+  }
+
+  // Normalize to uppercase prefix + lowercase hex (canonical)
+  // (optional: you can return this normalized string if you want)
+  return { ok: true };
+}
+
+// Normalize and validate an amount string to 8 decimals max
+export function parseAmount8(amountText: string): { ok: boolean; value?: number; reason?: string } {
+  const raw = String(amountText || "").trim();
+
+  if (!raw) return { ok: false, reason: "Amount is required." };
+
+  // Reject commas/spaces
+  if (/[,\s]/.test(raw)) return { ok: false, reason: "Amount must not contain spaces or commas." };
+
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return { ok: false, reason: "Amount is not a valid number." };
+  if (n <= 0) return { ok: false, reason: "Amount must be greater than 0." };
+
+  // Enforce 8 decimal places max
+  const parts = raw.split(".");
+  if (parts[1] && parts[1].length > 8) {
+    return { ok: false, reason: "Amount supports up to 8 decimal places." };
+  }
+
+  // Normalize to 8 decimals but keep as number for current code
+  const normalized = Number(n.toFixed(8));
+  if (normalized <= 0) return { ok: false, reason: "Amount is too small." };
+
+  return { ok: true, value: normalized };
+}
+
+/**
+ * Preflight checks before quote/sign/broadcast.
+ * Pass spendable balance + computed fees from your UI.
+ */
+export function preflightSend(args: {
+  to: string;
+  amountText: string;
+  spendableBalance: number;
+  minGasFee: number;
+  serviceFeeRate: number;
+  chosenGasFee: number; // the gas fee you plan to use (after multiplier)
+}) {
+  const toCheck = validateRecipientAddress(args.to);
+  if (!toCheck.ok) return { ok: false as const, reason: toCheck.reason };
+
+  const amtCheck = parseAmount8(args.amountText);
+  if (!amtCheck.ok) return { ok: false as const, reason: amtCheck.reason };
+
+  const amount = Number(amtCheck.value || 0);
+  const serviceFee = computeServiceFee(amount, args.serviceFeeRate);
+  const gasFee = Number(args.chosenGas || 0);
+
+  if (!Number.isFinite(gasFee) || gasFee < args.minGasFee) {
+    return { ok: false as const, reason: `Gas fee must be at least ${args.minGasFee}.` };
+  }
+
+  const totalCost = Number((amount + gasFee + serviceFee).toFixed(8));
+
+  if (!Number.isFinite(args.spendableBalance)) {
+    return { ok: false as const, reason: "Spendable balance unavailable." };
+  }
+
+  if (totalCost > args.spendableBalance) {
+    return {
+      ok: false as const,
+      reason: `Insufficient spendable balance. Need ${totalCost} (amount+fees).`,
+    };
+  }
+
+  return {
+    ok: true as const,
+    amount,
+    gasFee,
+    serviceFee,
+    totalCost,
+  };
+}
 
 async function kvGet(key: string): Promise<string | null> {
   if (isWeb()) {
