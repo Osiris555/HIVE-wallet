@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { Ionicons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import {
   Image,
   KeyboardAvoidingView,
@@ -203,6 +204,12 @@ function fmt8(n: number) {
   return x.toFixed(8);
 }
 
+function fmtPct(rate: number) {
+  const r = Number(rate);
+  if (!Number.isFinite(r)) return "—";
+  return `${(r * 100).toFixed(3)}%`;
+}
+
 /** Removes whitespace + zero-width characters that break HNY_ validation */
 function sanitizeAddressInfo(input: string) {
   const raw = String(input ?? "");
@@ -258,6 +265,11 @@ export default function Index() {
   ====================== */
   const [theme, setTheme] = useState<ThemeKey>("matrix");
   const MIN_GAS_FEE_FLOOR = 0.000001; // hard minimum (chain rule / preflight rule)
+
+  // QR scan (recipient)
+  const [scanOpen, setScanOpen] = useState(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const scanLockRef = useRef(false);
   const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
 
   type SpeedKey = "slow" | "normal" | "fast";
@@ -369,7 +381,10 @@ export default function Index() {
     setChainId(String(st?.chainId || ""));
     setChainHeight(Number(st?.chainHeight || st?.height || 0));
     setMsUntilNextBlock(Number(st?.msUntilNextBlock || 0));
-    setServiceFeeRate(Number(st?.serviceFeeRate || 0));
+    {
+      const r = Number(st?.serviceFeeRate);
+      setServiceFeeRate(Number.isFinite(r) && r > 0 ? r : 0.00005);
+    }
     // ✅ never allow 0 min gas
     setMinGasFee(Math.max(Number(st?.minGasFee || 0), MIN_GAS_FEE_FLOOR));
     setFeeVaultBalance(Number(st?.feeVaultBalance || st?.feeVault || 0));
@@ -539,6 +554,51 @@ export default function Index() {
     } finally {
       setMintBusy(false);
     }
+  }
+
+  async function openRecipientScanner() {
+    setMessage("");
+
+    // Web: camera support varies by browser + https. Give a friendly message.
+    if (Platform.OS === "web") {
+      const md = (globalThis as any)?.navigator?.mediaDevices;
+      if (!md?.getUserMedia) {
+        setMessage("QR scanning isn't supported in this browser. Paste the address instead.");
+        return;
+      }
+    }
+
+    scanLockRef.current = false;
+
+    // Request permission if needed
+    if (!cameraPermission?.granted) {
+      const res = await requestCameraPermission();
+      if (!res?.granted) {
+        setMessage("Camera permission is required to scan a QR code.");
+        return;
+      }
+    }
+
+    pausePollingRef.current = true;
+    setScanOpen(true);
+  }
+
+  function onRecipientQrScanned(data: string) {
+    if (scanLockRef.current) return;
+    scanLockRef.current = true;
+
+    const cleaned = sanitizeAddress(String(data || ""))
+      .replace(/^hny_/i, "HNY_")
+      .replace(/^HNY_0x/i, "HNY_");
+
+    setToText(cleaned);
+    setScanOpen(false);
+    pausePollingRef.current = false;
+
+    // allow another scan shortly after closing
+    setTimeout(() => {
+      scanLockRef.current = false;
+    }, 750);
   }
 
   /* ======================
@@ -901,28 +961,48 @@ export default function Index() {
           <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Send</Text>
 
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
-          <TextInput
-            value={toText}
-            onChangeText={(t) => setToText(sanitizeAddress(t))}
-            onFocus={() => (editingRef.current = true)}
-            onBlur={() => (editingRef.current = false)}
-            placeholder="HNY_<40 hex>"
-            placeholderTextColor={"rgba(255,255,255,0.35)"}
-            autoCapitalize="none"
-            autoCorrect={false}
-            spellCheck={false}
-            style={{
-              marginTop: 8,
-              paddingVertical: 12,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: T.border,
-              color: T.text,
-              backgroundColor: T.glass2,
-              fontWeight: "800",
-            }}
-          />
+          <View style={{ flexDirection: "row", gap: 10, alignItems: "center", marginTop: 8 }}>
+            <TextInput
+              value={toText}
+              onChangeText={(t) => setToText(sanitizeAddress(t))}
+              onFocus={() => (editingRef.current = true)}
+              onBlur={() => (editingRef.current = false)}
+              placeholder="HNY_<40 hex>"
+              placeholderTextColor={"rgba(255,255,255,0.35)"}
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              style={{
+                flex: 1,
+                paddingVertical: 12,
+                paddingHorizontal: 12,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: T.border,
+                color: T.text,
+                backgroundColor: T.glass2,
+                fontWeight: "800",
+              }}
+            />
+
+            <Pressable
+              onPress={openRecipientScanner}
+              style={{
+                width: 48,
+                height: 48,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: T.border,
+                backgroundColor: T.glass2,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Scan QR code"
+            >
+              <Ionicons name="qr-code-outline" size={22} color={T.text} />
+            </Pressable>
+          </View>
 
           <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
           <TextInput
@@ -970,7 +1050,7 @@ export default function Index() {
           />
 
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
+            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee: {fmtPct(serviceFeeRate)}
           </Text>
         </Card>
 
@@ -1074,6 +1154,71 @@ export default function Index() {
           )}
         </Card>
       </ScrollView>
+
+      {/* QR Scanner (Recipient) */}
+      {scanOpen && (
+        <Overlay
+          onClose={() => {
+            setScanOpen(false);
+            pausePollingRef.current = false;
+          }}
+        >
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Scan QR Code</Text>
+                <Pressable
+                  onPress={() => {
+                    setScanOpen(false);
+                    pausePollingRef.current = false;
+                  }}
+                >
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 8, fontWeight: "800" }}>
+                Point your camera at a QR code containing an HNY_ address.
+              </Text>
+
+              <View style={{ height: 12 }} />
+
+              {cameraPermission?.granted ? (
+                <View style={{ borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: T.border }}>
+                  <CameraView
+                    style={{ width: "100%", height: 420 }}
+                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                    onBarcodeScanned={(res: any) => {
+                      if (res?.data) onRecipientQrScanned(String(res.data));
+                    }}
+                  />
+                </View>
+              ) : (
+                <Text style={{ color: T.sub, fontWeight: "800" }}>
+                  Camera permission not granted.
+                </Text>
+              )}
+
+              <View style={{ height: 12 }} />
+              <Button
+                T={T}
+                label="Paste from Clipboard"
+                variant="outline"
+                onPress={async () => {
+                  try {
+                    const clip = await Clipboard.getStringAsync();
+                    if (clip) setToText(sanitizeAddress(clip));
+                    setScanOpen(false);
+                    pausePollingRef.current = false;
+                  } catch {
+                    setMessage("Couldn't read clipboard.");
+                  }
+                }}
+              />
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
 
       {/* Confirm modal */}
       {confirmOpen && quote && (

@@ -360,9 +360,12 @@ function signMessage(message: string, secretKeyB64: string) {
 }
 
 export function computeServiceFee(amount: number, rate?: number) {
+  // Service fee is a percentage of the send amount.
+  // Chain rule: 0.005% (0.00005) unless server provides a rate.
+  const fallbackRate = 0.00005;
   const r = Number(rate);
-  if (!Number.isFinite(r)) return 0;
-  return Number((Number(amount) * r).toFixed(8));
+  const useRate = Number.isFinite(r) ? r : fallbackRate;
+  return Number((Number(amount) * useRate).toFixed(8));
 }
 
 export async function quoteSend(to: string, amount: number) {
