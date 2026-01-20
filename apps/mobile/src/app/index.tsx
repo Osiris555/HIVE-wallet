@@ -5,7 +5,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { Ionicons } from "@expo/vector-icons";
-import { CameraView, useCameraPermissions } from "expo-camera";
 import {
   Image,
   KeyboardAvoidingView,
@@ -226,6 +225,24 @@ function sanitizeAddress(input: string) {
   return sanitizeAddressInfo(input).cleaned;
 }
 
+/**
+ * Extract a full HNY_<40hex> address from arbitrary text (QR payload, clipboard, etc.).
+ * Supports payloads like:
+ *  - "HNY_<40hex>"
+ *  - "hny:HNY_<40hex>"
+ *  - JSON/text that contains the address somewhere
+ */
+function extractHnyAddress(input: string): string | null {
+  const s = String(input ?? "");
+  // Try direct match first
+  const m = s.match(/HNY_[0-9a-fA-F]{40}/i);
+  if (m?.[0]) return m[0].replace(/^hny_/i, "HNY_");
+  // Try common URI form: hny:HNY_...
+  const m2 = s.match(/hny:\s*(HNY_[0-9a-fA-F]{40})/i);
+  if (m2?.[1]) return m2[1].replace(/^hny_/i, "HNY_");
+  return null;
+}
+
 function themeKeyForChain(chainId: string) {
   return `hive:theme:${chainId || "default"}`;
 }
@@ -268,8 +285,42 @@ export default function Index() {
 
   // QR scan (recipient)
   const [scanOpen, setScanOpen] = useState(false);
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [cameraMod, setCameraMod] = useState<any>(null);
+  const [cameraPerm, setCameraPerm] = useState<"granted" | "denied" | "undetermined" | null>(null);
+  const CamView: any = cameraMod?.CameraView;
   const scanLockRef = useRef(false);
+
+  function tryLoadCameraModule(): any | null {
+    if (Platform.OS === "web") return null;
+    try {
+      // Optional dependency: app should still run if expo-camera isn't installed.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      return require("expo-camera");
+    } catch {
+      return null;
+    }
+  }
+
+  async function ensureCameraPermission(mod: any) {
+    try {
+      const req =
+        mod?.requestCameraPermissionsAsync ||
+        mod?.Camera?.requestCameraPermissionsAsync ||
+        mod?.Camera?.requestPermissionsAsync;
+      if (!req) {
+        // If API shape is unexpected, allow CameraView to handle permissions UX.
+        setCameraPerm("undetermined");
+        return true;
+      }
+      const res = await req();
+      const status = res?.status ?? res;
+      setCameraPerm(status ?? "undetermined");
+      return status === "granted";
+    } catch {
+      setCameraPerm("denied");
+      return false;
+    }
+  }
   const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
 
   type SpeedKey = "slow" | "normal" | "fast";
@@ -559,46 +610,53 @@ export default function Index() {
   async function openRecipientScanner() {
     setMessage("");
 
-    // Web: camera support varies by browser + https. Give a friendly message.
+    // Prefer camera on native; on web, fall back to paste (camera often requires https + permissions).
     if (Platform.OS === "web") {
-      const md = (globalThis as any)?.navigator?.mediaDevices;
-      if (!md?.getUserMedia) {
-        setMessage("QR scanning isn't supported in this browser. Paste the address instead.");
-        return;
-      }
+      setMessage("QR scan isn't available on web here. Paste the address instead.");
+      return;
     }
 
+    // Try to load expo-camera (optional dependency)
+    const mod = tryLoadCameraModule();
+    if (!mod?.CameraView) {
+      setMessage("QR scanner isn't installed. Paste the address instead.");
+      return;
+    }
+
+    setCameraMod(mod);
+
+    // Ask for permission (best effort)
+    const ok = await ensureCameraPermission(mod);
+    if (!ok) {
+      setMessage("Camera permission denied. Paste the address instead.");
+      return;
+    }
+
+    // Open scanner modal
     scanLockRef.current = false;
-
-    // Request permission if needed
-    if (!cameraPermission?.granted) {
-      const res = await requestCameraPermission();
-      if (!res?.granted) {
-        setMessage("Camera permission is required to scan a QR code.");
-        return;
-      }
-    }
-
     pausePollingRef.current = true;
     setScanOpen(true);
   }
 
-  function onRecipientQrScanned(data: string) {
+  function handleQrPayload(payload: string) {
+    // Prevent repeated scans firing rapidly
     if (scanLockRef.current) return;
     scanLockRef.current = true;
 
-    const cleaned = sanitizeAddress(String(data || ""))
-      .replace(/^hny_/i, "HNY_")
-      .replace(/^HNY_0x/i, "HNY_");
+    const found = extractHnyAddress(payload);
+    if (found) {
+      setToText(found);
+      showToast("Recipient filled ✅");
+      setScanOpen(false);
+      pausePollingRef.current = false;
+      return;
+    }
 
-    setToText(cleaned);
-    setScanOpen(false);
-    pausePollingRef.current = false;
-
-    // allow another scan shortly after closing
+    // Not an address: keep scanner open and allow another attempt
+    showToast("QR code doesn't contain an HNY address", "warn");
     setTimeout(() => {
       scanLockRef.current = false;
-    }, 750);
+    }, 900);
   }
 
   /* ======================
@@ -1183,20 +1241,33 @@ export default function Index() {
 
               <View style={{ height: 12 }} />
 
-              {cameraPermission?.granted ? (
+              {cameraPerm === "granted" && CamView ? (
                 <View style={{ borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: T.border }}>
-                  <CameraView
+                  <CamView
                     style={{ width: "100%", height: 420 }}
                     barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                    onBarCodeScanned={(res: any) => {
+                      if (res?.data) handleQrPayload(String(res.data));
+                    }}
                     onBarcodeScanned={(res: any) => {
-                      if (res?.data) onRecipientQrScanned(String(res.data));
+                      if (res?.data) handleQrPayload(String(res.data));
                     }}
                   />
                 </View>
               ) : (
-                <Text style={{ color: T.sub, fontWeight: "800" }}>
-                  Camera permission not granted.
-                </Text>
+                <View
+                  style={{
+                    padding: 14,
+                    borderRadius: 14,
+                    borderWidth: 1,
+                    borderColor: T.border,
+                    backgroundColor: "rgba(0,0,0,0.35)",
+                  }}
+                >
+                  <Text style={{ color: T.sub, fontWeight: "800" }}>
+                    Camera not available. Use clipboard paste instead.
+                  </Text>
+                </View>
               )}
 
               <View style={{ height: 12 }} />
@@ -1207,9 +1278,17 @@ export default function Index() {
                 onPress={async () => {
                   try {
                     const clip = await Clipboard.getStringAsync();
-                    if (clip) setToText(sanitizeAddress(clip));
-                    setScanOpen(false);
-                    pausePollingRef.current = false;
+                    const found = extractHnyAddress(clip);
+                    if (found) {
+                      setToText(found);
+                      showToast("Recipient filled ✅");
+                      setScanOpen(false);
+                      pausePollingRef.current = false;
+                    } else {
+                      showToast("Clipboard doesn't contain an HNY address", "warn");
+                      // Keep scanner open so user can try scanning again
+                      scanLockRef.current = false;
+                    }
                   } catch {
                     setMessage("Couldn't read clipboard.");
                   }

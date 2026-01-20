@@ -359,6 +359,16 @@ function signMessage(message: string, secretKeyB64: string) {
   return u8ToB64(sig);
 }
 
+
+async function sha256HexString(input: string) {
+  // expo-crypto returns a hex string for digestStringAsync.
+  return await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, input);
+}
+
+async function computeTxId(message: string) {
+  return await sha256HexString(message);
+}
+
 export function computeServiceFee(amount: number, rate?: number) {
   // Service fee is a percentage of the send amount.
   // Chain rule: 0.005% (0.00005) unless server provides a rate.
@@ -421,7 +431,10 @@ export async function mint(): Promise<any> {
 
   const signature = signMessage(msg, secretKeyB64);
 
+  const txid = await computeTxId(msg);
+
   return await postJson("/mint", {
+    txid,
     chainId,
     wallet,
     nonce,
@@ -474,7 +487,10 @@ export async function send(params: {
 
   const signature = signMessage(msg, secretKeyB64);
 
+  const txid = await computeTxId(msg);
+
   return await postJson("/send", {
+    txid,
     chainId,
     from,
     to: params.to,
@@ -534,7 +550,10 @@ export async function rbfReplacePending(params: {
   });
   const signature = signMessage(msg, secretKeyB64);
 
+  const txid = await computeTxId(msg);
+
   return await postJson("/rbf", {
+    txid,
     chainId,
     from,
     to: params.to,
@@ -586,7 +605,10 @@ export async function cancelPending(params: { nonce: number; gasFee: number; ser
   });
   const signature = signMessage(msg, secretKeyB64);
 
+  const txid = await computeTxId(msg);
+
   return await postJson("/cancel", {
+    txid,
     chainId,
     from,
     nonce,
