@@ -2,11 +2,13 @@
 
 **Status:** Frozen (Testnet Economics Locked)
 
-This document defines Honey.net’s canonical **fee mechanics** (base fee, value-based service fee, caps, and optional priority tips),
-and the **redistribution** of collected fees.
+This document defines Honey.net’s fee mechanics:
+- **Base gas** (network minimum)
+- **Service fee** (value-based, with a continuous discount curve + hard cap)
+- **Priority tip** (optional, user-controlled)
 
-> **Source of truth for fee parameters:** `apps/docs/fees/FEE_SPEC.md`  
-> This document describes *how* fees work and how they are applied at runtime.
+> **Source of truth for parameters:** `apps/docs/fees/FEE_SPEC.md`  
+> This document describes *how* fees are applied at runtime.
 
 ---
 
@@ -24,59 +26,69 @@ and the **redistribution** of collected fees.
 
 Every transaction fee has two required components and one optional component.
 
-### 2.1 Base Fee (Required)
-A fixed minimum fee charged for all transactions.
+### 2.1 Base Gas (Required)
+A fixed minimum network fee charged for all transactions.
 
-- **Base fee:** `0.000001 HONEY`
+- **Base gas:** `0.00000001 HNY` (1 Honey Cone)
 
 Purpose:
 - Anti-spam / mempool hygiene
 - Non-zero validator compensation
-- Predictable minimum cost
+- Predictable minimum cost floor
 
 ### 2.2 Service Fee (Required, Value-Based)
-A percentage-based fee charged on the transaction amount.
+A percentage-based fee charged on the transaction amount `A` (in HNY). The service fee uses a continuous discount curve:
 
-- **Service fee rate:** `0.0005%` (decimal `0.000005`)
+- **Rate at/under 100,000,000,000 HNY:** `0.0005%` (decimal `0.000005`)
+- **Rate at/over 500,000,000,000 HNY:** `0.0003%` (decimal `0.000003`)
+- **Floor:** service fee rate never goes below `0.0003%`
+
+Piecewise definition:
+- If `A ≤ 100,000,000,000` then `rate(A) = 0.0005%`
+- If `A ≥ 500,000,000,000` then `rate(A) = 0.0003%`
+- Otherwise (continuous linear interpolation):
+
+```
+t = (A - 100,000,000,000) / (500,000,000,000 - 100,000,000,000)
+rate(A) = 0.0005% - t * (0.0005% - 0.0003%)
+```
 
 Formula:
 ```
-service_fee_raw = amount × 0.0005%
+service_fee_raw = A × rate(A)
 ```
 
-### 2.3 Service Fee Cap (Required)
-To guarantee enterprise competitiveness and prevent large transfers from becoming expensive when HONEY price rises,
-the service fee is **capped**.
+### 2.3 Service Fee Hard Cap (Required)
+To guarantee enterprise competitiveness and protect large transfers, the service fee is capped by a maximum rate:
 
-- **Cap rate:** `0.0017%` (decimal `0.00001`)
+- **Cap rate:** `0.000999%` (decimal `0.00000999`)
 
 Formula:
 ```
-service_fee_cap = amount × 0.00001
+service_fee_cap = A × 0.00000999
 service_fee = min(service_fee_raw, service_fee_cap)
 ```
 
-> **Interpretation:** For a $1,000,000 USD-equivalent transfer, the service fee will not exceed ~$17 USD-equivalent
-> (excluding the base fee), regardless of HONEY’s market price.
+> Interpretation (value-stable framing): for a $1,000,000 USD-equivalent transfer, the service fee will not exceed ~$9.99 USD-equivalent (assuming 1 HNY = $1 for illustration of the cap promise).
 
 ### 2.4 Priority Tip (Optional)
-A voluntary extra fee used to accelerate inclusion or replacement (RBF / cancel). Priority tips are **additive** and optional.
+A voluntary extra fee used to accelerate inclusion or replacement (RBF / cancel). Priority tips are additive and optional.
 
 - **priority_tip ≥ 0**
-- Wallets may offer UI presets (Slow/Normal/Fast) as a convenience.
-- Priority tips are **not** part of the service-fee cap unless explicitly enforced by node policy.
+- Users may set any value (no protocol cap in this spec)
+- Priority tips are **not** part of the service-fee cap unless explicitly enforced by node policy
 
 ---
 
 ## 3. Total Fee Formula
 
 ```
-total_fee = base_fee + service_fee + priority_tip
+total_fee = base_gas + service_fee + priority_tip
 ```
 
 Where:
-- `base_fee = 0.000001 HONEY`
-- `service_fee = min(amount × 0.0005% + base_fee)`
+- `base_gas = 0.00000001 HNY`
+- `service_fee = min(A × rate(A), A × 0.00000999)`
 - `priority_tip` is user-selected (optional)
 
 ---
@@ -98,40 +110,41 @@ Notes:
 
 ---
 
-## 5. Examples
+## 5. Examples (Illustrative)
 
-### Example A — Small Transfer (17 HONEY, no priority tip)
+### Example A — Small Transfer (17 HNY, no priority tip)
+Assume `A = 17`:
 
-- Base fee: `0.000001`
-- Service fee: `17 × 0.0005% = 0.000085`
+- Base gas: `0.00000001`
+- Service fee: `17 × 0.000005 = 0.000085`
 - Priority tip: `0`
-- **Total fee:** `0.000086 HONEY`
+- **Total fee:** `0.00008501 HNY`
 
-### Example B — Large Transfer (33,333,333 HONEY, ≈ $1,000,000 at $0.03/HONEY)
+### Example B — $1,000,000 Transfer (assuming 1 HNY = $1)
+Assume `A = 1,000,000` (so `rate(A)=0.0005%`):
 
-- Service fee: `33,333,333 × 0.0005% ≈ 166.666665 HONEY`
-- USD-equivalent fee: `166.666665 × $0.03 ≈ $5.00`
-- Cap does not apply here (raw service fee < cap)
+- Service fee raw: `1,000,000 × 0.000005 = 5 HNY` → `$5.00`
+- Service fee cap: `1,000,000 × 0.00000999 = 9.99 HNY` → `$9.99`
+- **Service fee charged:** `5 HNY` (cap does not trigger)
 
-### Example C — High Price Scenario (HONEY = $1,000,000,000 transfer)
+### Example C — Past Curve Floor
+Assume `A = 600,000,000,000` (so `rate(A)=0.0003%`):
 
-- Amount: `1,000,000,000 HONEY`
-- Raw service fee: `1,000,000,000 × 0.0005% = 5,000 HONEY` (=$5,000)
-- **Capped service fee:** `1,000,000,000 × 0.0017 = 17,000 HONEY` (cap rate)
-- This example illustrates the *rate cap mechanics*; the intended *USD ceiling* depends on the USD-equivalent amount sent.
-  See `apps/docs/fees/FEE_SPEC.md` for the value-stable framing and examples.
+- Service fee: `600,000,000,000 × 0.000003 = 1,800,000 HNY`
+- Cap check: `600,000,000,000 × 0.00000999 = 5,994,000 HNY`
+- **Service fee charged:** `1,800,000 HNY` (cap does not trigger)
 
 ---
 
 ## 6. Mempool Policy Hooks (Non-Consensus)
 
 Nodes MAY enforce additional policy rules, such as:
-- Minimum total fee (base fee already enforces a floor)
+- Minimum *effective fee* for inclusion under heavy load
 - Minimum priority tip for RBF/cancel operations
-- Rate limits for free faucets / sponsored gas
+- Rate limits for faucets / sponsored gas
 - DoS protections (per-IP, per-address)
 
-These are *policy* controls and should not change the consensus fee formula above.
+These are policy controls and should not change the consensus fee formula above.
 
 ---
 
@@ -139,7 +152,7 @@ These are *policy* controls and should not change the consensus fee formula abov
 
 Apps MAY subsidize fees for eligible users (e.g., membership tiers):
 
-- Platform may cover base fee and/or service fee and/or priority tip
+- Platform may cover base gas and/or service fee and/or priority tip
 - User still signs the transaction normally
 - Subsidy rules are application-level and do not change consensus rules
 
@@ -156,4 +169,4 @@ Any changes require:
 
 ---
 
-**Honey.net fees are designed to be predictable, micro-payment friendly, and enterprise-competitive.**
+**Honey.net fees are designed to be predictable, micropayment-friendly, and enterprise-competitive.**

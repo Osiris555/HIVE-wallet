@@ -27,15 +27,15 @@ A transaction MUST be rejected if any rule fails.
 ✔ Correct nonce
 ✔ Sufficient balance (amount + maxFee)
 ✔ GasLimit ≥ intrinsic gas
-✔ maxFee ≥ baseFee
-✔ priorityFee ≥ MIN_PRIORITY_FEE
+✔ maxFee ≥ baseGas
+✔ priorityFee ≥ 0 (user-controlled)
 ✔ Wallet not rate-limited
 
 3️⃣ Gas Rules (LOCKED)
 Minimums
 Parameter	Value
-Min base gas	0.000001 HNY
-Min priority fee	0.0000002 HNY
+Base gas	0.00000001 HNY (1 Honey Cone)
+Min priority fee	0 HNY (user-controlled)
 Max gas per tx	BlockGasLimit × 0.2
 
 This allows microtransactions even at trillion-dollar network scale.
@@ -44,7 +44,7 @@ This allows microtransactions even at trillion-dollar network scale.
 
 If:
 
-maxFee < current baseFee
+maxFee < current baseGas
 
 
 ➡ Transaction is rejected immediately
