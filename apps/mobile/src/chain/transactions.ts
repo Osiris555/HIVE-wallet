@@ -352,6 +352,13 @@ export async function getTransactions(wallet: string): Promise<Transaction[]> {
   return out?.transactions || out?.txs || [];
 }
 
+export async function getTransactionById(txid: string): Promise<Transaction | null> {
+  const id = String(txid || "").trim();
+  if (!id) return null;
+  const out = await getJson(`/tx/${encodeURIComponent(id)}`);
+  return out?.tx || null;
+}
+
 function signMessage(message: string, secretKeyB64: string) {
   const msgBytes = naclUtil.decodeUTF8(message);
   const sk = b64ToU8(secretKeyB64);

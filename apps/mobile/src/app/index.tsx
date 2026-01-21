@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { Ionicons } from "@expo/vector-icons";
+import { router } from "expo-router";
 import {
   Image,
   KeyboardAvoidingView,
@@ -22,6 +23,7 @@ import {
   cancelPending,
   computeServiceFee,
   ensureWalletId,
+  getAccount,
   getBalance,
   getChainStatus,
   getTransactions,
@@ -191,6 +193,13 @@ function shortAddr(a: string) {
   return `${a.slice(0, 8)}…${a.slice(-6)}`;
 }
 
+function shortTxId(id: string) {
+  const s = String(id || "");
+  if (!s) return "";
+  if (s.length <= 16) return s;
+  return s.slice(0, 10) + "…" + s.slice(-10);
+}
+
 function formatTime(ms: number): string {
   if (!ms || ms <= 0) return "—";
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -358,6 +367,7 @@ export default function Index() {
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [quote, setQuote] = useState<any>(null);
+  const [expectedNonce, setExpectedNonce] = useState<number | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
 
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1143,6 +1153,8 @@ export default function Index() {
                 const amt = Number(tx?.amount || 0);
                 const signedAmount = direction === "Sent" ? -amt : direction === "Received" ? amt : amt;
 
+                const txid = String(tx?.id || tx?.hash || "");
+
                 return (
                   <View
                     key={String(tx?.id || idx)}
@@ -1170,6 +1182,50 @@ export default function Index() {
                     <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
                       Nonce: {String(tx?.nonce ?? "—")}
                     </Text>
+
+                    {tx?.blockHeight != null ? (
+                      <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                        Block: {String(tx.blockHeight)}
+                      </Text>
+                    ) : null}
+
+                    <Pressable
+                      onPress={async () => {
+                        if (!txid) return;
+                        try {
+                          await Clipboard.setStringAsync(txid);
+                          showToast("TxID copied");
+                        } catch {}
+                      }}
+                    >
+                      <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                        TxID: {shortTxId(txid)}
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => {
+                        if (!txid) return;
+                        try {
+                          router.push(`/tx/${encodeURIComponent(txid)}`);
+                        } catch {
+                          setMessage("Could not open details screen");
+                        }
+                      }}
+                      hitSlop={12}
+                      style={{
+                        marginTop: 10,
+                        alignSelf: "flex-start",
+                        paddingVertical: 8,
+                        paddingHorizontal: 12,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: T.accent,
+                        backgroundColor: "rgba(0,0,0,0.25)",
+                      }}
+                    >
+                      <Text style={{ color: T.accent, marginTop: 4, fontWeight: "900" }}>View details</Text>
+                    </Pressable>
 
                     {isPending && (
                       <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
@@ -1318,6 +1374,10 @@ export default function Index() {
                 Amount: {quote.baseAmt}
               </Text>
 
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+                Nonce: {String(expectedNonce ?? "—")}
+              </Text>
+
               <View style={{ height: 12 }} />
               <Text style={{ color: T.sub, fontWeight: "800" }}>
                 Gas fee: {fmt8(Number(quote.chosenGas || 0))}
@@ -1327,6 +1387,9 @@ export default function Index() {
               </Text>
               <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
                 Total cost: {fmt8(Number(quote.totalCost || 0))}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+                TxID will appear after submission.
               </Text>
 
               <View style={{ height: 14 }} />

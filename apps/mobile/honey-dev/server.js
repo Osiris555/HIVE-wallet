@@ -571,6 +571,7 @@ app.get("/balance/:wallet", async (req, res) => {
       spendableBalance,
 
       // UI-friendly fields:
+      nonce: Number(acct.nonce),
       confirmed: Number(acct.balance),
       spendable: spendableBalance,
       feeVault: Number(Number(feeVaultBalance || 0).toFixed(8)),
@@ -618,6 +619,27 @@ app.get("/transactions/:wallet", async (req, res) => {
     res.status(500).json({ error: e.message || "transactions failed" });
   }
 });
+/* ======================
+   TX LOOKUP
+====================== */
+app.get("/tx/:txid", async (req, res) => {
+  try {
+    const txid = String(req.params.txid || "").trim();
+    if (!txid) return res.status(400).json({ error: "txid required" });
+
+    const tx =
+      (await get(db, `SELECT * FROM transactions WHERE id = ?`, [txid])) ||
+      (await get(db, `SELECT * FROM transactions WHERE hash = ?`, [txid]));
+
+    if (!tx) return res.status(404).json({ error: "tx not found", txid });
+
+    return res.json({ tx });
+  } catch (e) {
+    console.error("GET /tx error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
 
 /* ======================
    MINT (SIGNED)
