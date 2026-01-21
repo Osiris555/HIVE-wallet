@@ -31,11 +31,14 @@ import {
   quoteSend,
   rbfReplacePending,
   send,
+  stake,
+  unstake,
+  getStakingPositions,
   parseAmount8,
   getAccount,
   getTransactionById,
 } from "../chain/transactions";
-import type { Transaction as TxLike } from "../chain/transactions";
+import type { Transaction as TxLike, StakingPosition } from "../chain/transactions";
 
 /* ======================
    Web-safe KV storage
@@ -279,7 +282,7 @@ export default function Index() {
      Core state (NO DUPLICATES)
   ====================== */
   const [theme, setTheme] = useState<ThemeKey>("matrix");
-  const MIN_GAS_FEE_FLOOR = 0.000001; // hard minimum (chain rule / preflight rule)
+  const MIN_GAS_FEE_FLOOR = ONE_SAT; // base gas (1 Honey Cone)
   const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
 
   type SpeedKey = "slow" | "normal" | "fast";
@@ -327,6 +330,14 @@ export default function Index() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [quote, setQuote] = useState<any>(null);
   const [sendBusy, setSendBusy] = useState(false);
+
+  // Staking
+  const [stakingPositions, setStakingPositions] = useState<StakingPosition[]>([]);
+  const [stakingApr, setStakingApr] = useState<number>(0);
+  const [stakeAmountText, setStakeAmountText] = useState<string>("");
+  const [stakeLockDaysText, setStakeLockDaysText] = useState<string>("30");
+  const [stakeBusy, setStakeBusy] = useState<boolean>(false);
+  const [unstakeBusyId, setUnstakeBusyId] = useState<string | null>(null);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -489,11 +500,23 @@ async function pasteRecipientFromClipboard() {
     setTxs(list || []);
   }
 
+  async function loadStaking() {
+    if (!wallet) return;
+    try {
+      const res = await getStakingPositions(wallet);
+      setStakingPositions(res?.positions || []);
+      setStakingApr(Number(res?.apr || 0));
+    } catch {
+      // ignore staking load errors in early dev
+    }
+  }
+
   async function hardRefreshAll() {
     try {
       await refreshStatus();
       await loadBalance();
       await loadTxs();
+      await loadStaking();
       setLastRefresh(Date.now());
     } catch (e: any) {
       setMessage(e?.message || "Refresh failed");
@@ -529,6 +552,7 @@ async function pasteRecipientFromClipboard() {
         await refreshStatus();
         await loadBalance();
         await loadTxs();
+        await loadStaking();
         setLastRefresh(Date.now());
       } catch {}
     }, 2500);
@@ -631,6 +655,51 @@ async function pasteRecipientFromClipboard() {
       setMessage(`Mint failed: ${e?.message || "Unknown error"}`);
     } finally {
       setMintBusy(false);
+    }
+  }
+
+  async function handleStake() {
+    if (stakeBusy) return;
+    const amtTextClean = normalizeAmountText(stakeAmountText);
+    const amtCheck = parseAmount8(amtTextClean);
+    if (!amtCheck.ok || Number(amtCheck.value) <= 0) {
+      setMessage("Staking amount is required.");
+      return;
+    }
+    const lockDays = Number(String(stakeLockDaysText || "").trim());
+    if (!Number.isInteger(lockDays) || lockDays <= 0) {
+      setMessage("Lock days must be a positive integer.");
+      return;
+    }
+    const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
+    const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+
+    setStakeBusy(true);
+    try {
+      await stake({ amount: Number(amtCheck.value), lockDays, gasFee: chosenGas });
+      setMessage("Stake submitted ✅");
+      setStakeAmountText("");
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Stake failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setStakeBusy(false);
+    }
+  }
+
+  async function handleUnstake(positionId: string) {
+    if (unstakeBusyId) return;
+    const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
+    const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+    setUnstakeBusyId(positionId);
+    try {
+      await unstake({ positionId, gasFee: chosenGas });
+      setMessage("Unstake submitted ✅");
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Unstake failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setUnstakeBusyId(null);
     }
   }
 
@@ -1092,6 +1161,116 @@ async function pasteRecipientFromClipboard() {
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
             Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
           </Text>
+        </Card>
+
+        {/* Staking */}
+        <Card T={T} style={{ marginTop: 12 }}>
+          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Staking</Text>
+
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+            APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}
+          </Text>
+
+          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
+          <TextInput
+            value={stakeAmountText}
+            onChangeText={(t) => setStakeAmountText(normalizeAmountText(t))}
+            onFocus={() => (editingRef.current = true)}
+            onBlur={() => (editingRef.current = false)}
+            placeholder="0.00"
+            placeholderTextColor={"rgba(255,255,255,0.35)"}
+            keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+            style={{
+              marginTop: 8,
+              paddingVertical: 12,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              color: T.text,
+              backgroundColor: T.glass2,
+              fontWeight: "800",
+            }}
+          />
+
+          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Lock days</Text>
+          <TextInput
+            value={stakeLockDaysText}
+            onChangeText={(t) => setStakeLockDaysText(String(t).replace(/[^0-9]/g, ""))}
+            onFocus={() => (editingRef.current = true)}
+            onBlur={() => (editingRef.current = false)}
+            placeholder="30"
+            placeholderTextColor={"rgba(255,255,255,0.35)"}
+            keyboardType={Platform.OS === "web" ? "default" : "number-pad"}
+            style={{
+              marginTop: 8,
+              paddingVertical: 12,
+              paddingHorizontal: 12,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: T.border,
+              color: T.text,
+              backgroundColor: T.glass2,
+              fontWeight: "800",
+            }}
+          />
+
+          <View style={{ height: 12 }} />
+          <Button
+            T={T}
+            label={stakeBusy ? "Staking…" : "Stake"}
+            variant="purple"
+            disabled={stakeBusy}
+            onPress={handleStake}
+          />
+
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+            Tip: Stake is confirmed on the next block (like a tx).
+          </Text>
+
+          {stakingPositions.length > 0 && (
+            <View style={{ marginTop: 14, gap: 10 }}>
+              <Text style={{ color: T.text, fontWeight: "900" }}>Positions</Text>
+              {stakingPositions.slice(0, 6).map((p) => {
+                const locked = !p.canUnstake;
+                const unlockStr = new Date(p.unlockAtMs).toLocaleString();
+                const label = locked
+                  ? `Locked until ${unlockStr}`
+                  : "Unstake";
+                const busy = unstakeBusyId === p.id;
+                return (
+                  <View
+                    key={p.id}
+                    style={{
+                      padding: 12,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                      backgroundColor: T.glass2,
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>
+                      {p.principal} HNY
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      Reward: {p.rewardAccrued} • Lock: {p.lockDays} days
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4 }}>
+                      Status: {p.status}
+                    </Text>
+                    <View style={{ height: 10 }} />
+                    <Button
+                      T={T}
+                      label={busy ? "Submitting…" : label}
+                      variant={locked ? "outline" : "green"}
+                      disabled={locked || busy}
+                      onPress={() => handleUnstake(p.id)}
+                    />
+                  </View>
+                );
+              })}
+            </View>
+          )}
         </Card>
 
         {/* Transactions */}

@@ -81,6 +81,7 @@ async function initDb(db) {
         nonce INTEGER NOT NULL,
         gasFee REAL NOT NULL,
         serviceFee REAL NOT NULL DEFAULT 0,
+        metaJson TEXT,
         status TEXT NOT NULL,
         failReason TEXT,
         expiresAtMs INTEGER,
@@ -100,7 +101,32 @@ async function initDb(db) {
     if (!(await columnExists(db, "transactions", "serviceFee"))) {
       await run(db, `ALTER TABLE transactions ADD COLUMN serviceFee REAL NOT NULL DEFAULT 0;`);
     }
+    if (!(await columnExists(db, "transactions", "metaJson"))) {
+      await run(db, `ALTER TABLE transactions ADD COLUMN metaJson TEXT;`);
+    }
   }
+
+  // staking positions
+  await run(
+    db,
+    `CREATE TABLE IF NOT EXISTS staking_positions (
+      id TEXT PRIMARY KEY,
+      wallet TEXT NOT NULL,
+      principal REAL NOT NULL,
+      lockDays INTEGER NOT NULL,
+      startMs INTEGER NOT NULL,
+      unlockAtMs INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'staked',
+      rewardPaid REAL NOT NULL DEFAULT 0,
+      unstakedAtMs INTEGER,
+      stakeTxId TEXT,
+      unstakeTxId TEXT,
+      createdAtMs INTEGER NOT NULL
+    );`
+  );
+
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_stake_wallet ON staking_positions(wallet);`);
+  await run(db, `CREATE INDEX IF NOT EXISTS idx_stake_status ON staking_positions(status);`);
 
   // blocks
   await run(

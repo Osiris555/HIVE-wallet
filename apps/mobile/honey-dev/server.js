@@ -29,7 +29,8 @@ const MAX_PENDING_PER_WALLET = 20;
 const MAX_TXS_PER_WALLET_PER_BLOCK = 5;
 
 // Fees (base)
-const BASE_MIN_GAS_FEE = 0.000001;
+// Base gas is the smallest on-chain unit (1 Honey Cone).
+const BASE_MIN_GAS_FEE = 0.00000001;
 // 0.005% = 0.00005
 const SERVICE_FEE_RATE = 0.00005;
 
@@ -38,6 +39,11 @@ const ONE_SAT = 0.00000001;
 
 const CHAIN_ID = process.env.HIVE_CHAIN_ID || "hny-devnet-1";
 const FEE_VAULT = "HNY_FEE_VAULT";
+const STAKE_VAULT = "HNY_STAKE_VAULT";
+
+// Staking (simple testnet model)
+// NOTE: This is a wallet-facing feature for testnet/devnet. Mainnet economics can replace this later.
+const STAKING_APR = Number(process.env.HNY_STAKING_APR || 0.05); // 5% APR default
 
 const db = openDb();
 
@@ -64,7 +70,7 @@ function deriveWalletFromPubKeyB64(pubB64) {
 
 /**
  * Signed envelope:
- * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp
+ * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp|metaJson
  */
 function canonicalSignedMessage({
   chainId,
@@ -77,6 +83,7 @@ function canonicalSignedMessage({
   serviceFee,
   expiresAtMs,
   timestamp,
+  metaJson,
 }) {
   return [
     String(chainId),
@@ -89,11 +96,27 @@ function canonicalSignedMessage({
     fmt8(serviceFee),
     String(expiresAtMs),
     String(timestamp),
+    String(metaJson ?? ""),
   ].join("|");
 }
 
 function expectedServiceFee(amount) {
   return Number((Number(amount) * SERVICE_FEE_RATE).toFixed(8));
+}
+
+function daysToMs(days) {
+  return Number(days) * 24 * 60 * 60 * 1000;
+}
+
+function computeStakingReward(principal, startMs, endMs) {
+  const p = Number(principal);
+  const s = Number(startMs);
+  const e = Number(endMs);
+  if (!Number.isFinite(p) || p <= 0) return 0;
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 0;
+  const yearMs = 365 * 24 * 60 * 60 * 1000;
+  const r = p * STAKING_APR * ((e - s) / yearMs);
+  return Number(r.toFixed(8));
 }
 
 async function getMempoolSize() {
@@ -156,7 +179,7 @@ async function getPendingOutgoingCost(wallet) {
     db,
     `SELECT COALESCE(SUM(amount + gasFee + serviceFee), 0) AS s
      FROM transactions
-     WHERE status='pending' AND type='send' AND fromWallet=?`,
+     WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?`,
     [wallet]
   );
   return Number(row?.s || 0);
@@ -168,9 +191,11 @@ async function getPendingDelta(wallet) {
     `SELECT
       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?), 0) +
       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='send' AND toWallet=?), 0) -
-      COALESCE((SELECT SUM(amount + gasFee + serviceFee) FROM transactions WHERE status='pending' AND type='send' AND fromWallet=?), 0)
+      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='unstake' AND toWallet=?), 0) +
+      COALESCE((SELECT SUM(amount + gasFee + serviceFee) FROM transactions WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?), 0) -
+      COALESCE((SELECT SUM(gasFee + serviceFee) FROM transactions WHERE status='pending' AND type='unstake' AND fromWallet=?), 0)
     AS d`,
-    [wallet, wallet, wallet]
+    [wallet, wallet, wallet, wallet, wallet]
   );
   return Number(row?.d || 0);
 }
@@ -189,6 +214,14 @@ async function countPendingForWallet({ type, wallet }) {
       db,
       `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?`,
       [wallet]
+    );
+    return Number(r?.c || 0);
+  }
+  if (type === "stake" || type === "unstake") {
+    const r = await get(
+      db,
+      `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type=? AND fromWallet=?`,
+      [type, wallet]
     );
     return Number(r?.c || 0);
   }
@@ -213,10 +246,10 @@ function verifySignature({ walletPubKeyB64, message, signatureB64 }) {
   return { ok: true };
 }
 
-function createTx({ type, from = null, to, amount, nonce, gasFee, serviceFee, timestampMs, expiresAtMs }) {
+function createTx({ type, from = null, to, amount, nonce, gasFee, serviceFee, metaJson = null, timestampMs, expiresAtMs }) {
   const id = crypto.randomUUID();
   const hash = sha256Hex(
-    `${CHAIN_ID}:${id}:${type}:${from ?? ""}:${to}:${fmt8(amount)}:${nonce}:${fmt8(gasFee)}:${fmt8(serviceFee)}:${expiresAtMs}:${timestampMs}`
+    `${CHAIN_ID}:${id}:${type}:${from ?? ""}:${to}:${fmt8(amount)}:${nonce}:${fmt8(gasFee)}:${fmt8(serviceFee)}:${expiresAtMs}:${timestampMs}:${metaJson ?? ""}`
   );
 
   return {
@@ -229,6 +262,7 @@ function createTx({ type, from = null, to, amount, nonce, gasFee, serviceFee, ti
     nonce,
     gasFee,
     serviceFee,
+    metaJson,
     status: "pending",
     failReason: null,
     expiresAtMs,
@@ -242,8 +276,8 @@ async function insertTx(tx) {
   await run(
     db,
     `INSERT INTO transactions
-     (id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, status, failReason, expiresAtMs, blockHeight, blockHash, timestampMs)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, metaJson, status, failReason, expiresAtMs, blockHeight, blockHash, timestampMs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       tx.id,
       tx.hash,
@@ -254,6 +288,7 @@ async function insertTx(tx) {
       tx.nonce,
       tx.gasFee,
       tx.serviceFee,
+      tx.metaJson,
       tx.status,
       tx.failReason,
       tx.expiresAtMs,
@@ -282,7 +317,7 @@ async function getLatestBlock() {
 async function buildBlockWithRules() {
   const pending = await all(
     db,
-    `SELECT id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, expiresAtMs, timestampMs
+    `SELECT id, hash, type, fromWallet, toWallet, amount, nonce, gasFee, serviceFee, metaJson, expiresAtMs, timestampMs
      FROM transactions
      WHERE status='pending'
      ORDER BY (gasFee + serviceFee) DESC, timestampMs ASC
@@ -299,7 +334,7 @@ async function buildBlockWithRules() {
 
   await run(db, "BEGIN TRANSACTION");
   try {
-    const wallets = new Set([FEE_VAULT]);
+    const wallets = new Set([FEE_VAULT, STAKE_VAULT]);
     for (const tx of pending) {
       if (tx.toWallet) wallets.add(tx.toWallet);
       if (tx.fromWallet) wallets.add(tx.fromWallet);
@@ -397,6 +432,122 @@ async function buildBlockWithRules() {
           `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`,
           [height, "TBD", tx.id]
         );
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
+      if (tx.type === "stake") {
+        const from = tx.fromWallet;
+        const to = tx.toWallet;
+        if (!from || to !== STAKE_VAULT) {
+          await failTx(tx.id, height, "invalid_stake_vault");
+          continue;
+        }
+        if (isOverLimit(from)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+        const totalCost = amt + totalFee;
+        const fromBal = working[from] || 0;
+        if (fromBal < totalCost) {
+          await failTx(tx.id, height, "insufficient_confirmed_at_block");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        const lockDays = Number(meta?.lockDays);
+        if (!Number.isInteger(lockDays) || lockDays <= 0 || lockDays > 3650) {
+          await failTx(tx.id, height, "invalid_lock_days");
+          continue;
+        }
+
+        bump(from);
+        working[from] = fromBal - totalCost;
+        working[STAKE_VAULT] = (working[STAKE_VAULT] || 0) + amt;
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+        const startMs = ts;
+        const unlockAtMs = startMs + daysToMs(lockDays);
+        await run(
+          db,
+          `INSERT INTO staking_positions
+           (id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid, unstakedAtMs, stakeTxId, unstakeTxId, createdAtMs)
+           VALUES (?, ?, ?, ?, ?, ?, 'staked', 0, NULL, ?, NULL, ?)`,
+          [tx.id, from, amt, lockDays, startMs, unlockAtMs, tx.id, ts]
+        );
+
+        await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
+      if (tx.type === "unstake") {
+        const wallet = tx.fromWallet;
+        const to = tx.toWallet;
+        if (!wallet || to !== wallet) {
+          await failTx(tx.id, height, "invalid_unstake_to");
+          continue;
+        }
+        if (isOverLimit(wallet)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        const positionId = String(meta?.positionId || "").trim();
+        if (!positionId) {
+          await failTx(tx.id, height, "missing_position_id");
+          continue;
+        }
+
+        const pos = await get(db, `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status FROM staking_positions WHERE id=?`, [positionId]);
+        if (!pos || pos.wallet !== wallet) {
+          await failTx(tx.id, height, "position_not_found");
+          continue;
+        }
+        if (String(pos.status) !== 'staked') {
+          await failTx(tx.id, height, "position_not_staked");
+          continue;
+        }
+        if (ts < Number(pos.unlockAtMs)) {
+          await failTx(tx.id, height, "position_locked");
+          continue;
+        }
+
+        const principal = Number(pos.principal);
+        const reward = computeStakingReward(principal, Number(pos.startMs), ts);
+        const payout = Number((principal + reward).toFixed(8));
+
+        // Wallet pays only fees; payout comes from stake vault.
+        const walletBal = working[wallet] || 0;
+        if (walletBal < totalFee) {
+          await failTx(tx.id, height, "insufficient_confirmed_for_fees");
+          continue;
+        }
+
+        const stakeVaultBal = working[STAKE_VAULT] || 0;
+        if (stakeVaultBal < payout) {
+          await failTx(tx.id, height, "stake_vault_insufficient");
+          continue;
+        }
+
+        bump(wallet);
+        working[wallet] = walletBal - totalFee + payout;
+        working[STAKE_VAULT] = stakeVaultBal - payout;
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+        await run(db, `UPDATE staking_positions SET status='unstaked', rewardPaid=?, unstakedAtMs=?, unstakeTxId=? WHERE id=?`, [reward, ts, tx.id, positionId]);
+        await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
         confirmedIds.push(tx.id);
         continue;
       }
@@ -820,6 +971,228 @@ app.post("/send", async (req, res) => {
 });
 
 /* ======================
+   STAKING (SIGNED)
+====================== */
+
+app.get("/staking/positions/:wallet", async (req, res) => {
+  try {
+    const wallet = String(req.params.wallet || "").trim();
+    if (!wallet) return res.status(400).json({ error: "Missing wallet" });
+
+    const rows = await all(
+      db,
+      `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid, unstakedAtMs, stakeTxId, unstakeTxId
+       FROM staking_positions
+       WHERE wallet=?
+       ORDER BY startMs DESC`,
+      [wallet]
+    );
+
+    const ts = now();
+    const positions = rows.map((r) => {
+      const principal = Number(r.principal);
+      const startMs = Number(r.startMs);
+      const unlockAtMs = Number(r.unlockAtMs);
+      const status = String(r.status);
+      const accrued = status === 'staked' ? computeStakingReward(principal, startMs, ts) : Number(r.rewardPaid || 0);
+      return {
+        id: r.id,
+        wallet: r.wallet,
+        principal: Number(principal.toFixed(8)),
+        lockDays: Number(r.lockDays),
+        startMs,
+        unlockAtMs,
+        status,
+        rewardAccrued: Number(accrued.toFixed(8)),
+        rewardPaid: Number(Number(r.rewardPaid || 0).toFixed(8)),
+        unstakedAtMs: r.unstakedAtMs,
+        stakeTxId: r.stakeTxId,
+        unstakeTxId: r.unstakeTxId,
+        canUnstake: status === 'staked' && ts >= unlockAtMs,
+      };
+    });
+
+    return res.json({ success: true, chainId: CHAIN_ID, wallet, apr: STAKING_APR, positions });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "staking positions failed" });
+  }
+});
+
+app.post("/stake", async (req, res) => {
+  try {
+    const { wallet, amount, lockDays, nonce, timestamp, signature } = req.body;
+
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    if (!from) return res.status(400).json({ error: "Missing wallet" });
+
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "Amount must be positive" });
+    const ld = Number(lockDays);
+    if (!Number.isInteger(ld) || ld <= 0 || ld > 3650) return res.status(400).json({ error: "Invalid lockDays" });
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = 0;
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) return res.status(400).json({ error: "Fee too low", minGasFee });
+
+    const ttlMax = now() + TX_TTL_MS * 2;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
+      return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
+    }
+
+    await ensureAccountExists(from);
+    const acct = await getAccountRow(from);
+
+    // accept only exact nonce for now
+    if (nonce !== acct.nonce) return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+
+    const pendingCount = await countPendingForWallet({ type: "stake", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
+    }
+
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const spendable = Number(acct.balance) - pendingOutgoingCost;
+    const totalCost = Number((amt + gasFee + serviceFee).toFixed(8));
+    if (spendable < totalCost) {
+      return res.status(400).json({ error: "Insufficient spendable balance", spendableBalance: spendable, required: totalCost });
+    }
+
+    const metaJson = JSON.stringify({ lockDays: ld });
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "stake",
+      from,
+      to: STAKE_VAULT,
+      amount: amt,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "stake",
+      from,
+      to: STAKE_VAULT,
+      amount: amt,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+    await insertTx(tx);
+    return res.json({ success: true, chainId: CHAIN_ID, tx });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "stake failed" });
+  }
+});
+
+app.post("/unstake", async (req, res) => {
+  try {
+    const { wallet, positionId, nonce, timestamp, signature } = req.body;
+
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    if (!from) return res.status(400).json({ error: "Missing wallet" });
+    const pid = String(positionId || "").trim();
+    if (!pid) return res.status(400).json({ error: "Missing positionId" });
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const pos = await get(db, `SELECT id, wallet, principal, startMs, unlockAtMs, status FROM staking_positions WHERE id=?`, [pid]);
+    if (!pos || pos.wallet !== from) return res.status(404).json({ error: "Position not found" });
+    if (String(pos.status) !== 'staked') return res.status(400).json({ error: "Position is not staked" });
+    if (now() < Number(pos.unlockAtMs)) return res.status(400).json({ error: "Position is still locked", unlockAtMs: Number(pos.unlockAtMs) });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = 0;
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) return res.status(400).json({ error: "Fee too low", minGasFee });
+
+    const ttlMax = now() + TX_TTL_MS * 2;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
+      return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
+    }
+
+    await ensureAccountExists(from);
+    const acct = await getAccountRow(from);
+    if (nonce !== acct.nonce) return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+
+    const pendingCount = await countPendingForWallet({ type: "unstake", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
+    }
+
+    // Wallet must be able to pay fees.
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const spendable = Number(acct.balance) - pendingOutgoingCost;
+    if (spendable < gasFee + serviceFee) {
+      return res.status(400).json({ error: "Insufficient spendable balance for fees", spendableBalance: spendable, required: gasFee + serviceFee });
+    }
+
+    const principal = Number(pos.principal);
+    const reward = computeStakingReward(principal, Number(pos.startMs), now());
+    const payout = Number((principal + reward).toFixed(8));
+
+    const metaJson = JSON.stringify({ positionId: pid });
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "unstake",
+      from,
+      to: from,
+      amount: payout,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "unstake",
+      from,
+      to: from,
+      amount: payout,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+    await insertTx(tx);
+    return res.json({ success: true, chainId: CHAIN_ID, tx, payout, reward });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "unstake failed" });
+  }
+});
+
+/* ======================
    RBF REPLACE (SIGNED)
    - Replaces an existing *pending* send with the same (fromWallet, nonce)
    - Requires higher gasFee than the pending tx
@@ -1049,6 +1422,7 @@ app.post("/cancel", async (req, res) => {
   try {
     await initDb(db);
     await ensureAccountExists(FEE_VAULT);
+    await ensureAccountExists(STAKE_VAULT);
     await startBlockProducer();
 
     app.listen(PORT, () => {

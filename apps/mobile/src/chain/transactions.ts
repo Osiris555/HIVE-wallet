@@ -5,7 +5,7 @@ import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import Constants from "expo-constants";
 
-export type TxType = "mint" | "send";
+export type TxType = "mint" | "send" | "stake" | "unstake";
 
 export type Transaction = {
   id: string;
@@ -24,6 +24,22 @@ export type Transaction = {
   blockHash?: string | null;
   expiresAtMs?: number | null;
   timestamp: number;
+};
+
+export type StakingPosition = {
+  id: string;
+  wallet: string;
+  principal: number;
+  lockDays: number;
+  startMs: number;
+  unlockAtMs: number;
+  status: "staked" | "unstaked";
+  rewardAccrued: number;
+  rewardPaid: number;
+  unstakedAtMs?: number | null;
+  stakeTxId?: string | null;
+  unstakeTxId?: string | null;
+  canUnstake: boolean;
 };
 
 // NOTE: Boost/Cancel support
@@ -201,7 +217,7 @@ async function randomBytes(count: number): Promise<Uint8Array> {
 
 /**
  * MUST match server:
- * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp
+ * chainId|type|from|to|amount|nonce|gasFee|serviceFee|expiresAtMs|timestamp|metaJson
  */
 function canonicalSignedMessage(params: {
   chainId: string;
@@ -214,6 +230,7 @@ function canonicalSignedMessage(params: {
   serviceFee: number;
   expiresAtMs: number;
   timestamp: number;
+  metaJson?: string | null;
 }) {
   return [
     String(params.chainId),
@@ -226,6 +243,7 @@ function canonicalSignedMessage(params: {
     fmt8(params.serviceFee),
     String(params.expiresAtMs),
     String(params.timestamp),
+    String(params.metaJson ?? ""),
   ].join("|");
 }
 
@@ -387,6 +405,119 @@ export async function quoteSend(to: string, amount: number) {
     totalCost,
     status,
   };
+}
+
+export async function getStakingPositions(wallet?: string): Promise<{ positions: StakingPosition[]; apr: number }> {
+  const w = wallet || (await ensureWalletId());
+  const body = await getJson(`/staking/positions/${encodeURIComponent(w)}`);
+  return { positions: (body?.positions || []) as StakingPosition[], apr: Number(body?.apr || 0) };
+}
+
+export async function stake(params: { amount: number; lockDays: number; gasFee?: number }): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const amt = Number(params.amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
+  const lockDays = Number(params.lockDays);
+  if (!Number.isInteger(lockDays) || lockDays <= 0) throw makeError("Invalid lockDays", 400);
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const serviceFee = 0;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const metaJson = JSON.stringify({ lockDays });
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "stake",
+    from: wallet,
+    to: "HNY_STAKE_VAULT",
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/stake", {
+    chainId,
+    wallet,
+    amount: amt,
+    lockDays,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
+}
+
+export async function unstake(params: { positionId: string; gasFee?: number }): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const positionId = String(params.positionId || "").trim();
+  if (!positionId) throw makeError("Missing positionId", 400);
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const serviceFee = 0;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  // Server recomputes payout/reward; we just sign with a placeholder amount (0) and metaJson.
+  // However, the server requires the signed amount to match its computed payout.
+  // So we prefetch the position to estimate accrued reward and sign with that expected payout.
+  const { positions } = await getStakingPositions(wallet);
+  const pos = positions.find((p) => p.id === positionId);
+  const payout = Number(((pos?.principal || 0) + (pos?.rewardAccrued || 0)).toFixed(8));
+  if (!Number.isFinite(payout) || payout <= 0) throw makeError("Unable to compute unstake payout", 500, pos);
+
+  const metaJson = JSON.stringify({ positionId });
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "unstake",
+    from: wallet,
+    to: wallet,
+    amount: payout,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/unstake", {
+    chainId,
+    wallet,
+    positionId,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
 }
 
 export async function mint(): Promise<any> {
