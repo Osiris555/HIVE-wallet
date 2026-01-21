@@ -92,12 +92,6 @@ function canonicalSignedMessage({
   ].join("|");
 }
 
-
-function txIdFromMessage(message) {
-  // Deterministic txid = sha256(canonicalSignedMessage)
-  return sha256Hex(message);
-}
-
 function expectedServiceFee(amount) {
   return Number((Number(amount) * SERVICE_FEE_RATE).toFixed(8));
 }
@@ -220,22 +214,10 @@ function verifySignature({ walletPubKeyB64, message, signatureB64 }) {
 }
 
 function createTx({ type, from = null, to, amount, nonce, gasFee, serviceFee, timestampMs, expiresAtMs }) {
-  // Deterministic txid/hash based on the canonical signed message (must match client).
-  const msg = canonicalSignedMessage({
-    chainId: CHAIN_ID,
-    type,
-    from: from ?? "",
-    to,
-    amount,
-    nonce,
-    gasFee,
-    serviceFee,
-    expiresAtMs,
-    timestamp: timestampMs,
-  });
-
-  const id = txIdFromMessage(msg);
-  const hash = id;
+  const id = crypto.randomUUID();
+  const hash = sha256Hex(
+    `${CHAIN_ID}:${id}:${type}:${from ?? ""}:${to}:${fmt8(amount)}:${nonce}:${fmt8(gasFee)}:${fmt8(serviceFee)}:${expiresAtMs}:${timestampMs}`
+  );
 
   return {
     id,
@@ -571,7 +553,6 @@ app.get("/balance/:wallet", async (req, res) => {
       spendableBalance,
 
       // UI-friendly fields:
-      nonce: Number(acct.nonce),
       confirmed: Number(acct.balance),
       spendable: spendableBalance,
       feeVault: Number(Number(feeVaultBalance || 0).toFixed(8)),
@@ -619,27 +600,22 @@ app.get("/transactions/:wallet", async (req, res) => {
     res.status(500).json({ error: e.message || "transactions failed" });
   }
 });
-/* ======================
-   TX LOOKUP
-====================== */
+
+
 app.get("/tx/:txid", async (req, res) => {
   try {
     const txid = String(req.params.txid || "").trim();
-    if (!txid) return res.status(400).json({ error: "txid required" });
+    if (!txid) return res.status(400).json({ error: "Missing txid" });
 
-    const tx =
-      (await get(db, `SELECT * FROM transactions WHERE id = ?`, [txid])) ||
-      (await get(db, `SELECT * FROM transactions WHERE hash = ?`, [txid]));
+    const row = await get(db, "SELECT * FROM transactions WHERE id=? OR hash=? LIMIT 1", [txid, txid]);
+    if (!row) return res.status(404).json({ error: "Not found" });
 
-    if (!tx) return res.status(404).json({ error: "tx not found", txid });
-
-    return res.json({ tx });
+    // Normalize common field names for clients
+    res.json({ tx: row });
   } catch (e) {
-    console.error("GET /tx error:", e);
-    return res.status(500).json({ error: "server error" });
+    res.status(500).json({ error: e.message || "tx lookup failed" });
   }
 });
-
 
 /* ======================
    MINT (SIGNED)
@@ -695,11 +671,6 @@ app.post("/mint", async (req, res) => {
       expiresAtMs,
       timestamp,
     });
-
-    const txidExpected = txIdFromMessage(msg);
-    if (req.body?.txid && String(req.body.txid) !== txidExpected) {
-      return res.status(400).json({ error: "txid mismatch", expectedTxid: txidExpected, gotTxid: String(req.body.txid) });
-    }
 
     const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
     if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
@@ -791,11 +762,6 @@ app.post("/send", async (req, res) => {
       expiresAtMs,
       timestamp,
     });
-
-    const txidExpected = txIdFromMessage(msg);
-    if (req.body?.txid && String(req.body.txid) !== txidExpected) {
-      return res.status(400).json({ error: "txid mismatch", expectedTxid: txidExpected, gotTxid: String(req.body.txid) });
-    }
 
     const sigOk = verifySignature({ walletPubKeyB64: fromAcct.publicKeyB64, message: msg, signatureB64: signature });
     if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
@@ -914,34 +880,54 @@ app.post("/rbf", async (req, res) => {
     const sigOk = verifySignature({ walletPubKeyB64: fromAcct.publicKeyB64, message: msg, signatureB64: signature });
     if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
 
-    const txidExpected = txIdFromMessage(msg);
-    if (req.body?.txid && String(req.body.txid) !== txidExpected) {
-      return res.status(400).json({ error: "txid mismatch", expectedTxid: txidExpected, gotTxid: String(req.body.txid) });
-    }
-
-    // Mark the old pending tx as failed (replaced), then insert the replacement as a new tx (new txid).
-    await run(
+    // Must already exist in mempool.
+    const pending = await get(
       db,
-      `UPDATE transactions SET status='failed', failReason=? WHERE id=?`,
-      ["Replaced by RBF", pending.id]
+      `SELECT id, gasFee, amount, toWallet, serviceFee, expiresAtMs
+       FROM transactions
+       WHERE status='pending' AND type='send' AND fromWallet=? AND nonce=?
+       ORDER BY timestampMs DESC
+       LIMIT 1`,
+      [from, nonce]
     );
 
-    const tx = createTx({
-      type: "send",
-      from,
-      to,
-      amount: amt,
-      nonce,
-      gasFee,
-      serviceFee,
-      timestampMs: timestamp,
-      expiresAtMs,
-    });
+    if (!pending) return res.status(404).json({ error: "No pending tx found for nonce" });
+    if (Number(pending.expiresAtMs || 0) < now()) return res.status(410).json({ error: "Pending tx already expired" });
+    if (gasFee <= Number(pending.gasFee || 0)) {
+      return res.status(400).json({ error: "gasFee must be higher than current pending gasFee", currentGasFee: Number(pending.gasFee || 0) });
+    }
 
-    await insertTx(tx);
+    // Recheck spendable using *updated* cost for this nonce (replace old pending cost with new one).
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const oldTotalCost = Number(pending.amount || 0) + Number(pending.gasFee || 0) + Number(pending.serviceFee || 0);
+    const newTotalCost = amt + gasFee + serviceFee;
 
-    const inserted = await get(db, `SELECT * FROM transactions WHERE id=?`, [tx.id]);
-    return res.json({ success: true, chainId: CHAIN_ID, tx: inserted, replaced: { id: pending.id } });
+    const spendable = Number(fromAcct.balance) - (pendingOutgoingCost - oldTotalCost);
+    if (spendable < newTotalCost) {
+      return res.status(400).json({
+        error: "Insufficient spendable balance",
+        confirmedBalance: Number(fromAcct.balance),
+        pendingOutgoingCost,
+        spendableBalance: spendable,
+        required: newTotalCost,
+      });
+    }
+
+    // Update tx in-place (same id) with new params + new hash.
+    const newHash = sha256Hex(
+      `${CHAIN_ID}:${pending.id}:send:${from}:${to}:${fmt8(amt)}:${nonce}:${fmt8(gasFee)}:${fmt8(serviceFee)}:${expiresAtMs}:${timestamp}`
+    );
+
+    await run(
+      db,
+      `UPDATE transactions
+       SET hash=?, toWallet=?, amount=?, gasFee=?, serviceFee=?, expiresAtMs=?, timestampMs=?
+       WHERE id=?`,
+      [newHash, to, amt, gasFee, serviceFee, expiresAtMs, timestamp, pending.id]
+    );
+
+    const updated = await get(db, `SELECT * FROM transactions WHERE id=?`, [pending.id]);
+    return res.json({ success: true, chainId: CHAIN_ID, tx: updated });
   } catch (e) {
     return res.status(500).json({ error: e.message || "rbf failed" });
   }
@@ -1037,35 +1023,20 @@ app.post("/cancel", async (req, res) => {
       });
     }
 
-        const txidExpected = txIdFromMessage(msg);
-    if (req.body?.txid && String(req.body.txid) !== txidExpected) {
-      return res.status(400).json({ error: "txid mismatch", expectedTxid: txidExpected, gotTxid: String(req.body.txid) });
-    }
-
-    // Mark the old pending tx as failed (canceled), then insert the cancel tx as a new tx (new txid).
-    await run(
-      db,
-      `UPDATE transactions SET status='failed', failReason=? WHERE id=?`,
-      ["Canceled", pending.id]
+    const newHash = sha256Hex(
+      `${CHAIN_ID}:${pending.id}:send:${from}:${from}:${fmt8(amt)}:${nonce}:${fmt8(gasFee)}:${fmt8(serviceFee)}:${expiresAtMs}:${timestamp}`
     );
 
-    const tx = createTx({
-      type: "send",
-      from,
-      to: from,
-      amount: amt,
-      nonce,
-      gasFee,
-      serviceFee,
-      timestampMs: timestamp,
-      expiresAtMs,
-    });
+    await run(
+      db,
+      `UPDATE transactions
+       SET hash=?, toWallet=?, amount=?, gasFee=?, serviceFee=?, expiresAtMs=?, timestampMs=?
+       WHERE id=?`,
+      [newHash, from, amt, gasFee, serviceFee, expiresAtMs, timestamp, pending.id]
+    );
 
-    await insertTx(tx);
-
-    const inserted = await get(db, `SELECT * FROM transactions WHERE id=?`, [tx.id]);
-    return res.json({ success: true, chainId: CHAIN_ID, tx: inserted, canceled: { id: pending.id } });
-
+    const updated = await get(db, `SELECT * FROM transactions WHERE id=?`, [pending.id]);
+    return res.json({ success: true, chainId: CHAIN_ID, tx: updated });
   } catch (e) {
     return res.status(500).json({ error: e.message || "cancel failed" });
   }

@@ -1,128 +1,114 @@
 // apps/mobile/src/screens/TxDetailsScreen.tsx
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView } from "react-native";
-import { router } from "expo-router";
+import React, { useEffect, useMemo, useState } from "react";
+import { ScrollView, Text, View, Pressable, StyleSheet } from "react-native";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
-import { getTransactionById, type Transaction } from "../chain/transactions";
+import { router } from "expo-router";
+import { getTransactionById } from "../chain/transactions";
 
-type Props = {
-  txid: string;
-};
+type Props = { txid: string };
 
-function kv(label: string, value: any) {
-  const v = value === null || value === undefined || value === "" ? "—" : String(value);
-  return { label, value: v };
+function Row({ label, value }: { label: string; value: any }) {
+  const v = value == null ? "" : String(value);
+  return (
+    <Pressable
+      hitSlop={8}
+      onPress={async () => {
+        if (!v) return;
+        try {
+          await Clipboard.setStringAsync(v);
+          setCopied(`${label} copied`);
+          setTimeout(() => setCopied(""), 1200);
+        } catch {}
+      }}
+      style={styles.row}
+    >
+      <Text style={styles.label}>{label}</Text>
+      <Text style={styles.value} selectable>{v || "—"}</Text>
+    </Pressable>
+  );
 }
 
 export default function TxDetailsScreen({ txid }: Props) {
-  const [tx, setTx] = useState<Transaction | null>(null);
-  const [err, setErr] = useState<string>("");
+  const insets = useSafeAreaInsets();
+  const id = String(txid || "").trim();
+  const [tx, setTx] = useState<any>(null);
   const [copied, setCopied] = useState<string>("");
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    let alive = true;
+    let dead = false;
     (async () => {
       try {
-        setErr("");
-        setTx(null);
-        const out = await getTransactionById(txid);
-        if (!alive) return;
-        if (!out) {
-          setErr("Transaction not found.");
-          return;
-        }
-        setTx(out);
+        setErr(null);
+        const r:any = await getTransactionById(id);
+        if (!dead) setTx(r?.tx ?? r);
       } catch (e: any) {
-        if (!alive) return;
-        setErr(String(e?.message || e || "Failed to load tx"));
+        if (!dead) setErr(String(e?.message || e));
       }
     })();
-    return () => {
-      alive = false;
-    };
-  }, [txid]);
-
-  async function copy(value: string) {
-    try {
-      await Clipboard.setStringAsync(value);
-      setCopied("Copied!");
-      setTimeout(() => setCopied(""), 1200);
-    } catch {
-      setCopied("Copy failed");
-      setTimeout(() => setCopied(""), 1200);
-    }
-  }
-
-  const fields = tx
-    ? [
-        kv("TxID", (tx as any).id || (tx as any).hash || txid),
-        kv("Hash", (tx as any).hash || "—"),
-        kv("Type", (tx as any).type),
-        kv("Status", (tx as any).status),
-        kv("From", (tx as any).fromWallet || (tx as any).from || "—"),
-        kv("To", (tx as any).toWallet || (tx as any).to || "—"),
-        kv("Amount", (tx as any).amount),
-        kv("Nonce", (tx as any).nonce),
-        kv("Gas fee", (tx as any).gasFee),
-        kv("Service fee", (tx as any).serviceFee),
-        kv("Expires at", (tx as any).expiresAtMs ? new Date(Number((tx as any).expiresAtMs)).toISOString() : "—"),
-        kv("Timestamp", (tx as any).timestampMs ? new Date(Number((tx as any).timestampMs)).toISOString() : "—"),
-        kv("Block height", (tx as any).blockHeight),
-        kv("Block hash", (tx as any).blockHash),
-        kv("Fail reason", (tx as any).failReason),
-      ]
-    : [];
+    return () => { dead = true; };
+  }, [id]);
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backBtn}>
-          <Text style={styles.backTxt}>←</Text>
+    <ScrollView contentContainerStyle={styles.container}>
+      <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 14 }}>
+        <Pressable hitSlop={10} onPress={() => router.back()}>
+          <Text style={styles.back}>‹ Back</Text>
         </Pressable>
-        <Text style={styles.title}>Transaction details</Text>
-        <View style={{ width: 36 }} />
+        <Text style={styles.title}>Tx Details</Text>
       </View>
 
-      {!!copied && <Text style={styles.copied}>{copied}</Text>}
-      {!!err && <Text style={styles.error}>{err}</Text>}
-      {!err && !tx && <Text style={styles.loading}>Loading…</Text>}
+      {copied ? <Text style={styles.copied}>{copied}</Text> : null}
 
-      {tx && (
-        <ScrollView contentContainerStyle={styles.card}>
-          {fields.map((f) => (
-            <View key={f.label} style={styles.row}>
-              <Text style={styles.label}>{f.label}</Text>
-              <Pressable
-                onPress={() => {
-                  if (f.value === "—") return;
-                  copy(f.value);
-                }}
-                style={styles.valueWrap}
-              >
-                <Text style={styles.value}>{f.value}</Text>
-                {f.value !== "—" && <Text style={styles.tap}>Tap to copy</Text>}
-              </Pressable>
-            </View>
-          ))}
-        </ScrollView>
+      {err ? <Text style={styles.error}>{err}</Text> : null}
+
+      {!tx ? (
+        <Text style={styles.loading}>Loading…</Text>
+      ) : (
+        <View style={{ gap: 8 }}>
+          <Row label="TxID" value={tx.id || tx.txid} />
+          <Row label="Hash" value={tx.hash} />
+          <Row label="Type" value={tx.type} />
+          <Row label="Status" value={tx.status} />
+          <Row label="From" value={tx.fromWallet || tx.from} />
+          <Row label="To" value={tx.toWallet || tx.to} />
+          <Row label="Amount" value={tx.amount} />
+          <Row label="Nonce" value={tx.nonce} />
+          <Row label="Gas fee" value={tx.gasFee} />
+          <Row label="Service fee" value={tx.serviceFee} />
+          <Row label="Block height" value={tx.blockHeight} />
+          <Row label="Block hash" value={tx.blockHash} />
+          <Row label="Timestamp" value={tx.timestamp || tx.timeMs || tx.time} />
+          <Row label="Fail reason" value={tx.failReason} />
+        </View>
       )}
-    </View>
+
+      <Text style={styles.hint}>Tap any row to copy its value.</Text>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b0b0b", paddingTop: 48, paddingHorizontal: 16 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
-  title: { color: "#fff", fontSize: 18, fontWeight: "900" },
-  backBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: "#111", alignItems: "center", justifyContent: "center" },
-  backTxt: { color: "#fff", fontSize: 18, fontWeight: "900" },
-  loading: { color: "#ddd", paddingVertical: 8 },
-  error: { color: "#f87171", paddingVertical: 8, fontWeight: "800" },
-  copied: { color: "#86efac", paddingVertical: 6, fontWeight: "900" },
-  card: { paddingBottom: 40, gap: 12 },
-  row: { backgroundColor: "#121212", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: "#1f1f1f" },
-  label: { color: "#9ca3af", fontWeight: "900", marginBottom: 6 },
-  valueWrap: { gap: 6 },
+  container: { padding: 24, backgroundColor: "#111", flexGrow: 1 },
+  back: { color: "#60a5fa", fontWeight: "900", marginRight: 12 },
+  title: { color: "#fff", fontSize: 20, fontWeight: "900" },
+  copied: {
+    marginBottom: 10,
+    fontSize: 13,
+    opacity: 0.9,
+  },
+
+  loading: { color: "#aaa", fontWeight: "800", marginTop: 10 },
+  error: { color: "#f87171", fontWeight: "900", marginBottom: 10 },
+  row: {
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    borderRadius: 12,
+    padding: 12,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  label: { color: "#aaa", fontWeight: "900", marginBottom: 4 },
   value: { color: "#fff", fontWeight: "800" },
-  tap: { color: "#60a5fa", fontWeight: "800", fontSize: 12 },
+  hint: { color: "#aaa", marginTop: 16, fontWeight: "700" },
 });

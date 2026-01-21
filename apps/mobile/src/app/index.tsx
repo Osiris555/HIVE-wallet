@@ -23,7 +23,6 @@ import {
   cancelPending,
   computeServiceFee,
   ensureWalletId,
-  getAccount,
   getBalance,
   getChainStatus,
   getTransactions,
@@ -32,9 +31,11 @@ import {
   quoteSend,
   rbfReplacePending,
   send,
-  type Transaction as TxLike,
   parseAmount8,
+  getAccount,
+  getTransactionById,
 } from "../chain/transactions";
+import type { Transaction as TxLike } from "../chain/transactions";
 
 /* ======================
    Web-safe KV storage
@@ -193,11 +194,23 @@ function shortAddr(a: string) {
   return `${a.slice(0, 8)}…${a.slice(-6)}`;
 }
 
-function shortTxId(id: string) {
+function shortId(id: string) {
   const s = String(id || "");
   if (!s) return "";
-  if (s.length <= 16) return s;
-  return s.slice(0, 10) + "…" + s.slice(-10);
+  if (s.length <= 18) return s;
+  return `${s.slice(0, 8)}…${s.slice(-8)}`;
+}
+
+function formatTxTime(v: any): string {
+  const n = typeof v === "string" && v.trim() ? Number(v) : Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  // if seconds, convert to ms
+  const ms = n < 10_000_000_000 ? n * 1000 : n;
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(v);
+  }
 }
 
 function formatTime(ms: number): string {
@@ -210,12 +223,6 @@ function fmt8(n: number) {
   const x = Number(n);
   if (!Number.isFinite(x)) return "0.00000000";
   return x.toFixed(8);
-}
-
-function fmtPct(rate: number) {
-  const r = Number(rate);
-  if (!Number.isFinite(r)) return "—";
-  return `${(r * 100).toFixed(3)}%`;
 }
 
 /** Removes whitespace + zero-width characters that break HNY_ validation */
@@ -232,24 +239,6 @@ function sanitizeAddressInfo(input: string) {
 }
 function sanitizeAddress(input: string) {
   return sanitizeAddressInfo(input).cleaned;
-}
-
-/**
- * Extract a full HNY_<40hex> address from arbitrary text (QR payload, clipboard, etc.).
- * Supports payloads like:
- *  - "HNY_<40hex>"
- *  - "hny:HNY_<40hex>"
- *  - JSON/text that contains the address somewhere
- */
-function extractHnyAddress(input: string): string | null {
-  const s = String(input ?? "");
-  // Try direct match first
-  const m = s.match(/HNY_[0-9a-fA-F]{40}/i);
-  if (m?.[0]) return m[0].replace(/^hny_/i, "HNY_");
-  // Try common URI form: hny:HNY_...
-  const m2 = s.match(/hny:\s*(HNY_[0-9a-fA-F]{40})/i);
-  if (m2?.[1]) return m2[1].replace(/^hny_/i, "HNY_");
-  return null;
 }
 
 function themeKeyForChain(chainId: string) {
@@ -291,49 +280,11 @@ export default function Index() {
   ====================== */
   const [theme, setTheme] = useState<ThemeKey>("matrix");
   const MIN_GAS_FEE_FLOOR = 0.000001; // hard minimum (chain rule / preflight rule)
-
-  // QR scan (recipient)
-  const [scanOpen, setScanOpen] = useState(false);
-  const [cameraMod, setCameraMod] = useState<any>(null);
-  const [cameraPerm, setCameraPerm] = useState<"granted" | "denied" | "undetermined" | null>(null);
-  const CamView: any = cameraMod?.CameraView;
-  const scanLockRef = useRef(false);
-
-  function tryLoadCameraModule(): any | null {
-    if (Platform.OS === "web") return null;
-    try {
-      // Optional dependency: app should still run if expo-camera isn't installed.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      return require("expo-camera");
-    } catch {
-      return null;
-    }
-  }
-
-  async function ensureCameraPermission(mod: any) {
-    try {
-      const req =
-        mod?.requestCameraPermissionsAsync ||
-        mod?.Camera?.requestCameraPermissionsAsync ||
-        mod?.Camera?.requestPermissionsAsync;
-      if (!req) {
-        // If API shape is unexpected, allow CameraView to handle permissions UX.
-        setCameraPerm("undetermined");
-        return true;
-      }
-      const res = await req();
-      const status = res?.status ?? res;
-      setCameraPerm(status ?? "undetermined");
-      return status === "granted";
-    } catch {
-      setCameraPerm("denied");
-      return false;
-    }
-  }
   const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
 
   type SpeedKey = "slow" | "normal" | "fast";
   const [speed, setSpeed] = useState<SpeedKey>("normal");
+  const [expectedNonce, setExpectedNonce] = useState<number | null>(null);
 
   const [chainId, setChainId] = useState("");
   const [chainHeight, setChainHeight] = useState(0);
@@ -363,11 +314,18 @@ export default function Index() {
   const [gasFeeText, setGasFeeText] = useState("");
 
   const [receiveOpen, setReceiveOpen] = useState(false);
+  const [qrScanOpen, setQrScanOpen] = useState(false);
+  const [qrScanError, setQrScanError] = useState<string | null>(null);
+  const [cameraMod, setCameraMod] = useState<any>(null);
+  const CameraViewComp = cameraMod?.CameraView || cameraMod?.default?.CameraView || cameraMod?.Camera?.CameraView;
+
+  const [cameraPerm, setCameraPerm] = useState<null | boolean>(null);
+  const scanLockRef = useRef(false);
+
   const [copied, setCopied] = useState(false);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [quote, setQuote] = useState<any>(null);
-  const [expectedNonce, setExpectedNonce] = useState<number | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
 
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -412,14 +370,76 @@ export default function Index() {
     setTimeout(() => setToast(null), 1400);
   }
 
-  function feeMultiplier(s: SpeedKey) {
-    if (s === "slow") return 1.0;
-    if (s === "normal") return 1.25;
-    return 1.6;
+
+
+function extractHnyAddress(input: string): string | null {
+  const s = String(input || "").trim();
+  const m = s.match(/HNY_[0-9a-fA-F]{40}/);
+  return m ? m[0] : null;
+}
+
+async function openQrScanner() {
+  setQrScanError(null);
+  // Web: camera scanning is flaky unless https; we keep it mobile-only.
+  if (Platform.OS === "web") {
+    showToast("QR scan not supported on web. Use paste.", "warn");
+    return;
+  }
+  try {
+    const cam: any = await import("expo-camera");
+    setCameraMod(cam);
+
+    const requestPerm =
+      cam?.requestCameraPermissionsAsync || cam?.Camera?.requestCameraPermissionsAsync || cam?.Camera?.requestPermissionsAsync;
+
+    if (typeof requestPerm === "function") {
+      const perm = await requestPerm();
+      setCameraPerm(perm?.status === "granted");
+      if (perm?.status !== "granted") {
+        setQrScanError("Camera permission denied.");
+        return;
+      }
+    } else {
+      // Some builds expose permission state via hook only. We'll still try to open.
+      setCameraPerm(true);
+    }
+
+    scanLockRef.current = false;
+    setQrScanOpen(true);
+  } catch (e: any) {
+    setQrScanError("Camera unavailable. Ensure expo-camera is installed.");
+    showToast("Camera unavailable", "warn");
+  }
+}
+
+async function pasteRecipientFromClipboard() {
+  try {
+    const s = await Clipboard.getStringAsync();
+    const addr = extractHnyAddress(s);
+    if (!addr) {
+      showToast("Clipboard doesn't contain an HNY address", "warn");
+      return;
+    }
+    setToText(sanitizeAddress(addr));
+    showToast("Recipient pasted");
+    setQrScanOpen(false);
+  } catch {
+    showToast("Could not read clipboard", "warn");
+  }
+}
+  function tipRate(s: SpeedKey) {
+    // Priority fee is a percentage of the transfer amount.
+    // Normal = no extra priority (just the standard service fee).
+    if (s === "slow") return 0.000025; // 0.0025%
+    if (s === "normal") return 0; // 0.0000%
+    return 0.0001; // 0.010%
   }
   function computeChosenGas(minGas: number) {
     const mg = Math.max(Number(minGas || 0), MIN_GAS_FEE_FLOOR);
-    return Number((mg * feeMultiplier(speed)).toFixed(8));
+    const amtParsed = parseAmount8(amountText);
+    const amt = amtParsed.ok ? Number(amtParsed.value || 0) : 0;
+    const tip = Number((amt * tipRate(speed)).toFixed(8));
+    return Number((mg + tip).toFixed(8));
   }
 
 
@@ -427,7 +447,7 @@ export default function Index() {
   useEffect(() => {
     const v = computeChosenGas(Number(minGasFee || ONE_SAT));
     setGasFeeText(fmt8(v));
-  }, [speed, minGasFee]);
+  }, [speed, minGasFee, amountText]);
 
   /* ======================
      Data loading
@@ -442,10 +462,7 @@ export default function Index() {
     setChainId(String(st?.chainId || ""));
     setChainHeight(Number(st?.chainHeight || st?.height || 0));
     setMsUntilNextBlock(Number(st?.msUntilNextBlock || 0));
-    {
-      const r = Number(st?.serviceFeeRate);
-      setServiceFeeRate(Number.isFinite(r) && r > 0 ? r : 0.00005);
-    }
+    setServiceFeeRate(Number(st?.serviceFeeRate || 0));
     // ✅ never allow 0 min gas
     setMinGasFee(Math.max(Number(st?.minGasFee || 0), MIN_GAS_FEE_FLOOR));
     setFeeVaultBalance(Number(st?.feeVaultBalance || st?.feeVault || 0));
@@ -617,58 +634,6 @@ export default function Index() {
     }
   }
 
-  async function openRecipientScanner() {
-    setMessage("");
-
-    // Prefer camera on native; on web, fall back to paste (camera often requires https + permissions).
-    if (Platform.OS === "web") {
-      setMessage("QR scan isn't available on web here. Paste the address instead.");
-      return;
-    }
-
-    // Try to load expo-camera (optional dependency)
-    const mod = tryLoadCameraModule();
-    if (!mod?.CameraView) {
-      setMessage("QR scanner isn't installed. Paste the address instead.");
-      return;
-    }
-
-    setCameraMod(mod);
-
-    // Ask for permission (best effort)
-    const ok = await ensureCameraPermission(mod);
-    if (!ok) {
-      setMessage("Camera permission denied. Paste the address instead.");
-      return;
-    }
-
-    // Open scanner modal
-    scanLockRef.current = false;
-    pausePollingRef.current = true;
-    setScanOpen(true);
-  }
-
-  function handleQrPayload(payload: string) {
-    // Prevent repeated scans firing rapidly
-    if (scanLockRef.current) return;
-    scanLockRef.current = true;
-
-    const found = extractHnyAddress(payload);
-    if (found) {
-      setToText(found);
-      showToast("Recipient filled ✅");
-      setScanOpen(false);
-      pausePollingRef.current = false;
-      return;
-    }
-
-    // Not an address: keep scanner open and allow another attempt
-    showToast("QR code doesn't contain an HNY address", "warn");
-    setTimeout(() => {
-      scanLockRef.current = false;
-    }, 900);
-  }
-
   /* ======================
      Send flow (confirm modal)
   ====================== */
@@ -743,7 +708,17 @@ export default function Index() {
         totalCost,
       });
 
-      setConfirmOpen(true);
+      setExpectedNonce(null);
+        (async () => {
+          try {
+            if (wallet) {
+              const a:any = await getAccount(wallet);
+              const n = Number(a?.nonce ?? a?.nextNonce ?? a?.pendingNonce ?? a?.sequence ?? 0);
+              if (Number.isFinite(n)) setExpectedNonce(n);
+            }
+          } catch {}
+        })();
+        setConfirmOpen(true);
     } catch (e: any) {
       pausePollingRef.current = false;
       setMessage(`Quote failed: ${e?.message || "Unknown error"}`);
@@ -758,15 +733,16 @@ export default function Index() {
     setMessage("");
 
     try {
-      await send({
+      const res: any = await send({
         to: sanitizeAddress(String(quote.to)).replace(/^hny_/i, "HNY_"),
         amount: Number(quote.totalAmt),
         gasFee: Number(quote.chosenGas),
         serviceFee: Number(quote.serviceFee),
       });
 
+      const txid = String(res?.txid || res?.id || res?.tx?.id || "").trim();
       closeAllModals({ keepMessage: true });
-      setMessage("Send submitted ✅");
+      setMessage(txid ? `Send submitted ✅ (TxID: ${shortId(txid)})` : "Send submitted ✅");
       await hardRefreshAll();
     } catch (e: any) {
       closeAllModals({ keepMessage: true });
@@ -1028,51 +1004,47 @@ export default function Index() {
         <Card T={T} style={{ marginTop: 12 }}>
           <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Send</Text>
 
-          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
-          <View style={{ flexDirection: "row", gap: 10, alignItems: "center", marginTop: 8 }}>
-            <TextInput
-              value={toText}
-              onChangeText={(t) => setToText(sanitizeAddress(t))}
-              onFocus={() => (editingRef.current = true)}
-              onBlur={() => (editingRef.current = false)}
-              placeholder="HNY_<40 hex>"
-              placeholderTextColor={"rgba(255,255,255,0.35)"}
-              autoCapitalize="none"
-              autoCorrect={false}
-              spellCheck={false}
-              style={{
-                flex: 1,
-                paddingVertical: 12,
-                paddingHorizontal: 12,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: T.border,
-                color: T.text,
-                backgroundColor: T.glass2,
-                fontWeight: "800",
-              }}
-            />
-
-            <Pressable
-              onPress={openRecipientScanner}
-              style={{
-                width: 48,
-                height: 48,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: T.border,
-                backgroundColor: T.glass2,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Scan QR code"
-            >
-              <Ionicons name="qr-code-outline" size={22} color={T.text} />
-            </Pressable>
-          </View>
-
-          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
+          
+<Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
+<View style={{ flexDirection: "row", gap: 10, alignItems: "center", marginTop: 8 }}>
+  <TextInput
+    value={toText}
+    onChangeText={(t) => setToText(sanitizeAddress(t))}
+    onFocus={() => (editingRef.current = true)}
+    onBlur={() => (editingRef.current = false)}
+    placeholder="HNY_<40 hex>"
+    placeholderTextColor={"rgba(255,255,255,0.35)"}
+    autoCapitalize="none"
+    autoCorrect={false}
+    style={{
+      flex: 1,
+      paddingVertical: 12,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: T.border,
+      color: T.text,
+      backgroundColor: T.glass2,
+      fontWeight: "800",
+    }}
+  />
+  <Pressable
+    onPress={openQrScanner}
+    style={{
+      width: 48,
+      height: 48,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: T.border,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: T.glass2,
+    }}
+  >
+    <Ionicons name="qr-code-outline" size={22} color={T.text} />
+  </Pressable>
+</View>
+<Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
           <TextInput
             value={amountText}
             onChangeText={(t) => setAmountText(normalizeAmountText(t))}
@@ -1118,7 +1090,7 @@ export default function Index() {
           />
 
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee: {fmtPct(serviceFeeRate)}
+            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
           </Text>
         </Card>
 
@@ -1153,8 +1125,6 @@ export default function Index() {
                 const amt = Number(tx?.amount || 0);
                 const signedAmount = direction === "Sent" ? -amt : direction === "Received" ? amt : amt;
 
-                const txid = String(tx?.id || tx?.hash || "");
-
                 return (
                   <View
                     key={String(tx?.id || idx)}
@@ -1182,50 +1152,41 @@ export default function Index() {
                     <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
                       Nonce: {String(tx?.nonce ?? "—")}
                     </Text>
-
-                    {tx?.blockHeight != null ? (
-                      <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                        Block: {String(tx.blockHeight)}
-                      </Text>
-                    ) : null}
-
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      Block: {String(tx?.blockHeight ?? tx?.height ?? "—")}
+                    </Text>
+                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                      Time: {formatTxTime(tx?.timestamp ?? tx?.timeMs ?? tx?.time)}
+                    </Text>
                     <Pressable
                       onPress={async () => {
-                        if (!txid) return;
+                        const id = String(tx?.id || "");
+                        if (!id) return;
                         try {
-                          await Clipboard.setStringAsync(txid);
+                          await Clipboard.setStringAsync(id);
                           showToast("TxID copied");
                         } catch {}
                       }}
                     >
                       <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                        TxID: {shortTxId(txid)}
+                        TxID: {shortId(String(tx?.id || ""))} (tap to copy)
                       </Text>
                     </Pressable>
 
-                    <Pressable
-                      onPress={() => {
-                        if (!txid) return;
-                        try {
-                          router.push(`/tx/${encodeURIComponent(txid)}`);
-                        } catch {
-                          setMessage("Could not open details screen");
-                        }
-                      }}
-                      hitSlop={12}
-                      style={{
-                        marginTop: 10,
-                        alignSelf: "flex-start",
-                        paddingVertical: 8,
-                        paddingHorizontal: 12,
-                        borderRadius: 10,
-                        borderWidth: 1,
-                        borderColor: T.accent,
-                        backgroundColor: "rgba(0,0,0,0.25)",
-                      }}
-                    >
-                      <Text style={{ color: T.accent, marginTop: 4, fontWeight: "900" }}>View details</Text>
-                    </Pressable>
+                    <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                      <View style={{ flex: 1 }}>
+                        <Button
+                          T={T}
+                          label="Show Details"
+                          variant="outline"
+                          onPress={() => {
+                            const id = String(tx?.id || "");
+                            if (!id) return;
+                            router.push(`/tx/${encodeURIComponent(id)}`);
+                          }}
+                        />
+                      </View>
+                    </View>
 
                     {isPending && (
                       <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
@@ -1269,92 +1230,6 @@ export default function Index() {
         </Card>
       </ScrollView>
 
-      {/* QR Scanner (Recipient) */}
-      {scanOpen && (
-        <Overlay
-          onClose={() => {
-            setScanOpen(false);
-            pausePollingRef.current = false;
-          }}
-        >
-          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Scan QR Code</Text>
-                <Pressable
-                  onPress={() => {
-                    setScanOpen(false);
-                    pausePollingRef.current = false;
-                  }}
-                >
-                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
-                </Pressable>
-              </View>
-
-              <Text style={{ color: T.sub, marginTop: 8, fontWeight: "800" }}>
-                Point your camera at a QR code containing an HNY_ address.
-              </Text>
-
-              <View style={{ height: 12 }} />
-
-              {cameraPerm === "granted" && CamView ? (
-                <View style={{ borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: T.border }}>
-                  <CamView
-                    style={{ width: "100%", height: 420 }}
-                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                    onBarCodeScanned={(res: any) => {
-                      if (res?.data) handleQrPayload(String(res.data));
-                    }}
-                    onBarcodeScanned={(res: any) => {
-                      if (res?.data) handleQrPayload(String(res.data));
-                    }}
-                  />
-                </View>
-              ) : (
-                <View
-                  style={{
-                    padding: 14,
-                    borderRadius: 14,
-                    borderWidth: 1,
-                    borderColor: T.border,
-                    backgroundColor: "rgba(0,0,0,0.35)",
-                  }}
-                >
-                  <Text style={{ color: T.sub, fontWeight: "800" }}>
-                    Camera not available. Use clipboard paste instead.
-                  </Text>
-                </View>
-              )}
-
-              <View style={{ height: 12 }} />
-              <Button
-                T={T}
-                label="Paste from Clipboard"
-                variant="outline"
-                onPress={async () => {
-                  try {
-                    const clip = await Clipboard.getStringAsync();
-                    const found = extractHnyAddress(clip);
-                    if (found) {
-                      setToText(found);
-                      showToast("Recipient filled ✅");
-                      setScanOpen(false);
-                      pausePollingRef.current = false;
-                    } else {
-                      showToast("Clipboard doesn't contain an HNY address", "warn");
-                      // Keep scanner open so user can try scanning again
-                      scanLockRef.current = false;
-                    }
-                  } catch {
-                    setMessage("Couldn't read clipboard.");
-                  }
-                }}
-              />
-            </View>
-          </GlassCard>
-        </Overlay>
-      )}
-
       {/* Confirm modal */}
       {confirmOpen && quote && (
         <Overlay onClose={closeAllModals}>
@@ -1373,9 +1248,11 @@ export default function Index() {
               <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
                 Amount: {quote.baseAmt}
               </Text>
-
-              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
-                Nonce: {String(expectedNonce ?? "—")}
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                Nonce: {expectedNonce ?? "—"}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                TxID: — (appears after submission)
               </Text>
 
               <View style={{ height: 12 }} />
@@ -1387,9 +1264,6 @@ export default function Index() {
               </Text>
               <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
                 Total cost: {fmt8(Number(quote.totalCost || 0))}
-              </Text>
-              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
-                TxID will appear after submission.
               </Text>
 
               <View style={{ height: 14 }} />
@@ -1509,7 +1383,93 @@ export default function Index() {
         </Overlay>
       )}
 
-      {/* Receive modal */}
+      
+{/* QR scan modal */}
+{qrScanOpen && (
+  <Overlay onClose={() => setQrScanOpen(false)}>
+    <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+      <View style={{ padding: 14, width: 360, maxWidth: 420 }}>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Scan recipient QR</Text>
+          <Pressable onPress={() => setQrScanOpen(false)}>
+            <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+          </Pressable>
+        </View>
+
+        {qrScanError ? (
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>{qrScanError}</Text>
+        ) : null}
+
+        <View
+          style={{
+            marginTop: 12,
+            height: 320,
+            borderRadius: 14,
+            overflow: "hidden",
+            borderWidth: 1,
+            borderColor: T.border,
+            backgroundColor: "rgba(0,0,0,0.25)",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {CameraViewComp ? (
+            <CameraViewComp
+              style={{ width: "100%", height: "100%" }}
+              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+              onBarCodeScanned={(ev: any) => {
+                if (scanLockRef.current) return;
+                const raw = String(ev?.data || "");
+                const addr = extractHnyAddress(raw);
+                if (!addr) {
+                  // allow retry
+                  scanLockRef.current = false;
+                  showToast("QR doesn't contain an HNY address", "warn");
+                  return;
+                }
+                scanLockRef.current = true;
+                setToText(sanitizeAddress(addr));
+                showToast("Recipient set from QR");
+                setQrScanOpen(false);
+                setTimeout(() => {
+                  scanLockRef.current = false;
+                }, 800);
+              }}
+              onBarcodeScanned={(ev: any) => {
+                // compatibility
+                if (scanLockRef.current) return;
+                const raw = String(ev?.data || "");
+                const addr = extractHnyAddress(raw);
+                if (!addr) {
+                  scanLockRef.current = false;
+                  showToast("QR doesn't contain an HNY address", "warn");
+                  return;
+                }
+                scanLockRef.current = true;
+                setToText(sanitizeAddress(addr));
+                showToast("Recipient set from QR");
+                setQrScanOpen(false);
+                setTimeout(() => {
+                  scanLockRef.current = false;
+                }, 800);
+              }}
+            />
+          ) : (
+            <Text style={{ color: T.sub, fontWeight: "800" }}>Camera not available.</Text>
+          )}
+        </View>
+
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+          <View style={{ flex: 1 }}>
+            <Button T={T} label="Paste from clipboard" variant="outline" onPress={pasteRecipientFromClipboard} />
+          </View>
+        </View>
+      </View>
+    </GlassCard>
+  </Overlay>
+)}
+
+{/* Receive modal */}
       {receiveOpen && (
         <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
