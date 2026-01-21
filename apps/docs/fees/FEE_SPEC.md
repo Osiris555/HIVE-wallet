@@ -44,10 +44,10 @@ This ensures fees scale fairly with transaction value while remaining competitiv
 
 To guarantee enterprise competitiveness and protect large transfers, a hard cap is applied.
 
-- Max Service Fee Rate: 0.001%
+- Max Service Fee Rate: 0.0017%
 - Effective maximum cost:
   - At any HONEY price, the service fee for a $1,000,000 USD-equivalent transfer
-    will not exceed $10 USD.
+    will not exceed $17 USD.
 
 ---
 
@@ -60,7 +60,7 @@ total_fee = base_fee + min(
 
 Where:
 - base_fee = 0.000001 HONEY
-- max service fee cap = 0.001%
+- max service fee cap = 0.0015%
 
 ---
 
@@ -90,7 +90,7 @@ Where:
 
 ### Example 4: Cap Trigger Scenario
 - Raw service fee exceeds cap
-- Fee capped at 0.001% (~$10 USD)
+- Fee capped at 0.0017% (~$17 USD)
 
 ---
 
