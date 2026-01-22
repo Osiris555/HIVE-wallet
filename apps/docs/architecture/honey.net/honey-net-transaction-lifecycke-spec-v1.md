@@ -29,11 +29,10 @@ Every transaction on Honey.net MUST contain the following fields:
   "from": "HNY_WALLET",
   "to": "HNY_WALLET",
   "amount": 100.0,
-  "fees": {
-    "baseGas": 0.00000001,
-    "serviceFee": 0.000085,
-    "priorityTip": 0,
-    "totalFee": 0.00008501
+  "gas": {
+    "baseFee": 0.000001,
+    "valueFee": 0.0003,
+    "totalGas": 0.030001
   },
   "nonce": 42,
   "timestamp": 1710000000000,

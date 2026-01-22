@@ -1,39 +1,49 @@
 // apps/mobile/honey-dev/db.js
 const path = require("path");
-const sqlite3 = require("sqlite3").verbose();
+const Database = require("better-sqlite3");
 
 const DB_PATH = process.env.HIVE_DB_PATH
   ? path.resolve(process.env.HIVE_DB_PATH)
   : path.resolve(__dirname, "hive-wallet.sqlite");
 
 function openDb() {
-  return new sqlite3.Database(DB_PATH);
+  const db = new Database(DB_PATH);
+  // Better concurrency + resilience for dev/test usage.
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  return db;
 }
 
 function run(db, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve({ changes: this.changes, lastID: this.lastID });
-    });
+    try {
+      const info = db.prepare(sql).run(params);
+      resolve({ changes: info.changes, lastID: Number(info.lastInsertRowid || 0) });
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function get(db, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row || null);
-    });
+    try {
+      const row = db.prepare(sql).get(params);
+      resolve(row);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 function all(db, sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows || []);
-    });
+    try {
+      const rows = db.prepare(sql).all(params);
+      resolve(rows);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 

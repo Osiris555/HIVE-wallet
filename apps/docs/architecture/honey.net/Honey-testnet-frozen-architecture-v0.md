@@ -65,7 +65,7 @@ Enforced at validation layer
 
 5️⃣ Gas & Fees (Frozen Rules)
 const GAS_PER_TX = 1;
-const BASE_GAS = 0.00000001; // HNY (1 Honey Cone)
+const MIN_GAS_PRICE = 0.000001; // HNY
 
 
 Sender must have: amount + gasFee

@@ -6,6 +6,7 @@ import * as Clipboard from "expo-clipboard";
 import QRCode from "react-native-qrcode-svg";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   Image,
   KeyboardAvoidingView,
@@ -278,6 +279,7 @@ function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
 }
 
 export default function Index() {
+  const insets = useSafeAreaInsets();
   /* ======================
      Core state (NO DUPLICATES)
   ====================== */
@@ -285,8 +287,8 @@ export default function Index() {
   const MIN_GAS_FEE_FLOOR = ONE_SAT; // base gas (1 Honey Cone)
   const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
 
-  type SpeedKey = "slow" | "normal" | "fast";
-  const [speed, setSpeed] = useState<SpeedKey>("normal");
+  type PriorityTier = "none" | "small" | "medium" | "large";
+  const [priorityTier, setPriorityTier] = useState<PriorityTier>("none");
   const [expectedNonce, setExpectedNonce] = useState<number | null>(null);
 
   const [chainId, setChainId] = useState("");
@@ -313,7 +315,7 @@ export default function Index() {
   const [toText, setToText] = useState("");
   const [amountText, setAmountText] = useState("");
 
-  // Gas is derived from speed + minGasFee
+  // Gas is derived from priority tier + minGasFee
   const [gasFeeText, setGasFeeText] = useState("");
 
   const [receiveOpen, setReceiveOpen] = useState(false);
@@ -333,6 +335,11 @@ export default function Index() {
 
   // Staking
   const [stakingPositions, setStakingPositions] = useState<StakingPosition[]>([]);
+  const stakedBalance = useMemo(() => {
+    const sum = (stakingPositions || []).reduce((acc, p: any) => acc + Number(p?.amount || 0), 0);
+    return Number(sum.toFixed(8));
+  }, [stakingPositions]);
+
   const [stakingApr, setStakingApr] = useState<number>(0);
   const [stakeAmountText, setStakeAmountText] = useState<string>("");
   const [stakeLockDaysText, setStakeLockDaysText] = useState<string>("30");
@@ -341,6 +348,8 @@ export default function Index() {
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [stakingModalOpen, setStakingModalOpen] = useState(false);
+  const [stakingTab, setStakingTab] = useState<"stake" | "unstake">("stake");
 
   const [rbfOpen, setRbfOpen] = useState(false);
   const [rbfTx, setRbfTx] = useState<any>(null);
@@ -438,19 +447,29 @@ async function pasteRecipientFromClipboard() {
     showToast("Could not read clipboard", "warn");
   }
 }
-  function tipRate(s: SpeedKey) {
+  function priorityRateFraction(t: PriorityTier) {
     // Priority fee is a percentage of the transfer amount.
-    // Normal = no extra priority (just the standard service fee).
-    if (s === "slow") return 0.000025; // 0.0025%
-    if (s === "normal") return 0; // 0.0000%
-    return 0.0001; // 0.010%
+    // none: 0%
+    // small: 0.0007%
+    // medium: 0.0010%
+    // large: 0.0014%
+    if (t === "small") return 0.000007;
+    if (t === "medium") return 0.00001;
+    if (t === "large") return 0.000014;
+    return 0;
   }
+
+  function computePriorityFeeFromAmountText(amtText: string) {
+    const amtParsed = parseAmount8(amtText);
+    const amt = amtParsed.ok ? Number(amtParsed.value || 0) : 0;
+    const rate = priorityRateFraction(priorityTier);
+    return Number((amt * rate).toFixed(8));
+  }
+
   function computeChosenGas(minGas: number) {
     const mg = Math.max(Number(minGas || 0), MIN_GAS_FEE_FLOOR);
-    const amtParsed = parseAmount8(amountText);
-    const amt = amtParsed.ok ? Number(amtParsed.value || 0) : 0;
-    const tip = Number((amt * tipRate(speed)).toFixed(8));
-    return Number((mg + tip).toFixed(8));
+    const priorityFee = computePriorityFeeFromAmountText(amountText);
+    return Number((mg + priorityFee).toFixed(8));
   }
 
 
@@ -458,7 +477,7 @@ async function pasteRecipientFromClipboard() {
   useEffect(() => {
     const v = computeChosenGas(Number(minGasFee || ONE_SAT));
     setGasFeeText(fmt8(v));
-  }, [speed, minGasFee, amountText]);
+  }, [priorityTier, minGasFee, amountText]);
 
   /* ======================
      Data loading
@@ -919,7 +938,8 @@ async function pasteRecipientFromClipboard() {
      Render
   ====================== */
   return (
-    <KeyboardAvoidingView
+    <SafeAreaView style={{ flex: 1, backgroundColor: T.bg, paddingTop: insets.top }}>
+      <KeyboardAvoidingView
       style={{
         flex: 1,
         backgroundColor: T.bg,
@@ -1033,6 +1053,7 @@ async function pasteRecipientFromClipboard() {
           <Text style={{ color: T.sub, fontWeight: "800" }}>Balances</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Confirmed: {confirmedBalance}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {spendableBalance}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Staked: {fmt8(stakedBalance)}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Pending Δ: {pendingDelta}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Fee Vault: {feeVaultBalance}</Text>
 
@@ -1138,13 +1159,18 @@ async function pasteRecipientFromClipboard() {
           <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Priority Fee</Text>
           <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
             <View style={{ flex: 1 }}>
-              <Button T={T} label="Slow" variant={speed === "slow" ? "blue" : "outline"} onPress={() => setSpeed("slow")} />
+              <Button T={T} label="None" variant={priorityTier === "none" ? "blue" : "outline"} onPress={() => setPriorityTier("none")} />
             </View>
             <View style={{ flex: 1 }}>
-              <Button T={T} label="Normal" variant={speed === "normal" ? "blue" : "outline"} onPress={() => setSpeed("normal")} />
+              <Button T={T} label="Small" variant={priorityTier === "small" ? "blue" : "outline"} onPress={() => setPriorityTier("small")} />
+            </View>
+          </View>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Medium" variant={priorityTier === "medium" ? "blue" : "outline"} onPress={() => setPriorityTier("medium")} />
             </View>
             <View style={{ flex: 1 }}>
-              <Button T={T} label="Fast" variant={speed === "fast" ? "blue" : "outline"} onPress={() => setSpeed("fast")} />
+              <Button T={T} label="Large" variant={priorityTier === "large" ? "blue" : "outline"} onPress={() => setPriorityTier("large")} />
             </View>
           </View>
 
@@ -1162,118 +1188,33 @@ async function pasteRecipientFromClipboard() {
             Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
           </Text>
         </Card>
-
         {/* Staking */}
         <Card T={T} style={{ marginTop: 12 }}>
-          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Staking</Text>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Staking</Text>
+            <Pressable
+              onPress={() => {
+                setStakingTab("stake");
+                setStakingModalOpen(true);
+              }}
+              style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: T.border }}
+            >
+              <Text style={{ color: T.text, fontWeight: "900" }}>Open</Text>
+            </Pressable>
+          </View>
 
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
             APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}
           </Text>
-
-          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
-          <TextInput
-            value={stakeAmountText}
-            onChangeText={(t) => setStakeAmountText(normalizeAmountText(t))}
-            onFocus={() => (editingRef.current = true)}
-            onBlur={() => (editingRef.current = false)}
-            placeholder="0.00"
-            placeholderTextColor={"rgba(255,255,255,0.35)"}
-            keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-            style={{
-              marginTop: 8,
-              paddingVertical: 12,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: T.border,
-              color: T.text,
-              backgroundColor: T.glass2,
-              fontWeight: "800",
-            }}
-          />
-
-          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Lock days</Text>
-          <TextInput
-            value={stakeLockDaysText}
-            onChangeText={(t) => setStakeLockDaysText(String(t).replace(/[^0-9]/g, ""))}
-            onFocus={() => (editingRef.current = true)}
-            onBlur={() => (editingRef.current = false)}
-            placeholder="30"
-            placeholderTextColor={"rgba(255,255,255,0.35)"}
-            keyboardType={Platform.OS === "web" ? "default" : "number-pad"}
-            style={{
-              marginTop: 8,
-              paddingVertical: 12,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: T.border,
-              color: T.text,
-              backgroundColor: T.glass2,
-              fontWeight: "800",
-            }}
-          />
-
-          <View style={{ height: 12 }} />
-          <Button
-            T={T}
-            label={stakeBusy ? "Staking…" : "Stake"}
-            variant="purple"
-            disabled={stakeBusy}
-            onPress={handleStake}
-          />
-
-          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-            Tip: Stake is confirmed on the next block (like a tx).
+          <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+            Staked: {fmt8(stakedBalance)}
           </Text>
 
-          {stakingPositions.length > 0 && (
-            <View style={{ marginTop: 14, gap: 10 }}>
-              <Text style={{ color: T.text, fontWeight: "900" }}>Positions</Text>
-              {stakingPositions.slice(0, 6).map((p) => {
-                const locked = !p.canUnstake;
-                const unlockStr = new Date(p.unlockAtMs).toLocaleString();
-                const label = locked
-                  ? `Locked until ${unlockStr}`
-                  : "Unstake";
-                const busy = unstakeBusyId === p.id;
-                return (
-                  <View
-                    key={p.id}
-                    style={{
-                      padding: 12,
-                      borderRadius: 14,
-                      borderWidth: 1,
-                      borderColor: T.border,
-                      backgroundColor: T.glass2,
-                    }}
-                  >
-                    <Text style={{ color: T.text, fontWeight: "900" }}>
-                      {p.principal} HNY
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      Reward: {p.rewardAccrued} • Lock: {p.lockDays} days
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4 }}>
-                      Status: {p.status}
-                    </Text>
-                    <View style={{ height: 10 }} />
-                    <Button
-                      T={T}
-                      label={busy ? "Submitting…" : label}
-                      variant={locked ? "outline" : "green"}
-                      disabled={locked || busy}
-                      onPress={() => handleUnstake(p.id)}
-                    />
-                  </View>
-                );
-              })}
-            </View>
-          )}
+          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+            Manage your positions and stake more HNY in the Staking modal.
+          </Text>
         </Card>
-
-        {/* Transactions */}
+{/* Transactions */}
         <Card T={T} style={{ marginTop: 12 }}>
           <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Transactions</Text>
@@ -1436,7 +1377,13 @@ async function pasteRecipientFromClipboard() {
 
               <View style={{ height: 12 }} />
               <Text style={{ color: T.sub, fontWeight: "800" }}>
-                Gas fee: {fmt8(Number(quote.chosenGas || 0))}
+                Base gas: {fmt8(Number(minGasFee || 0))}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                Priority fee: {fmt8(Number(((Number(quote.baseAmt || 0) * priorityRateFraction(priorityTier)) || 0).toFixed(8)))}
+              </Text>
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                Gas total: {fmt8(Number(quote.chosenGas || 0))}
               </Text>
               <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
                 Service fee: {fmt8(Number(quote.serviceFee || 0))}
@@ -1465,7 +1412,113 @@ async function pasteRecipientFromClipboard() {
         </Overlay>
       )}
 
-      {/* RBF modal */}
+      
+      {/* Staking modal */}
+      {stakingModalOpen && (
+        <Overlay
+          onClose={() => {
+            setStakingModalOpen(false);
+          }}
+        >
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14, maxHeight: 640 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Staking</Text>
+                <Pressable onPress={() => setStakingModalOpen(false)}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Stake" variant={stakingTab === "stake" ? "blue" : "outline"} onPress={() => setStakingTab("stake")} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Unstake" variant={stakingTab === "unstake" ? "blue" : "outline"} onPress={() => setStakingTab("unstake")} />
+                </View>
+              </View>
+
+              {stakingTab === "stake" && (
+                <View style={{ marginTop: 12 }}>
+                  <Text style={{ color: T.sub, fontWeight: "800" }}>APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}</Text>
+
+                  <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
+                  <TextInput
+                    value={stakeAmountText}
+                    onChangeText={(v) => setStakeAmountText(normalizeAmountText(v))}
+                    placeholder="0.00"
+                    placeholderTextColor="rgba(255,255,255,0.45)"
+                    keyboardType={Platform.OS === "ios" ? "decimal-pad" : "numeric"}
+                    style={{
+                      marginTop: 8,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                      borderRadius: 12,
+                      padding: 12,
+                      color: T.text,
+                      fontWeight: "800",
+                    }}
+                  />
+
+                  <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Lock Period</Text>
+                  <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Button T={T} label="30 days" variant={String(stakeLockDaysText) === "30" ? "blue" : "outline"} onPress={() => setStakeLockDaysText("30")} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Button T={T} label="60 days" variant={String(stakeLockDaysText) === "60" ? "blue" : "outline"} onPress={() => setStakeLockDaysText("60")} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Button T={T} label="90 days" variant={String(stakeLockDaysText) === "90" ? "blue" : "outline"} onPress={() => setStakeLockDaysText("90")} />
+                    </View>
+                  </View>
+
+                  <View style={{ height: 12 }} />
+                  <Button T={T} label={stakeBusy ? "Staking..." : "Stake"} onPress={handleStake} />
+                </View>
+              )}
+
+              {stakingTab === "unstake" && (
+                <View style={{ marginTop: 12, flex: 1 }}>
+                  <ScrollView showsVerticalScrollIndicator contentContainerStyle={{ paddingBottom: 16 }}>
+                    {stakingPositions.length === 0 ? (
+                      <Text style={{ color: T.sub, fontWeight: "800" }}>No staking positions.</Text>
+                    ) : (
+                      stakingPositions.map((p) => (
+                        <View
+                          key={p.id}
+                          style={{
+                            borderWidth: 1,
+                            borderColor: T.border,
+                            borderRadius: 12,
+                            padding: 12,
+                            marginBottom: 12,
+                            backgroundColor: T.glass,
+                          }}
+                        >
+                          <Text style={{ color: T.text, fontWeight: "900" }}>Amount: {fmt8(Number(p.amount || 0))}</Text>
+                          <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Lock: {p.lockDays} days</Text>
+                          <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Status: {p.status}</Text>
+                          <View style={{ height: 10 }} />
+                          <Button
+                            T={T}
+                            label={stakeBusy ? "Working..." : "Unstake (Unlock)"}
+                            onPress={() => handleUnstake(String(p.id))}
+                            disabled={stakeBusy}
+                          />
+                        </View>
+                      ))
+                    )}
+                  </ScrollView>
+                </View>
+              )}
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+
+{/* RBF modal */}
       {rbfOpen && rbfTx && (
         <Overlay onClose={closeAllModals}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
@@ -1814,5 +1867,6 @@ async function pasteRecipientFromClipboard() {
         </View>
       )}
     </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }

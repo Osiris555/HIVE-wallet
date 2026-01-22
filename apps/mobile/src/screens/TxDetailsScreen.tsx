@@ -51,7 +51,8 @@ export default function TxDetailsScreen({ txid }: Props) {
   }, [id]);
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#000", paddingTop: insets.top }}>
+      <ScrollView contentContainerStyle={styles.container}>
       <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 14 }}>
         <Pressable hitSlop={10} onPress={() => router.back()}>
           <Text style={styles.back}>‹ Back</Text>
@@ -86,6 +87,7 @@ export default function TxDetailsScreen({ txid }: Props) {
 
       <Text style={styles.hint}>Tap any row to copy its value.</Text>
     </ScrollView>
+    </SafeAreaView>
   );
 }
 

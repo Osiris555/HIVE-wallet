@@ -1,114 +1,108 @@
-# Honey Blockchain – Fee Specification (FEE_SPEC.md)
+# Honey Blockchain – Fee Specification (Fee_Spec.md)
 
 ## Overview
-This document defines the canonical fee model for the Honey Blockchain (HNY).
+This document defines the transaction fee model for the Honey Blockchain (HONEY).
+The goal is to provide a predictable, fair, and scalable fee structure that supports:
 
-Goals:
-- Predictable fees for wallets, creators, and integrators
-- Micropayment-friendly tipping and streaming payouts
-- Competitive large-value settlement with a hard ceiling
-- Simple UX: a tiny network **base gas**, a value-based **service fee**, and an optional **priority tip**
+- Micro-tipping
+- Creator payments
+- Retail transfers
+- Large-value settlement
+- Enterprise usage
+
+The model is intentionally simple, deterministic, and resistant to price volatility.
 
 ---
 
 ## Fee Components
 
-Every transaction fee is:
+Every transaction fee consists of two components:
 
-```
-total_fee = base_gas + service_fee + priority_tip
-```
+### 1. Base Fee
+A fixed minimum fee required for all transactions.
 
-### 1) Base Gas (Required)
-A fixed minimum network fee required for all transactions.
-
-- **Base gas:** `1 Honey Cone = 0.00000001 HNY`
+- Base Fee: 0.000001 HONEY
 - Purpose:
-  - Prevent spam / maintain mempool hygiene
+  - Prevent spam
   - Ensure non-zero validator compensation
-  - Provide a deterministic minimum cost floor
-
-> Terminology: we call this **base gas** (not “minimum gas”). Nodes may still enforce additional *policy* minimums, but the consensus base is defined above.
+  - Maintain mempool hygiene
 
 ---
 
-### 2) Service Fee (Required, Value-Based)
-A percentage-based fee computed from the transaction amount. The service fee rate follows a continuous discount curve that rewards larger transfers, but never goes below a floor.
+### 2. Service Fee (Value-Based)
+A percentage-based fee calculated from the transaction amount.
 
-#### 2.1 Service Fee Rate Curve (Continuous)
-Let `A` be the transaction amount in HNY (same unit as the transferred amount).
+- Service Fee Rate: 0.0005% (0.000005 decimal)
+- Formula:
+  service_fee = amount × 0.000005
 
-- **Rate at/under 100,000,000,000 HNY:** `0.0005%` (decimal `0.000005`)
-- **Rate at/over 500,000,000,000 HNY:** `0.0003%` (decimal `0.000003`)
-- **Floor:** service fee rate will **never go below** `0.0003%`
-
-**Piecewise definition:**
-- If `A ≤ 100,000,000,000` then `rate(A) = 0.0005%`
-- If `A ≥ 500,000,000,000` then `rate(A) = 0.0003%`
-- Otherwise (continuous linear interpolation):
-
-```
-t = (A - 100,000,000,000) / (500,000,000,000 - 100,000,000,000)
-rate(A) = 0.0005% - t * (0.0005% - 0.0003%)
-```
-
-#### 2.2 Service Fee Calculation
-```
-service_fee_raw = A × rate(A)
-```
+This ensures fees scale fairly with transaction value while remaining competitive across all price regimes.
 
 ---
 
-### 3) Service Fee Hard Cap (Required)
-To guarantee enterprise competitiveness and protect large transfers, a hard cap is applied to the **service fee rate**.
+## Maximum Service Fee Cap
 
-- **Max service fee rate cap:** `0.000999%`
-- Decimal equivalent: `0.00000999`
+To guarantee enterprise competitiveness and protect large transfers, a hard cap is applied.
 
-```
-service_fee_cap = A × 0.00000999
-service_fee = min(service_fee_raw, service_fee_cap)
-```
-
-**Interpretation:** for a **$1,000,000 USD-equivalent transfer**, the **service fee** will not exceed **$9.99 USD** (assuming 1 HNY = $1 for illustration of the cap promise).
+- Max Service Fee Rate: 0.0017%
+- Effective maximum cost:
+  - At any HONEY price, the service fee for a $1,000,000 USD-equivalent transfer
+    will not exceed $17 USD.
 
 ---
 
-### 4) Priority Tip (Optional)
-A voluntary additional fee used to accelerate inclusion and/or replacement (RBF / cancel).
+## Total Fee Formula
 
-- **priority_tip ≥ 0**
-- Users may set any value (no protocol cap in this spec)
-- Priority tips are **additive** and **not included** in the service-fee cap
+total_fee = base_fee + min(
+  amount × 0.000005,
+  amount × 0.00001
+)
+
+Where:
+- base_fee = 0.000001 HONEY
+- max service fee cap = 0.0015%
 
 ---
 
-## Practical Examples (Illustrative)
+## Practical Examples
 
-### Example 1 — Small Transfer (17 HNY, no tip)
-Assume `A = 17` and `A ≤ 100B`, so `rate(A) = 0.0005%`.
+### Example 1: Small Transfer
+- Amount: 17 HONEY
+- Service Fee: 0.000085
+- Base Fee: 0.000001
+- Total Fee: 0.000086 HONEY
 
-- Base gas: `0.00000001`
-- Service fee: `17 × 0.000005 = 0.000085`
-- Priority tip: `0`
-- **Total fee:** `0.00008501 HNY`
+---
 
-### Example 2 — $1,000,000 Transfer (assuming 1 HNY = $1)
-Assume `A = 1,000,000` and `A ≤ 100B`, so `rate(A) = 0.0005%`.
+### Example 2: $1,000,000 Transfer @ $0.03
+- HONEY required: ~33,333,333
+- Service Fee: ~166.67 HONEY
+- USD Cost: ~$5.00
 
-- Service fee raw: `1,000,000 × 0.000005 = 5 HNY` → `$5.00`
-- Service cap: `1,000,000 × 0.00000999 = 9.99 HNY` → `$9.99`
-- **Service fee charged:** `$5.00` (cap does not trigger)
-- Base gas and any tip are additional.
+---
 
-### Example 3 — Large Amount Past the Curve Floor
-Assume `A = 600,000,000,000` (≥ 500B), so `rate(A) = 0.0003%`.
+### Example 3: $1,000,000 Transfer @ $200
+- HONEY required: 5,000
+- Service Fee: 0.025 HONEY
+- USD Cost: $5.00
 
-- Service fee: `600,000,000,000 × 0.000003 = 1,800,000 HNY`
-- Cap check: `600,000,000,000 × 0.00000999 = 5,994,000 HNY`
-- **Service fee charged:** `1,800,000 HNY` (cap does not trigger)
+---
+
+### Example 4: Cap Trigger Scenario
+- Raw service fee exceeds cap
+- Fee capped at 0.0017% (~$17 USD)
+
+---
+
+## Micro-Tipping Support
+
+This model explicitly supports micro-payments:
+- Sub-cent tips remain viable
+- Base fee dominates only at very small values
+- Creators retain nearly all value
 
 ---
 
 ## Status
-Frozen for Testnet Economics Lock-In (subject to governance for Mainnet changes).
+
+Proposed for Testnet Lock-In
