@@ -9,6 +9,7 @@ import { router } from "expo-router";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -16,6 +17,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 
@@ -340,6 +342,54 @@ export default function Index() {
     return Number(sum.toFixed(8));
   }, [stakingPositions]);
 
+  // Some dev server implementations keep staked funds inside the wallet balance and track
+  // staking positions separately. In that mode, the UI should subtract staked from spendable.
+  // If the backend already subtracts locked funds, we fall back to simple spendable.
+  const spendableDisplay = useMemo(() => {
+    const s = Number(spendableBalance || 0);
+    const c = Number(confirmedBalance || 0);
+    const st = Number(stakedBalance || 0);
+    if (st > 0 && s >= st && c >= st) return Number(Math.max(0, s - st).toFixed(8));
+    return Number(s.toFixed(8));
+  }, [spendableBalance, confirmedBalance, stakedBalance]);
+
+  const totalDisplay = useMemo(() => {
+    const s = Number(spendableBalance || 0);
+    const st = Number(stakedBalance || 0);
+    const c = Number(confirmedBalance || 0);
+    // If the backend includes staked in wallet balances, total == confirmed/spendable raw.
+    if (st > 0 && s >= st && c >= st) return Number(Math.max(c, s).toFixed(8));
+    // Otherwise total is spendable + staked.
+    return Number((Math.max(0, spendableDisplay) + st).toFixed(8));
+  }, [spendableBalance, stakedBalance, confirmedBalance, spendableDisplay]);
+
+  // Balances: some dev servers report "spendable" including staked amounts.
+  // We derive an effective spendable balance so staked HNY cannot be accidentally re-sent.
+  const balancesView = useMemo(() => {
+    const confirmedRaw = Number(confirmedBalance || 0);
+    const spendableRaw = Number(spendableBalance || 0);
+    const staked = Number(stakedBalance || 0);
+
+    // Heuristic:
+    // If spendableRaw appears to already exclude staked funds (rare in our dev server), don't subtract.
+    // Otherwise, treat staked as a locked sub-balance inside confirmed/spendable.
+    const looksLikeSpendableIncludesStaked = spendableRaw >= staked && confirmedRaw >= staked;
+
+    const spendableEff = looksLikeSpendableIncludesStaked
+      ? Math.max(0, Number((spendableRaw - staked).toFixed(8)))
+      : spendableRaw;
+
+    const totalEff = looksLikeSpendableIncludesStaked
+      ? confirmedRaw || spendableRaw
+      : Number((spendableRaw + staked).toFixed(8));
+
+    return {
+      total: totalEff,
+      spendable: spendableEff,
+      staked,
+    };
+  }, [confirmedBalance, spendableBalance, stakedBalance]);
+
   const [stakingApr, setStakingApr] = useState<number>(0);
   const [stakeAmountText, setStakeAmountText] = useState<string>("");
   const [stakeLockDaysText, setStakeLockDaysText] = useState<string>("30");
@@ -579,6 +629,20 @@ async function pasteRecipientFromClipboard() {
     return () => clearInterval(i);
   }, [wallet, liveRefresh, anyModalOpen, sendFormDirty]);
 
+  // Ensure staking positions are fresh when the staking modal is opened / tabbed.
+  useEffect(() => {
+    if (!wallet) return;
+    if (!stakingModalOpen) return;
+    loadStaking().catch(() => {});
+  }, [wallet, stakingModalOpen]);
+
+  useEffect(() => {
+    if (!wallet) return;
+    if (!stakingModalOpen) return;
+    if (stakingTab !== "unstake") return;
+    loadStaking().catch(() => {});
+  }, [wallet, stakingModalOpen, stakingTab]);
+
   // mint cooldown ticker
   useEffect(() => {
     if (mintCooldown <= 0) return;
@@ -768,7 +832,7 @@ async function pasteRecipientFromClipboard() {
     const pf = preflightSend({
       to,
       amountText: amtTextClean,
-      spendableBalance,
+      spendableBalance: balancesView.spendable,
       minGasFee: minGas,
       serviceFeeRate,
       chosenGasFee: chosenGas,
@@ -939,7 +1003,9 @@ async function pasteRecipientFromClipboard() {
   ====================== */
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: T.bg, paddingTop: insets.top }}>
-      <KeyboardAvoidingView
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <View style={{ flex: 1 }}>
+          <KeyboardAvoidingView
       style={{
         flex: 1,
         backgroundColor: T.bg,
@@ -965,8 +1031,8 @@ async function pasteRecipientFromClipboard() {
       )}
 
       <ScrollView
-        keyboardShouldPersistTaps="always"
-        keyboardDismissMode="none"
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === "ios" ? "on-drag" : "none"}
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}
       >
         {/* Header */}
@@ -1051,8 +1117,8 @@ async function pasteRecipientFromClipboard() {
           <View style={{ height: 12 }} />
 
           <Text style={{ color: T.sub, fontWeight: "800" }}>Balances</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Confirmed: {confirmedBalance}</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {spendableBalance}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Total: {fmt8(balancesView.total)}</Text>
+          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {fmt8(balancesView.spendable)}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Staked: {fmt8(stakedBalance)}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Pending Δ: {pendingDelta}</Text>
           <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Fee Vault: {feeVaultBalance}</Text>
@@ -1474,7 +1540,13 @@ async function pasteRecipientFromClipboard() {
                   </View>
 
                   <View style={{ height: 12 }} />
-                  <Button T={T} label={stakeBusy ? "Staking..." : "Stake"} onPress={handleStake} />
+                  <Button
+                    T={T}
+                    label={stakeBusy ? "Staking..." : "Stake"}
+                    variant={stakeBusy ? "outline" : "purple"}
+                    disabled={stakeBusy}
+                    onPress={handleStake}
+                  />
                 </View>
               )}
 
@@ -1502,9 +1574,10 @@ async function pasteRecipientFromClipboard() {
                           <View style={{ height: 10 }} />
                           <Button
                             T={T}
-                            label={stakeBusy ? "Working..." : "Unstake (Unlock)"}
+                            label={unstakeBusyId === String(p.id) ? "Working..." : "Unstake (Unlock)"}
+                            variant={unstakeBusyId === String(p.id) ? "outline" : "purple"}
                             onPress={() => handleUnstake(String(p.id))}
-                            disabled={stakeBusy}
+                            disabled={!!unstakeBusyId}
                           />
                         </View>
                       ))
@@ -1867,6 +1940,8 @@ async function pasteRecipientFromClipboard() {
         </View>
       )}
     </KeyboardAvoidingView>
+        </View>
+      </TouchableWithoutFeedback>
     </SafeAreaView>
   );
 }

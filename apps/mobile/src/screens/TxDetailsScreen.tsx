@@ -1,5 +1,5 @@
 // apps/mobile/src/screens/TxDetailsScreen.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ScrollView, Text, View, Pressable, StyleSheet } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
@@ -8,33 +8,35 @@ import { getTransactionById } from "../chain/transactions";
 
 type Props = { txid: string };
 
-function Row({ label, value }: { label: string; value: any }) {
-  const v = value == null ? "" : String(value);
-  return (
-    <Pressable
-      hitSlop={8}
-      onPress={async () => {
-        if (!v) return;
-        try {
-          await Clipboard.setStringAsync(v);
-          setCopied(`${label} copied`);
-          setTimeout(() => setCopied(""), 1200);
-        } catch {}
-      }}
-      style={styles.row}
-    >
-      <Text style={styles.label}>{label}</Text>
-      <Text style={styles.value} selectable>{v || "—"}</Text>
-    </Pressable>
-  );
-}
-
 export default function TxDetailsScreen({ txid }: Props) {
   const insets = useSafeAreaInsets();
   const id = String(txid || "").trim();
   const [tx, setTx] = useState<any>(null);
   const [copied, setCopied] = useState<string>("");
   const [err, setErr] = useState<string | null>(null);
+
+  function Row({ label, value }: { label: string; value: any }) {
+    const v = value == null ? "" : String(value);
+    return (
+      <Pressable
+        hitSlop={8}
+        onPress={async () => {
+          if (!v) return;
+          try {
+            await Clipboard.setStringAsync(v);
+            setCopied(`${label} copied ✅`);
+            setTimeout(() => setCopied(""), 1200);
+          } catch {}
+        }}
+        style={styles.row}
+      >
+        <Text style={styles.label}>{label}</Text>
+        <Text style={styles.value} selectable>
+          {v || "—"}
+        </Text>
+      </Pressable>
+    );
+  }
 
   useEffect(() => {
     let dead = false;
