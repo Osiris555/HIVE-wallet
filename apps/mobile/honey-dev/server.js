@@ -486,6 +486,141 @@ async function buildBlockWithRules() {
         continue;
       }
 
+      if (tx.type === "unlock") {
+        const wallet = tx.fromWallet;
+        const to = tx.toWallet;
+        if (!wallet || to !== wallet) {
+          await failTx(tx.id, height, "invalid_unlock_to");
+          continue;
+        }
+        if (isOverLimit(wallet)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        const positionId = String(meta?.positionId || "").trim();
+        if (!positionId) {
+          await failTx(tx.id, height, "missing_position_id");
+          continue;
+        }
+
+        const pos = await get(db, `SELECT id, wallet, lockDays, status FROM staking_positions WHERE id=?`, [positionId]);
+        if (!pos || pos.wallet !== wallet) {
+          await failTx(tx.id, height, "position_not_found");
+          continue;
+        }
+        if (String(pos.status) !== "staked") {
+          await failTx(tx.id, height, "position_not_staked");
+          continue;
+        }
+
+        const lockDays = Number(pos.lockDays);
+        const delayDays = lockDays <= 30 ? 3 : 7;
+        const withdrawAtMs = ts + daysToMs(delayDays);
+
+        // Unlock has no payout; wallet only pays fees.
+        const walletBal = working[wallet] || 0;
+        if (walletBal < totalFee) {
+          await failTx(tx.id, height, "insufficient_confirmed_for_fees");
+          continue;
+        }
+
+        bump(wallet);
+        working[wallet] = walletBal - totalFee;
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+        await run(
+          db,
+          `UPDATE staking_positions
+             SET status='unlocking', unlockingAtMs=?, rewardsFrozenAtMs=?, withdrawAtMs=?, unlockTxId=?
+           WHERE id=?`,
+          [ts, ts, withdrawAtMs, tx.id, positionId]
+        );
+
+        await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
+      if (tx.type === "claim") {
+        const wallet = tx.fromWallet;
+        const to = tx.toWallet;
+        if (!wallet || to !== wallet) {
+          await failTx(tx.id, height, "invalid_claim_to");
+          continue;
+        }
+        if (isOverLimit(wallet)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        const positionId = String(meta?.positionId || "").trim();
+        if (!positionId) {
+          await failTx(tx.id, height, "missing_position_id");
+          continue;
+        }
+
+        const pos = await get(
+          db,
+          `SELECT id, wallet, principal, startMs, status, rewardPaid, rewardsFrozenAtMs FROM staking_positions WHERE id=?`,
+          [positionId]
+        );
+        if (!pos || pos.wallet !== wallet) {
+          await failTx(tx.id, height, "position_not_found");
+          continue;
+        }
+        if (String(pos.status) !== "staked") {
+          await failTx(tx.id, height, "claim_not_allowed");
+          continue;
+        }
+
+        const principal = Number(pos.principal);
+        const endMs = Number(pos.rewardsFrozenAtMs || ts);
+        const totalReward = computeStakingReward(principal, Number(pos.startMs), endMs);
+        const alreadyPaid = Number(pos.rewardPaid || 0);
+        const claimable = Number(Math.max(0, totalReward - alreadyPaid).toFixed(8));
+        if (!(claimable > 0)) {
+          await failTx(tx.id, height, "nothing_to_claim");
+          continue;
+        }
+
+        // Fees: wallet pays gas + service on claim amount.
+        const svc = expectedServiceFee(claimable);
+        const totalFee2 = Number((Number(tx.gasFee || 0) + svc).toFixed(8));
+        const walletBal = working[wallet] || 0;
+        if (walletBal < totalFee2) {
+          await failTx(tx.id, height, "insufficient_confirmed_for_fees");
+          continue;
+        }
+        const stakeVaultBal = working[STAKE_VAULT] || 0;
+        if (stakeVaultBal < claimable) {
+          await failTx(tx.id, height, "stake_vault_insufficient");
+          continue;
+        }
+
+        bump(wallet);
+        working[wallet] = walletBal - totalFee2 + claimable;
+        working[STAKE_VAULT] = stakeVaultBal - claimable;
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee2;
+
+        await run(db, `UPDATE staking_positions SET rewardPaid=?, lastClaimTxId=? WHERE id=?`, [alreadyPaid + claimable, tx.id, positionId]);
+        await run(db, `UPDATE transactions SET serviceFee=?, status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [svc, height, "TBD", tx.id]);
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
       if (tx.type === "unstake") {
         const wallet = tx.fromWallet;
         const to = tx.toWallet;
@@ -510,23 +645,41 @@ async function buildBlockWithRules() {
           continue;
         }
 
-        const pos = await get(db, `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status FROM staking_positions WHERE id=?`, [positionId]);
+        const pos = await get(
+          db,
+          `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, withdrawAtMs, rewardsFrozenAtMs, status, rewardPaid
+             FROM staking_positions
+            WHERE id=?`,
+          [positionId]
+        );
         if (!pos || pos.wallet !== wallet) {
           await failTx(tx.id, height, "position_not_found");
           continue;
         }
-        if (String(pos.status) !== 'staked') {
-          await failTx(tx.id, height, "position_not_staked");
-          continue;
-        }
-        if (ts < Number(pos.unlockAtMs)) {
-          await failTx(tx.id, height, "position_locked");
+        const st = String(pos.status);
+        if (st === "staked") {
+          // legacy direct-unstake path: only after full lock expires
+          if (ts < Number(pos.unlockAtMs)) {
+            await failTx(tx.id, height, "position_locked");
+            continue;
+          }
+        } else if (st === "unlocking") {
+          // new flow: withdraw only after unlock delay
+          if (ts < Number(pos.withdrawAtMs || 0)) {
+            await failTx(tx.id, height, "position_unlocking");
+            continue;
+          }
+        } else {
+          await failTx(tx.id, height, "position_not_withdrawable");
           continue;
         }
 
         const principal = Number(pos.principal);
-        const reward = computeStakingReward(principal, Number(pos.startMs), ts);
-        const payout = Number((principal + reward).toFixed(8));
+        const rewardEnd = st === "unlocking" ? Number(pos.rewardsFrozenAtMs || ts) : ts;
+        const totalReward = computeStakingReward(principal, Number(pos.startMs), rewardEnd);
+        const alreadyPaid = Number(pos.rewardPaid || 0);
+        const remainingReward = Number(Math.max(0, totalReward - alreadyPaid).toFixed(8));
+        const payout = Number((principal + remainingReward).toFixed(8));
 
         // Wallet pays only fees; payout comes from stake vault.
         const walletBal = working[wallet] || 0;
@@ -546,7 +699,13 @@ async function buildBlockWithRules() {
         working[STAKE_VAULT] = stakeVaultBal - payout;
         working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
 
-        await run(db, `UPDATE staking_positions SET status='unstaked', rewardPaid=?, unstakedAtMs=?, unstakeTxId=? WHERE id=?`, [reward, ts, tx.id, positionId]);
+        await run(
+          db,
+          `UPDATE staking_positions
+              SET status='unstaked', rewardPaid=?, unstakedAtMs=?, unstakeTxId=?
+            WHERE id=?`,
+          [alreadyPaid + remainingReward, ts, tx.id, positionId]
+        );
         await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
         confirmedIds.push(tx.id);
         continue;
@@ -974,17 +1133,20 @@ app.post("/send", async (req, res) => {
    STAKING (SIGNED)
 ====================== */
 
-app.get("/staking/positions/:wallet", async (req, res) => {
+// also support query-style for easier mobile/web parity
+app.get("/staking/positions", async (req, res) => {
   try {
-    const wallet = String(req.params.wallet || "").trim();
+    const wallet = String(req.query?.wallet || "").trim();
     if (!wallet) return res.status(400).json({ error: "Missing wallet" });
 
     const rows = await all(
       db,
-      `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid, unstakedAtMs, stakeTxId, unstakeTxId
-       FROM staking_positions
-       WHERE wallet=?
-       ORDER BY startMs DESC`,
+      `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
+              unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, unlockTxId, lastClaimTxId,
+              unstakedAtMs, stakeTxId, unstakeTxId
+         FROM staking_positions
+        WHERE wallet=?
+        ORDER BY startMs DESC`,
       [wallet]
     );
 
@@ -993,8 +1155,70 @@ app.get("/staking/positions/:wallet", async (req, res) => {
       const principal = Number(r.principal);
       const startMs = Number(r.startMs);
       const unlockAtMs = Number(r.unlockAtMs);
+      const withdrawAtMs = r.withdrawAtMs == null ? null : Number(r.withdrawAtMs);
+      const unlockingAtMs = r.unlockingAtMs == null ? null : Number(r.unlockingAtMs);
+      const rewardsFrozenAtMs = r.rewardsFrozenAtMs == null ? null : Number(r.rewardsFrozenAtMs);
       const status = String(r.status);
-      const accrued = status === 'staked' ? computeStakingReward(principal, startMs, ts) : Number(r.rewardPaid || 0);
+      const endMs = status === "unlocking" ? Number(rewardsFrozenAtMs || ts) : ts;
+      const accruedTotal = status === "staked" || status === "unlocking" ? computeStakingReward(principal, startMs, endMs) : Number(r.rewardPaid || 0);
+      const paid = Number(r.rewardPaid || 0);
+      const claimable = Number(Math.max(0, accruedTotal - paid).toFixed(8));
+      return {
+        id: r.id,
+        wallet: r.wallet,
+        principal: Number(principal.toFixed(8)),
+        lockDays: Number(r.lockDays),
+        startMs,
+        unlockAtMs,
+        status,
+        unlockingAtMs,
+        withdrawAtMs,
+        rewardsFrozenAtMs,
+        unlockTxId: r.unlockTxId,
+        lastClaimTxId: r.lastClaimTxId,
+        rewardAccrued: Number(accruedTotal.toFixed(8)),
+        rewardPaid: Number(paid.toFixed(8)),
+        claimable,
+        unstakedAtMs: r.unstakedAtMs,
+        stakeTxId: r.stakeTxId,
+        unstakeTxId: r.unstakeTxId,
+        canUnlock: status === "staked",
+        canWithdraw: status === "unlocking" && !!withdrawAtMs && ts >= withdrawAtMs,
+      };
+    });
+
+    return res.json({ success: true, chainId: CHAIN_ID, wallet, apr: STAKING_APR, positions });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "staking positions failed" });
+  }
+});
+
+app.get("/staking/positions/:wallet", async (req, res) => {
+  try {
+    const wallet = String(req.params.wallet || "").trim();
+    if (!wallet) return res.status(400).json({ error: "Missing wallet" });
+
+    const rows = await all(
+      db,
+      `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
+              unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, unlockTxId, lastClaimTxId,
+              unstakedAtMs, stakeTxId, unstakeTxId
+         FROM staking_positions
+        WHERE wallet=?
+        ORDER BY startMs DESC`,
+      [wallet]
+    );
+
+    const ts = now();
+      const positions = rows.map((r) => {
+      const principal = Number(r.principal);
+      const startMs = Number(r.startMs);
+      const unlockAtMs = Number(r.unlockAtMs);
+      const status = String(r.status);
+      const rewardEnd = status === 'unlocking' ? Number(r.rewardsFrozenAtMs || ts) : ts;
+      const accrued = status === 'staked' || status === 'unlocking'
+        ? computeStakingReward(principal, startMs, rewardEnd)
+        : Number(r.rewardPaid || 0);
       return {
         id: r.id,
         wallet: r.wallet,
@@ -1005,10 +1229,16 @@ app.get("/staking/positions/:wallet", async (req, res) => {
         status,
         rewardAccrued: Number(accrued.toFixed(8)),
         rewardPaid: Number(Number(r.rewardPaid || 0).toFixed(8)),
+        unlockingAtMs: r.unlockingAtMs,
+        withdrawAtMs: r.withdrawAtMs,
+        rewardsFrozenAtMs: r.rewardsFrozenAtMs,
+        unlockTxId: r.unlockTxId,
+        lastClaimTxId: r.lastClaimTxId,
         unstakedAtMs: r.unstakedAtMs,
         stakeTxId: r.stakeTxId,
         unstakeTxId: r.unstakeTxId,
-        canUnstake: status === 'staked' && ts >= unlockAtMs,
+        canUnlock: status === 'staked',
+        canWithdraw: status === 'unlocking' && ts >= Number(r.withdrawAtMs || 0),
       };
     });
 
@@ -1189,6 +1419,179 @@ app.post("/unstake", async (req, res) => {
     return res.json({ success: true, chainId: CHAIN_ID, tx, payout, reward });
   } catch (e) {
     return res.status(500).json({ error: e.message || "unstake failed" });
+  }
+});
+
+app.post("/staking/unlock", async (req, res) => {
+  try {
+    const { wallet, positionId, nonce, timestamp, signature } = req.body;
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    const pid = String(positionId || "").trim();
+    if (!from || !pid) return res.status(400).json({ error: "Missing wallet/positionId" });
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = 0;
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) return res.status(400).json({ error: "Fee too low", minGasFee });
+
+    const ttlMax = now() + TX_TTL_MS * 2;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
+      return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
+    }
+
+    const acct = await getAccountRow(from);
+    if (nonce !== acct.nonce) return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+
+    const pos = await get(db, `SELECT id, wallet, lockDays, status FROM staking_positions WHERE id=?`, [pid]);
+    if (!pos || pos.wallet !== from) return res.status(404).json({ error: "Position not found" });
+    if (String(pos.status) !== "staked") return res.status(400).json({ error: "Position not staked" });
+
+    const pendingCount = await countPendingForWallet({ type: "unlock", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
+    }
+
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const spendable = Number(acct.balance) - pendingOutgoingCost;
+    const totalCost = Number((gasFee + serviceFee).toFixed(8));
+    if (spendable < totalCost) {
+      return res.status(400).json({ error: "Insufficient spendable balance", spendableBalance: spendable, required: totalCost });
+    }
+
+    const metaJson = JSON.stringify({ positionId: pid });
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "unlock",
+      from,
+      to: from,
+      amount: 0,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "unlock",
+      from,
+      to: from,
+      amount: 0,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+    await insertTx(tx);
+
+    res.json({ success: true, chainId: CHAIN_ID, tx, positionId: pid, unlockDelayDays: Number(pos.lockDays) <= 30 ? 3 : 7 });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "unlock failed" });
+  }
+});
+
+app.post("/staking/claim", async (req, res) => {
+  try {
+    const { wallet, positionId, nonce, timestamp, signature } = req.body;
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    const pid = String(positionId || "").trim();
+    if (!from || !pid) return res.status(400).json({ error: "Missing wallet/positionId" });
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const pos = await get(db, `SELECT id, wallet, principal, startMs, rewardsFrozenAtMs, status, rewardPaid FROM staking_positions WHERE id=?`, [pid]);
+    if (!pos || pos.wallet !== from) return res.status(404).json({ error: "Position not found" });
+    if (String(pos.status) !== "staked") return res.status(400).json({ error: "Cannot claim while unlocking/unstaked" });
+
+    const ts = now();
+    const principal = Number(pos.principal);
+    const endMs = Number(pos.rewardsFrozenAtMs || ts);
+    const totalReward = computeStakingReward(principal, Number(pos.startMs), endMs);
+    const alreadyPaid = Number(pos.rewardPaid || 0);
+    const claimable = Number(Math.max(0, totalReward - alreadyPaid).toFixed(8));
+    if (!(claimable > 0)) return res.status(400).json({ error: "Nothing to claim" });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = Number(req.body?.serviceFee ?? expectedServiceFee(claimable));
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) return res.status(400).json({ error: "Fee too low", minGasFee });
+
+    const svcExpected = expectedServiceFee(claimable);
+    if (Number(serviceFee.toFixed(8)) !== Number(svcExpected.toFixed(8))) {
+      return res.status(400).json({ error: "Bad serviceFee", expectedServiceFee: svcExpected, gotServiceFee: serviceFee, rate: SERVICE_FEE_RATE });
+    }
+
+    const ttlMax = now() + TX_TTL_MS * 2;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
+      return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
+    }
+
+    const acct = await getAccountRow(from);
+    if (nonce !== acct.nonce) return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+
+    const pendingCount = await countPendingForWallet({ type: "claim", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs for wallet", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
+    }
+
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const spendable = Number(acct.balance) - pendingOutgoingCost;
+    const totalFee = Number((gasFee + serviceFee).toFixed(8));
+    if (spendable < totalFee) return res.status(400).json({ error: "Insufficient spendable balance", spendableBalance: spendable, required: totalFee });
+
+    const metaJson = JSON.stringify({ positionId: pid });
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "claim",
+      from,
+      to: from,
+      amount: claimable,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "claim",
+      from,
+      to: from,
+      amount: claimable,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+    await insertTx(tx);
+
+    res.json({ success: true, chainId: CHAIN_ID, tx, claimable });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "claim failed" });
   }
 });
 

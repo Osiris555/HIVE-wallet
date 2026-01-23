@@ -18,6 +18,7 @@ import {
   Text,
   TextInput,
   TouchableWithoutFeedback,
+  Alert,
   View,
 } from "react-native";
 
@@ -35,6 +36,8 @@ import {
   rbfReplacePending,
   send,
   stake,
+  unlockStake,
+  claimStakingReward,
   unstake,
   getStakingPositions,
   parseAmount8,
@@ -68,7 +71,7 @@ async function kvSet(key: string, value: string): Promise<void> {
    Theme + Skin
 ====================== */
 type ThemeKey = "matrix" | "noir" | "honey";
-type SkinKey = "matrix-honey-coin" | "matrix-honeycomb" | "solid-noir";
+type SkinKey = "athena-temple2" | "matrix-honey-coin" | "matrix-honeycomb" | "solid-noir";
 
 function themeFor(t: ThemeKey) {
   const neon = "#39ff14";
@@ -287,7 +290,7 @@ export default function Index() {
   ====================== */
   const [theme, setTheme] = useState<ThemeKey>("matrix");
   const MIN_GAS_FEE_FLOOR = ONE_SAT; // base gas (1 Honey Cone)
-  const [skin, setSkin] = useState<SkinKey>("matrix-honey-coin");
+  const [skin, setSkin] = useState<SkinKey>("athena-temple2");
 
   type PriorityTier = "none" | "small" | "medium" | "large";
   const [priorityTier, setPriorityTier] = useState<PriorityTier>("none");
@@ -338,7 +341,11 @@ export default function Index() {
   // Staking
   const [stakingPositions, setStakingPositions] = useState<StakingPosition[]>([]);
   const stakedBalance = useMemo(() => {
-    const sum = (stakingPositions || []).reduce((acc, p: any) => acc + Number(p?.amount || 0), 0);
+    const sum = (stakingPositions || []).reduce((acc, p: any) => {
+      // When mixing ?? with || we must parenthesize; use a single ?? chain instead.
+      const val = (p?.principal ?? p?.amount ?? 0);
+      return acc + Number(val);
+    }, 0);
     return Number(sum.toFixed(8));
   }, [stakingPositions]);
 
@@ -424,14 +431,16 @@ export default function Index() {
   /* ======================
      Background skin images
   ====================== */
+  const athenaTempleBg = useMemo(() => require("./assets/skins/athena-temple2.png"), []);
   const honeyCoinBg = useMemo(() => require("./assets/skins/matrix-honey-coin.png"), []);
   const honeycombBg = useMemo(() => require("./assets/skins/matrix-honeycomb.png"), []);
 
   const bgSource = useMemo(() => {
+    if (skin === "athena-temple2") return athenaTempleBg;
     if (skin === "matrix-honey-coin") return honeyCoinBg;
     if (skin === "matrix-honeycomb") return honeycombBg;
     return null;
-  }, [skin, honeyCoinBg, honeycombBg]);
+  }, [skin, athenaTempleBg, honeyCoinBg, honeycombBg]);
 
   const bgOverlayOpacity = Platform.OS === "web" ? 0.55 : 0.32;
 
@@ -776,13 +785,56 @@ async function pasteRecipientFromClipboard() {
     const chosenGas = Math.max(minGas, computeChosenGas(minGas));
     setUnstakeBusyId(positionId);
     try {
-      await unstake({ positionId, gasFee: chosenGas });
-      setMessage("Unstake submitted ✅");
+      const pos: any = (stakingPositions || []).find((p: any) => String(p.id) === String(positionId));
+
+      // If still staked, initiate unlock (rewards freeze during unlock).
+      if (String(pos?.status) === "staked") {
+        // Use a unique variable name to avoid accidental redeclarations across edits/hot reloads.
+        const unlockDelayDays = Number(pos?.unlockDelayDays ?? (Number(pos?.lockDays) === 30 ? 3 : 7));
+        const ok = Platform.OS === "web"
+          ? Boolean((globalThis as any)?.confirm?.(
+              `Start unlock?\n\nUnlock delay: ${unlockDelayDays} days\nRewards will stop accruing during unlock.\n\nYou can withdraw after the delay, and any unclaimed rewards will be added to the principal.`
+            ))
+          : await new Promise<boolean>((resolve) => {
+              Alert.alert(
+                "Start unlock?",
+                `Unlock delay: ${unlockDelayDays} days\nRewards will stop accruing during unlock.\n\nYou can withdraw after the delay, and any unclaimed rewards will be added to the principal.`,
+                [
+                  { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+                  { text: "Start Unlock", style: "default", onPress: () => resolve(true) },
+                ]
+              );
+            });
+
+        if (!ok) return;
+        await unlockStake({ positionId, gasFee: chosenGas });
+        setMessage("Unlock initiated ✅");
+      } else {
+        // If already unlocking, attempt withdraw (server will enforce unlock end time).
+        await unstake({ positionId, gasFee: chosenGas });
+        setMessage("Withdraw submitted ✅");
+      }
       await hardRefreshAll();
     } catch (e: any) {
       setMessage(`Unstake failed: ${e?.message || "Unknown error"}`);
     } finally {
       setUnstakeBusyId(null);
+    }
+  }
+
+  async function handleClaim(positionId: string) {
+    if (claimBusyId) return;
+    const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
+    const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+    setClaimBusyId(positionId);
+    try {
+      await claimStakingReward({ positionId, gasFee: chosenGas });
+      setMessage("Claim submitted ✅");
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Claim failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setClaimBusyId(null);
     }
   }
 
@@ -1568,16 +1620,46 @@ async function pasteRecipientFromClipboard() {
                             backgroundColor: T.glass,
                           }}
                         >
-                          <Text style={{ color: T.text, fontWeight: "900" }}>Amount: {fmt8(Number(p.amount || 0))}</Text>
+                          <Text style={{ color: T.text, fontWeight: "900" }}>Principal: {fmt8(Number(((p as any).principal ?? (p as any).amount ?? 0)))}</Text>
                           <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Lock: {p.lockDays} days</Text>
                           <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>Status: {p.status}</Text>
+                          {Number((p as any).claimable || 0) > 0 && (
+                            <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                              Claimable: {fmt8(Number((p as any).claimable || 0))}
+                            </Text>
+                          )}
+                          {String((p as any).status) === "unlocking" && Number.isFinite(Number((p as any).withdrawAtMs)) && (
+                            <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                              Withdraw after: {new Date(Number((p as any).withdrawAtMs)).toLocaleString()}
+                            </Text>
+                          )}
                           <View style={{ height: 10 }} />
+                          {Number((p as any).claimable || 0) > 0 && (
+                            <Button
+                              T={T}
+                              label={claimBusyId === String(p.id) ? "Working..." : "Claim"}
+                              variant={claimBusyId === String(p.id) ? "outline" : "green"}
+                              onPress={() => handleClaim(String(p.id))}
+                              disabled={!!claimBusyId}
+                            />
+                          )}
+                          {Number((p as any).claimable || 0) > 0 && <View style={{ height: 10 }} />}
                           <Button
                             T={T}
-                            label={unstakeBusyId === String(p.id) ? "Working..." : "Unstake (Unlock)"}
+                            label={
+                              unstakeBusyId === String(p.id)
+                                ? "Working..."
+                                : String((p as any).status) === "staked"
+                                ? `Start Unlock (${Number((p as any).unlockDelayDays || ((p as any).lockDays === 30 ? 3 : 7))}d)`
+                                : "Withdraw"
+                            }
                             variant={unstakeBusyId === String(p.id) ? "outline" : "purple"}
                             onPress={() => handleUnstake(String(p.id))}
-                            disabled={!!unstakeBusyId}
+                            disabled={
+                              !!unstakeBusyId ||
+                              (String((p as any).status) === "unlocking" &&
+                                !((p as any).canWithdraw || (Number((p as any).withdrawAtMs || 0) <= Date.now())))
+                            }
                           />
                         </View>
                       ))
@@ -1871,6 +1953,14 @@ async function pasteRecipientFromClipboard() {
               <View style={{ height: 10 }} />
 
               <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
+                    label="Athena's Temple"
+                    variant={skin === "athena-temple2" ? "purple" : "outline"}
+                    onPress={() => setSkin("athena-temple2")}
+                  />
+                </View>
                 <View style={{ flex: 1 }}>
                   <Button
                     T={T}

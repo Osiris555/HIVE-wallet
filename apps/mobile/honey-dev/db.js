@@ -135,6 +135,20 @@ async function initDb(db) {
     );`
   );
 
+  // migrations for staking positions (unlocking / claim)
+  const stakeCols = await all(db, "PRAGMA table_info(staking_positions);");
+  const have = new Set((stakeCols || []).map((c) => String(c.name)));
+  async function addCol(name, ddl) {
+    if (have.has(name)) return;
+    await run(db, `ALTER TABLE staking_positions ADD COLUMN ${ddl};`);
+    have.add(name);
+  }
+  await addCol("unlockingAtMs", "unlockingAtMs INTEGER");
+  await addCol("withdrawAtMs", "withdrawAtMs INTEGER");
+  await addCol("rewardsFrozenAtMs", "rewardsFrozenAtMs INTEGER");
+  await addCol("unlockTxId", "unlockTxId TEXT");
+  await addCol("lastClaimTxId", "lastClaimTxId TEXT");
+
   await run(db, `CREATE INDEX IF NOT EXISTS idx_stake_wallet ON staking_positions(wallet);`);
   await run(db, `CREATE INDEX IF NOT EXISTS idx_stake_status ON staking_positions(status);`);
 

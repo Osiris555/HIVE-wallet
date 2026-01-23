@@ -409,7 +409,13 @@ export async function quoteSend(to: string, amount: number) {
 
 export async function getStakingPositions(wallet?: string): Promise<{ positions: StakingPosition[]; apr: number }> {
   const w = wallet || (await ensureWalletId());
-  const body = await getJson(`/staking/positions/${encodeURIComponent(w)}`);
+  // Prefer query-style (some RN iOS / proxy combos dislike path params)
+  let body: any;
+  try {
+    body = await getJson(`/staking/positions?wallet=${encodeURIComponent(w)}`);
+  } catch {
+    body = await getJson(`/staking/positions/${encodeURIComponent(w)}`);
+  }
   return { positions: (body?.positions || []) as StakingPosition[], apr: Number(body?.apr || 0) };
 }
 
@@ -516,6 +522,111 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
     timestamp,
     signature,
     gasFee,
+    expiresAtMs,
+  });
+}
+
+export async function unlockStakePosition(params: { positionId: string; gasFee?: number }): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const positionId = String(params.positionId || "").trim();
+  if (!positionId) throw makeError("Missing positionId", 400);
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const serviceFee = 0;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const metaJson = JSON.stringify({ positionId });
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "unlock",
+    from: wallet,
+    to: wallet,
+    amount: 0,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/staking/unlock", {
+    chainId,
+    wallet,
+    positionId,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
+}
+
+export async function claimStakingReward(params: { positionId: string; gasFee?: number }): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const positionId = String(params.positionId || "").trim();
+  if (!positionId) throw makeError("Missing positionId", 400);
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  // sign exact claimable amount so server can verify signature deterministically
+  const { positions } = await getStakingPositions(wallet);
+  const pos = positions.find((p) => p.id === positionId);
+  const claimable = Number((pos as any)?.claimable ?? Math.max(0, Number(pos?.rewardAccrued || 0) - Number((pos as any)?.rewardPaid || 0)));
+  const amt = Number(claimable.toFixed(8));
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Nothing to claim", 400, { claimable: amt });
+
+  const serviceFee = computeServiceFee(amt);
+  const metaJson = JSON.stringify({ positionId });
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "claim",
+    from: wallet,
+    to: wallet,
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/staking/claim", {
+    chainId,
+    wallet,
+    positionId,
+    amount: amt,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    serviceFee,
     expiresAtMs,
   });
 }
