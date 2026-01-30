@@ -4,6 +4,7 @@ import * as naclUtil from "tweetnacl-util";
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
 import Constants from "expo-constants";
+import { NativeModules, Platform } from "react-native";
 
 export type TxType = "mint" | "send" | "stake" | "unstake";
 
@@ -72,10 +73,95 @@ function isWeb() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-const API_BASE =
-  ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
-  (process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined) ||
-  (isWeb() ? "http://localhost:3000" : "http://192.168.0.15:3000");
+function stripHost(input: string): string {
+  // Accept:
+  //  - 192.168.0.10:8081
+  //  - http://192.168.0.10:8081
+  //  - http://192.168.0.10:8081/...
+  //  - 192.168.0.10
+  const s = String(input || "").trim();
+  if (!s) return "";
+  try {
+    // If it looks like a URL, parse it.
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      return u.hostname;
+    }
+  } catch {
+    // fall through
+  }
+  // Remove any path/query
+  const noPath = s.split("/")[0].split("?")[0];
+  // Remove port
+  return noPath.split(":")[0];
+}
+
+function resolveApiBase(): string {
+  const fromExtra = ((Constants.expoConfig?.extra as any)?.HIVE_API_BASE as string | undefined) ||
+    ((Constants.manifest as any)?.extra?.HIVE_API_BASE as string | undefined);
+  const fromEnv = process.env.EXPO_PUBLIC_HIVE_API_BASE as string | undefined;
+  const explicit = fromExtra || fromEnv;
+  // Respect explicit base unless it's a localhost URL on a physical device
+  // (localhost would point at the phone itself, not your dev machine).
+  if (explicit) {
+    const isLocalhost = /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?/i.test(String(explicit).trim());
+    const isDevice = !!(Constants as any)?.isDevice;
+    if (!isDevice || !isLocalhost || Platform.OS === "web") return explicit;
+    // Fall through to auto-detect a LAN host.
+  }
+
+  // Web: use localhost unless overridden.
+  if (isWeb()) return "http://localhost:3000";
+
+  // Native: derive host from Expo dev server / bundle URL.
+  let host = "";
+
+  // Expo Go / dev clients (varies by SDK): debuggerHost or hostUri
+  const dbgHost =
+    (Constants.expoConfig as any)?.hostUri ||
+    (Constants.manifest as any)?.debuggerHost ||
+    (Constants.manifest2 as any)?.extra?.expoGo?.debuggerHost ||
+    (Constants.manifest2 as any)?.extra?.expoClient?.hostUri;
+  if (dbgHost) host = stripHost(String(dbgHost));
+
+  // Fallback: parse bundle URL (works even when manifest fields are missing)
+  if (!host) {
+    const scriptURL = (NativeModules as any)?.SourceCode?.scriptURL as string | undefined;
+    if (scriptURL) host = stripHost(scriptURL);
+  }
+
+  // Extra fallback: Expo linking URI often contains the LAN host even when manifest fields don't.
+  if (!host) {
+    const linkingUri = (Constants as any)?.linkingUri as string | undefined;
+    if (linkingUri) host = stripHost(linkingUri);
+  }
+
+  // Extra fallback: RN packager hostname (sometimes injected in dev)
+  if (!host) {
+    const packagerHost = (process.env as any)?.REACT_NATIVE_PACKAGER_HOSTNAME as string | undefined;
+    if (packagerHost) host = stripHost(packagerHost);
+  }
+
+  // Simulator sometimes can use localhost; physical devices generally cannot.
+  if (!host) host = "localhost";
+  if (host === "127.0.0.1") host = "localhost";
+
+  // If we landed on localhost while running on a physical device, this is almost certainly wrong.
+  // Keep it (so errors surface), but make the mistake explicit for easier debugging.
+  if ((Constants as any)?.isDevice && host === "localhost") {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[HIVE] API_BASE resolved to localhost on a physical device. " +
+        "Set EXPO_PUBLIC_HIVE_API_BASE or HIVE_API_BASE in app config to your LAN IP (e.g. http://192.168.1.10:3000)."
+    );
+  }
+
+  // If we ended up with localhost on a physical device, calls will fail. Keep it,
+  // but include a helpful hint in the error surfaces (handled by callers).
+  return `http://${host}:3000`;
+}
+
+const API_BASE = resolveApiBase();
 
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";

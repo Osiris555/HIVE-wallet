@@ -1,4 +1,4 @@
-const SERVER = "http://192.168.0.15:3000";
+const SERVER = "http://192.168.0.17:3000";
 const WALLET = "HNY1_DEV_WALLET";
 
 async function mint() {

@@ -17,7 +17,6 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  TouchableWithoutFeedback,
   Alert,
   View,
 } from "react-native";
@@ -402,6 +401,7 @@ export default function Index() {
   const [stakeLockDaysText, setStakeLockDaysText] = useState<string>("30");
   const [stakeBusy, setStakeBusy] = useState<boolean>(false);
   const [unstakeBusyId, setUnstakeBusyId] = useState<string | null>(null);
+  const [claimBusyId, setClaimBusyId] = useState<string | null>(null);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1055,8 +1055,7 @@ async function pasteRecipientFromClipboard() {
   ====================== */
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: T.bg, paddingTop: insets.top }}>
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-        <View style={{ flex: 1 }}>
+      <View style={{ flex: 1 }}>
           <KeyboardAvoidingView
       style={{
         flex: 1,
@@ -2030,8 +2029,7 @@ async function pasteRecipientFromClipboard() {
         </View>
       )}
     </KeyboardAvoidingView>
-        </View>
-      </TouchableWithoutFeedback>
+      </View>
     </SafeAreaView>
   );
 }

@@ -175,54 +175,55 @@ async function setLastMint(wallet, ms) {
 }
 
 async function getPendingOutgoingCost(wallet) {
+  // Outgoing cost reserved from spendable balance.
+  // - send/stake reserve amount + fees
+  // - claim/unstake/unlock reserve fees only (payout/inflow is not spendable until confirmed)
   const row = await get(
     db,
-    `SELECT COALESCE(SUM(amount + gasFee + serviceFee), 0) AS s
-     FROM transactions
-     WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?`,
-    [wallet]
+    `SELECT
+       COALESCE((SELECT SUM(amount + gasFee + serviceFee)
+                 FROM transactions
+                 WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?), 0) +
+       COALESCE((SELECT SUM(gasFee + serviceFee)
+                 FROM transactions
+                 WHERE status='pending' AND type IN ('claim','unstake','unlock') AND fromWallet=?), 0)
+     AS s`,
+    [wallet, wallet]
   );
   return Number(row?.s || 0);
 }
 
 async function getPendingDelta(wallet) {
+  // Net pending change to balance (for UI "Pending" display).
+  // Incoming: mint, received sends, claim payouts, unstake payouts
+  // Outgoing: send/stake total cost, and fees for claim/unstake/unlock
   const row = await get(
     db,
     `SELECT
-      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?), 0) +
-      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='send' AND toWallet=?), 0) -
-      COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='unstake' AND toWallet=?), 0) +
-      COALESCE((SELECT SUM(amount + gasFee + serviceFee) FROM transactions WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?), 0) -
-      COALESCE((SELECT SUM(gasFee + serviceFee) FROM transactions WHERE status='pending' AND type='unstake' AND fromWallet=?), 0)
-    AS d`,
-    [wallet, wallet, wallet, wallet, wallet]
+       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?), 0) +
+       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='send' AND toWallet=?), 0) +
+       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='claim' AND toWallet=?), 0) +
+       COALESCE((SELECT SUM(amount) FROM transactions WHERE status='pending' AND type='unstake' AND toWallet=?), 0) -
+       COALESCE((SELECT SUM(amount + gasFee + serviceFee) FROM transactions WHERE status='pending' AND type IN ('send','stake') AND fromWallet=?), 0) -
+       COALESCE((SELECT SUM(gasFee + serviceFee) FROM transactions WHERE status='pending' AND type IN ('claim','unstake','unlock') AND fromWallet=?), 0)
+     AS d`,
+    [wallet, wallet, wallet, wallet, wallet, wallet]
   );
   return Number(row?.d || 0);
 }
 
 async function countPendingForWallet({ type, wallet }) {
-  if (type === "send") {
-    const r = await get(
-      db,
-      `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type='send' AND fromWallet=?`,
-      [wallet]
-    );
+  const t = String(type || "");
+  if (t === "send") {
+    const r = await get(db, `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type='send' AND fromWallet=?`, [wallet]);
     return Number(r?.c || 0);
   }
-  if (type === "mint") {
-    const r = await get(
-      db,
-      `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?`,
-      [wallet]
-    );
+  if (t === "mint") {
+    const r = await get(db, `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type='mint' AND toWallet=?`, [wallet]);
     return Number(r?.c || 0);
   }
-  if (type === "stake" || type === "unstake") {
-    const r = await get(
-      db,
-      `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type=? AND fromWallet=?`,
-      [type, wallet]
-    );
+  if (t === "stake" || t === "unstake" || t === "unlock" || t === "claim") {
+    const r = await get(db, `SELECT COUNT(*) AS c FROM transactions WHERE status='pending' AND type=? AND fromWallet=?`, [t, wallet]);
     return Number(r?.c || 0);
   }
   return 0;
@@ -362,7 +363,7 @@ async function buildBlockWithRules() {
         await failTx(tx.id, height, "expired");
         continue;
       }
-      if (!Number.isFinite(amt) || amt <= 0) {
+      if (!Number.isFinite(amt) || (amt <= 0 && tx.type !== "unlock")) {
         await failTx(tx.id, height, "invalid_amount");
         continue;
       }
