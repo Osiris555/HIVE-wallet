@@ -6,7 +6,8 @@ import * as SecureStore from "expo-secure-store";
 import Constants from "expo-constants";
 import { NativeModules, Platform } from "react-native";
 
-export type TxType = "mint" | "send" | "stake" | "unstake";
+// Keep in sync with apps/mobile/honey-dev/server.js
+export type TxType = "mint" | "send" | "stake" | "unlock" | "claim" | "unstake";
 
 export type Transaction = {
   id: string;
@@ -34,12 +35,14 @@ export type StakingPosition = {
   lockDays: number;
   startMs: number;
   unlockAtMs: number;
-  status: "staked" | "unstaked";
+  // server supports: staked | unlocking | unstaked
+  status: "staked" | "unlocking" | "unstaked";
   rewardAccrued: number;
   rewardPaid: number;
   unstakedAtMs?: number | null;
   stakeTxId?: string | null;
   unstakeTxId?: string | null;
+  // legacy field kept for UI compatibility
   canUnstake: boolean;
 };
 
@@ -161,7 +164,23 @@ function resolveApiBase(): string {
   return `http://${host}:3000`;
 }
 
-const API_BASE = resolveApiBase();
+// Allow runtime override (helpful on iOS physical devices when Expo runs in tunnel mode).
+let API_BASE = resolveApiBase();
+
+export function getApiBase() {
+  return API_BASE;
+}
+
+export function setApiBase(next: string) {
+  const v = String(next || "").trim();
+  if (!v) return;
+  API_BASE = v;
+}
+
+export function resetApiBase() {
+  API_BASE = resolveApiBase();
+  return API_BASE;
+}
 
 const KEY_STORAGE_PRIV = "HIVE_PRIVKEY_B64";
 const KEY_STORAGE_PUB = "HIVE_PUBKEY_B64";
@@ -470,9 +489,38 @@ export async function getTransactionById(txid: string): Promise<any> {
 }
 
 export function computeServiceFee(amount: number, rate?: number) {
+  // Use deterministic decimal math (BigInt) to avoid float drift across JS engines (Hermes vs V8),
+  // which can break signature checks on the server when serviceFee must match exactly.
   const rRaw = Number(rate);
   const r = Number.isFinite(rRaw) && rRaw > 0 ? rRaw : 0.00005; // 0.005% default
-  return Number((Number(amount) * r).toFixed(8));
+
+  // Convert a decimal number to "sat" BigInt using 8-decimal fixed formatting.
+  const dec8ToSat = (n: number): bigint => {
+    const s = fmt8(n); // always "A.BBBBBBBB"
+    const [a, b] = s.split(".");
+    return BigInt((a || "0") + (b || "").padEnd(8, "0"));
+  };
+
+  const amountSat = dec8ToSat(Number(amount) || 0);
+  const rateScaled = dec8ToSat(Number(r) || 0); // rate scaled by 1e8
+
+  // feeSat = round(amountSat * rateScaled / 1e8)
+  const numerator = amountSat * rateScaled;
+  const feeSat = (numerator + 50_000_000n) / 100_000_000n;
+
+  return Number(feeSat) / 1e8;
+}
+
+function computeStakingRewardClient(principal: number, startMs: number, endMs: number, apr: number) {
+  const p = Number(principal);
+  const s = Number(startMs);
+  const e = Number(endMs);
+  const a = Number(apr);
+  if (!Number.isFinite(p) || p <= 0) return 0;
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) return 0;
+  const yearMs = 365 * 24 * 60 * 60 * 1000;
+  const r = p * (Number.isFinite(a) ? a : 0) * ((e - s) / yearMs);
+  return Number(r.toFixed(8));
 }
 
 export async function quoteSend(to: string, amount: number) {
@@ -558,9 +606,9 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
 
 export async function unstake(params: { positionId: string; gasFee?: number }): Promise<any> {
   const wallet = await ensureWalletId();
-  const status = await getChainStatus();
-  const chainId = String(status.chainId || "");
-  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+  const chainStatus = await getChainStatus();
+  const chainId = String(chainStatus.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, chainStatus);
 
   const acct = await getAccount(wallet);
   if (!acct?.registered) await registerWallet();
@@ -571,16 +619,25 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
   const positionId = String(params.positionId || "").trim();
   if (!positionId) throw makeError("Missing positionId", 400);
 
-  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const gasFee = Number(params.gasFee ?? chainStatus.minGasFee ?? ONE_SAT) || ONE_SAT;
   const serviceFee = 0;
-  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+  const expiresAtMs = timestamp + Number(chainStatus.txTtlMs || 60000);
 
-  // Server recomputes payout/reward; we just sign with a placeholder amount (0) and metaJson.
-  // However, the server requires the signed amount to match its computed payout.
-  // So we prefetch the position to estimate accrued reward and sign with that expected payout.
-  const { positions } = await getStakingPositions(wallet);
-  const pos = positions.find((p) => p.id === positionId);
-  const payout = Number(((pos?.principal || 0) + (pos?.rewardAccrued || 0)).toFixed(8));
+  // Server requires signed amount to match its computed payout.
+  // Compute payout deterministically using the same timestamp we sign with.
+  const { positions, apr } = await getStakingPositions(wallet);
+  const pos: any = positions.find((p) => p.id === positionId);
+  const principal = Number(pos?.principal || 0);
+  const startMs = Number(pos?.startMs || 0);
+  const rewardsFrozenAtMs = pos?.rewardsFrozenAtMs == null ? null : Number(pos?.rewardsFrozenAtMs);
+  const rewardPaid = Number(pos?.rewardPaid || 0);
+  const posStatus = String(pos?.status || "");
+
+  // If unlocking, rewards freeze at rewardsFrozenAtMs.
+  const rewardEnd = posStatus === "unlocking" ? Number(rewardsFrozenAtMs || timestamp) : timestamp;
+  const totalReward = computeStakingRewardClient(principal, startMs, rewardEnd, Number(apr || 0));
+  const remainingReward = Number(Math.max(0, totalReward - rewardPaid).toFixed(8));
+  const payout = Number((principal + remainingReward).toFixed(8));
   if (!Number.isFinite(payout) || payout <= 0) throw makeError("Unable to compute unstake payout", 500, pos);
 
   const metaJson = JSON.stringify({ positionId });
@@ -660,11 +717,14 @@ export async function unlockStakePosition(params: { positionId: string; gasFee?:
   });
 }
 
+// Back-compat alias used by UI
+export const unlockStake = unlockStakePosition;
+
 export async function claimStakingReward(params: { positionId: string; gasFee?: number }): Promise<any> {
   const wallet = await ensureWalletId();
-  const status = await getChainStatus();
-  const chainId = String(status.chainId || "");
-  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+  const chainStatus = await getChainStatus();
+  const chainId = String(chainStatus.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, chainStatus);
 
   const acct = await getAccount(wallet);
   if (!acct?.registered) await registerWallet();
@@ -675,17 +735,26 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
   const positionId = String(params.positionId || "").trim();
   if (!positionId) throw makeError("Missing positionId", 400);
 
-  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
-  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+  const gasFee = Number(params.gasFee ?? chainStatus.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const expiresAtMs = timestamp + Number(chainStatus.txTtlMs || 60000);
 
-  // sign exact claimable amount so server can verify signature deterministically
-  const { positions } = await getStakingPositions(wallet);
-  const pos = positions.find((p) => p.id === positionId);
-  const claimable = Number((pos as any)?.claimable ?? Math.max(0, Number(pos?.rewardAccrued || 0) - Number((pos as any)?.rewardPaid || 0)));
+  // Sign an amount that the server can recompute deterministically.
+  // We compute claimable using the same timestamp we sign with.
+  const { positions, apr } = await getStakingPositions(wallet);
+  const pos: any = positions.find((p) => p.id === positionId);
+  const principal = Number(pos?.principal || 0);
+  const startMs = Number(pos?.startMs || 0);
+  const rewardsFrozenAtMs = pos?.rewardsFrozenAtMs == null ? null : Number(pos?.rewardsFrozenAtMs);
+  const rewardPaid = Number(pos?.rewardPaid || 0);
+  const posStatus = String(pos?.status || "");
+
+  const endMs = posStatus === "unlocking" ? Number(rewardsFrozenAtMs || timestamp) : timestamp;
+  const totalReward = computeStakingRewardClient(principal, startMs, endMs, Number(apr || 0));
+  const claimable = Number(Math.max(0, totalReward - rewardPaid).toFixed(8));
   const amt = Number(claimable.toFixed(8));
   if (!Number.isFinite(amt) || amt <= 0) throw makeError("Nothing to claim", 400, { claimable: amt });
 
-  const serviceFee = computeServiceFee(amt);
+  const serviceFee = computeServiceFee(amt, chainStatus.serviceFeeRate);
   const metaJson = JSON.stringify({ positionId });
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalSignedMessage({

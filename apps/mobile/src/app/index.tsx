@@ -8,6 +8,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import {
+  Dimensions,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -39,6 +40,9 @@ import {
   claimStakingReward,
   unstake,
   getStakingPositions,
+  getApiBase,
+  setApiBase,
+  resetApiBase,
   parseAmount8,
   getAccount,
   getTransactionById,
@@ -284,6 +288,7 @@ function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
 
 export default function Index() {
   const insets = useSafeAreaInsets();
+  const stakingModalHeight = Math.min(640, Math.max(420, Dimensions.get("window").height - (insets.top + insets.bottom) - 140));
   /* ======================
      Core state (NO DUPLICATES)
   ====================== */
@@ -402,9 +407,28 @@ export default function Index() {
   const [stakeBusy, setStakeBusy] = useState<boolean>(false);
   const [unstakeBusyId, setUnstakeBusyId] = useState<string | null>(null);
   const [claimBusyId, setClaimBusyId] = useState<string | null>(null);
+  const [claimConfirmOpen, setClaimConfirmOpen] = useState(false);
+  const [claimPreview, setClaimPreview] = useState<null | {
+    positionId: string;
+    claimable: number;
+    gasFee: number;
+    serviceFee: number;
+    totalFee: number;
+    timestamp: number;
+  }>(null);
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Native devices sometimes can't infer the LAN host (e.g. Expo tunnel mode).
+  // Provide a simple override for the node API base.
+  const [apiBaseText, setApiBaseText] = useState<string>(() => {
+    try {
+      return getApiBase();
+    } catch {
+      return "";
+    }
+  });
   const [stakingModalOpen, setStakingModalOpen] = useState(false);
   const [stakingTab, setStakingTab] = useState<"stake" | "unstake">("stake");
 
@@ -531,6 +555,19 @@ async function pasteRecipientFromClipboard() {
     return Number((mg + priorityFee).toFixed(8));
   }
 
+  // Load persisted API base override (if any).
+  useEffect(() => {
+    (async () => {
+      const saved = await kvGet("HIVE_API_BASE_OVERRIDE");
+      if (saved) {
+        setApiBase(saved);
+        setApiBaseText(saved);
+      } else {
+        setApiBaseText(getApiBase());
+      }
+    })();
+  }, []);
+
 
   // ✅ keep derived gas text updated (never user typed)
   useEffect(() => {
@@ -584,8 +621,11 @@ async function pasteRecipientFromClipboard() {
       const res = await getStakingPositions(wallet);
       setStakingPositions(res?.positions || []);
       setStakingApr(Number(res?.apr || 0));
-    } catch {
-      // ignore staking load errors in early dev
+    } catch (e: any) {
+      // Don't swallow this on iOS — it's exactly why the Unstake tab can look blank.
+      const msg = String(e?.message || e || "");
+      if (msg) setMessage(`Staking load failed: ${msg}`);
+      console.warn("Staking load failed", e);
     }
   }
 
@@ -822,14 +862,51 @@ async function pasteRecipientFromClipboard() {
     }
   }
 
-  async function handleClaim(positionId: string) {
+  async function openClaimConfirm(positionId: string) {
     if (claimBusyId) return;
     const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
     const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+
     setClaimBusyId(positionId);
     try {
-      await claimStakingReward({ positionId, gasFee: chosenGas });
+      // Refresh staking data right before quoting so iOS/web are consistent.
+      const res = await getStakingPositions(wallet);
+      const pos: any = (res?.positions || []).find((p: any) => String(p.id) === String(positionId));
+      const claimable = Number(pos?.claimable || 0);
+      if (!Number.isFinite(claimable) || claimable <= 0) {
+        setMessage("Nothing to claim.");
+        return;
+      }
+
+      const svc = computeServiceFee(claimable, serviceFeeRate);
+      const totalFee = Number((chosenGas + svc).toFixed(8));
+
+      setClaimPreview({
+        positionId,
+        claimable,
+        gasFee: chosenGas,
+        serviceFee: svc,
+        totalFee,
+        timestamp: Date.now(),
+      });
+      setClaimConfirmOpen(true);
+    } catch (e: any) {
+      setMessage(`Claim quote failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setClaimBusyId(null);
+    }
+  }
+
+  async function handleClaimConfirm() {
+    if (!claimPreview) return;
+    if (claimBusyId) return;
+
+    setClaimBusyId(claimPreview.positionId);
+    try {
+      await claimStakingReward({ positionId: claimPreview.positionId, gasFee: claimPreview.gasFee });
       setMessage("Claim submitted ✅");
+      setClaimConfirmOpen(false);
+      setClaimPreview(null);
       await hardRefreshAll();
     } catch (e: any) {
       setMessage(`Claim failed: ${e?.message || "Unknown error"}`);
@@ -1356,8 +1433,18 @@ async function pasteRecipientFromClipboard() {
                 const from = String(tx?.from || "").trim();
                 const to = String(tx?.to || "").trim();
 
+                // Direction:
+                // - For claim/mint/unstake, value is credited to the wallet even if from==to.
+                // - Otherwise, infer direction from from/to.
+                const txType = String(tx?.type || "").toLowerCase();
                 const direction =
-                  w && from === w ? "Sent" : w && to === w ? "Received" : String(tx?.type || "Tx");
+                  txType === "claim" || txType === "mint" || txType === "unstake"
+                    ? "Received"
+                    : w && from === w
+                      ? "Sent"
+                      : w && to === w
+                        ? "Received"
+                        : String(tx?.type || "Tx");
 
                 const amt = Number(tx?.amount || 0);
                 const signedAmount = direction === "Sent" ? -amt : direction === "Received" ? amt : amt;
@@ -1538,7 +1625,7 @@ async function pasteRecipientFromClipboard() {
           }}
         >
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <View style={{ padding: 14, maxHeight: 640 }}>
+            <View style={{ padding: 14, height: stakingModalHeight }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Staking</Text>
                 <Pressable onPress={() => setStakingModalOpen(false)}>
@@ -1556,7 +1643,7 @@ async function pasteRecipientFromClipboard() {
               </View>
 
               {stakingTab === "stake" && (
-                <View style={{ marginTop: 12 }}>
+                <ScrollView style={{ marginTop: 12, flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled">
                   <Text style={{ color: T.sub, fontWeight: "800" }}>APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}</Text>
 
                   <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
@@ -1598,14 +1685,21 @@ async function pasteRecipientFromClipboard() {
                     disabled={stakeBusy}
                     onPress={handleStake}
                   />
-                </View>
+                </ScrollView>
               )}
 
               {stakingTab === "unstake" && (
-                <View style={{ marginTop: 12, flex: 1 }}>
-                  <ScrollView showsVerticalScrollIndicator contentContainerStyle={{ paddingBottom: 16 }}>
+                <View style={{ marginTop: 12, flex: 1, minHeight: 120 }}>
+                  <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator contentContainerStyle={{ paddingBottom: 16, flexGrow: 1 }}>
                     {stakingPositions.length === 0 ? (
-                      <Text style={{ color: T.sub, fontWeight: "800" }}>No staking positions.</Text>
+                      <>
+                        <Text style={{ color: T.sub, fontWeight: "800" }}>No staking positions.</Text>
+                        <View style={{ marginTop: 10, padding: 10, borderWidth: 1, borderColor: T.border, borderRadius: 12, backgroundColor: "rgba(0,0,0,0.25)" }}>
+                        <Text style={{ color: T.sub, fontWeight: "800" }}>Wallet: {wallet}</Text>
+                        <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>API: {apiBase || "(default)"}</Text>
+                        {stakingLoadError ? <Text style={{ color: "#ffb3b3", marginTop: 4, fontWeight: "900" }}>Error: {stakingLoadError}</Text> : null}
+                      </View>
+                      </>
                     ) : (
                       stakingPositions.map((p) => (
                         <View
@@ -1638,7 +1732,7 @@ async function pasteRecipientFromClipboard() {
                               T={T}
                               label={claimBusyId === String(p.id) ? "Working..." : "Claim"}
                               variant={claimBusyId === String(p.id) ? "outline" : "green"}
-                              onPress={() => handleClaim(String(p.id))}
+                              onPress={() => openClaimConfirm(String(p.id))}
                               disabled={!!claimBusyId}
                             />
                           )}
@@ -1666,6 +1760,66 @@ async function pasteRecipientFromClipboard() {
                   </ScrollView>
                 </View>
               )}
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* Claim confirm overlay (opens on top of the staking modal) */}
+      {claimConfirmOpen && claimPreview && (
+        <Overlay
+          onClose={() => {
+            setClaimConfirmOpen(false);
+            setClaimPreview(null);
+          }}
+        >
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14, maxWidth: 520 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Confirm Claim</Text>
+                <Pressable
+                  onPress={() => {
+                    setClaimConfirmOpen(false);
+                    setClaimPreview(null);
+                  }}
+                >
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Position: {String(claimPreview.positionId).slice(0, 10)}…</Text>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>Claimable: {fmt8(Number(claimPreview.claimable || 0))}</Text>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>Gas fee: {fmt8(Number(claimPreview.gasFee || 0))}</Text>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>Service fee: {fmt8(Number(claimPreview.serviceFee || 0))}</Text>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "900" }}>Total fee: {fmt8(Number(claimPreview.totalFee || 0))}</Text>
+
+              {message ? (
+                <Text style={{ color: T.text, marginTop: 10, fontWeight: "800" }}>{message}</Text>
+              ) : null}
+
+              <View style={{ height: 14 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
+                    label="Back"
+                    variant="outline"
+                    onPress={() => {
+                      setClaimConfirmOpen(false);
+                      setClaimPreview(null);
+                    }}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
+                    label={claimBusyId ? "Submitting…" : "Confirm"}
+                    variant="green"
+                    disabled={!!claimBusyId}
+                    onPress={handleClaimConfirm}
+                  />
+                </View>
+              </View>
             </View>
           </GlassCard>
         </Overlay>
@@ -1989,6 +2143,72 @@ async function pasteRecipientFromClipboard() {
                   />
                 </View>
               </View>
+
+              {Platform.OS !== "web" && (
+                <>
+                  <View style={{ height: 16 }} />
+                  <Text style={{ color: T.sub, fontWeight: "800" }}>API Base (iOS/Android)</Text>
+                  <Text style={{ color: T.sub, marginTop: 6 }}>
+                    If your device can’t reach the node (common with Expo Tunnel), set this to your LAN IP,
+                    e.g. http://192.168.0.11:3000
+                  </Text>
+                  <View style={{ height: 10 }} />
+                  <TextInput
+                    value={apiBaseText}
+                    onChangeText={setApiBaseText}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="http://192.168.x.x:3000"
+                    placeholderTextColor={T.sub}
+                    style={{
+                      borderWidth: 1,
+                      borderColor: T.border,
+                      borderRadius: 12,
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      color: T.text,
+                      backgroundColor: T.glass2,
+                    }}
+                  />
+                  <View style={{ height: 10 }} />
+                  <View style={{ flexDirection: "row", gap: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Button
+                        T={T}
+                        label="Save"
+                        variant="blue"
+                        onPress={async () => {
+                          const v = String(apiBaseText || "").trim();
+                          if (!v) {
+                            showToast("Enter an API base URL", "warn");
+                            return;
+                          }
+                          await kvSet("HIVE_API_BASE_OVERRIDE", v);
+                          setApiBase(v);
+                          // Re-pull data immediately so the user sees positions without restarting.
+                          // Use the existing unified refresher (balances, txs, staking, etc.)
+                          // so we don't rely on non-existent helpers.
+                          hardRefreshAll().catch(() => {});
+                          showToast("API base saved", "info");
+                        }}
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Button
+                        T={T}
+                        label="Reset"
+                        variant="outline"
+                        onPress={async () => {
+                          await kvDel("HIVE_API_BASE_OVERRIDE");
+                          const d = resetApiBase();
+                          setApiBaseText(d);
+                          showToast("Override cleared", "info");
+                        }}
+                      />
+                    </View>
+                  </View>
+                </>
+              )}
 
               <View style={{ height: 14 }} />
               <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />

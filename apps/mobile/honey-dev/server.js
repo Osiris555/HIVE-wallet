@@ -1348,10 +1348,31 @@ app.post("/unstake", async (req, res) => {
     if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
     if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
 
-    const pos = await get(db, `SELECT id, wallet, principal, startMs, unlockAtMs, status FROM staking_positions WHERE id=?`, [pid]);
+    // Use the signed timestamp for reward evaluation (within allowed skew).
+    const nowMs = now();
+    const tsEval = Number(timestamp);
+    if (!Number.isFinite(tsEval)) return res.status(400).json({ error: "Invalid timestamp" });
+    if (tsEval < nowMs - 5 * 60 * 1000) return res.status(400).json({ error: "Timestamp too old" });
+    if (Number(timestamp) > nowMs + 30 * 1000) return res.status(400).json({ error: "Timestamp too far in future" });
+
+    const pos = await get(
+      db,
+      `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, withdrawAtMs, rewardsFrozenAtMs, status, rewardPaid
+         FROM staking_positions
+        WHERE id=?`,
+      [pid]
+    );
     if (!pos || pos.wallet !== from) return res.status(404).json({ error: "Position not found" });
-    if (String(pos.status) !== 'staked') return res.status(400).json({ error: "Position is not staked" });
-    if (now() < Number(pos.unlockAtMs)) return res.status(400).json({ error: "Position is still locked", unlockAtMs: Number(pos.unlockAtMs) });
+    const st = String(pos.status);
+    if (st === "staked") {
+      if (tsEval < Number(pos.unlockAtMs)) return res.status(400).json({ error: "Position is still locked", unlockAtMs: Number(pos.unlockAtMs) });
+    } else if (st === "unlocking") {
+      if (tsEval < Number(pos.withdrawAtMs || 0)) {
+        return res.status(400).json({ error: "Position is still unlocking", withdrawAtMs: Number(pos.withdrawAtMs || 0) });
+      }
+    } else {
+      return res.status(400).json({ error: "Position is not withdrawable" });
+    }
 
     const { minGasFee } = await currentMinGasFee();
     const gasFee = Number(req.body?.gasFee ?? minGasFee);
@@ -1381,8 +1402,11 @@ app.post("/unstake", async (req, res) => {
     }
 
     const principal = Number(pos.principal);
-    const reward = computeStakingReward(principal, Number(pos.startMs), now());
-    const payout = Number((principal + reward).toFixed(8));
+    const rewardEnd = st === "unlocking" ? Number(pos.rewardsFrozenAtMs || tsEval) : tsEval;
+    const totalReward = computeStakingReward(principal, Number(pos.startMs), rewardEnd);
+    const alreadyPaid = Number(pos.rewardPaid || 0);
+    const remainingReward = Number(Math.max(0, totalReward - alreadyPaid).toFixed(8));
+    const payout = Number((principal + remainingReward).toFixed(8));
 
     const metaJson = JSON.stringify({ positionId: pid });
     const msg = canonicalSignedMessage({
@@ -1417,7 +1441,7 @@ app.post("/unstake", async (req, res) => {
       expiresAtMs,
     });
     await insertTx(tx);
-    return res.json({ success: true, chainId: CHAIN_ID, tx, payout, reward });
+    return res.json({ success: true, chainId: CHAIN_ID, tx, payout, remainingReward });
   } catch (e) {
     return res.status(500).json({ error: e.message || "unstake failed" });
   }
@@ -1520,9 +1544,14 @@ app.post("/staking/claim", async (req, res) => {
     if (!pos || pos.wallet !== from) return res.status(404).json({ error: "Position not found" });
     if (String(pos.status) !== "staked") return res.status(400).json({ error: "Cannot claim while unlocking/unstaked" });
 
-    const ts = now();
+    // Clamp evaluation timestamp to avoid signature drift while preventing future timestamps.
+    const nowMs = now();
+    const tsEval = Math.min(nowMs, Number(timestamp));
+    if (!Number.isFinite(tsEval)) return res.status(400).json({ error: "Invalid timestamp" });
+    if (tsEval < nowMs - 5 * 60 * 1000) return res.status(400).json({ error: "Timestamp too old" });
+    if (Number(timestamp) > nowMs + 30 * 1000) return res.status(400).json({ error: "Timestamp too far in future" });
     const principal = Number(pos.principal);
-    const endMs = Number(pos.rewardsFrozenAtMs || ts);
+    const endMs = Number(pos.rewardsFrozenAtMs || tsEval);
     const totalReward = computeStakingReward(principal, Number(pos.startMs), endMs);
     const alreadyPaid = Number(pos.rewardPaid || 0);
     const claimable = Number(Math.max(0, totalReward - alreadyPaid).toFixed(8));
