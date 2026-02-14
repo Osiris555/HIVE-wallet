@@ -78,10 +78,10 @@ function isWeb() {
 
 function stripHost(input: string): string {
   // Accept:
-  //  - 192.168.0.10:8081
-  //  - http://192.168.0.10:8081
-  //  - http://192.168.0.10:8081/...
-  //  - 192.168.0.10
+  //  - 192.168.0.20:8081
+  //  - http://192.168.0.20:8081
+  //  - http://192.168.0.20:8081/...
+  //  - 192.168.0.20
   const s = String(input || "").trim();
   if (!s) return "";
   try {

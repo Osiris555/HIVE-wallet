@@ -2150,7 +2150,7 @@ async function pasteRecipientFromClipboard() {
                   <Text style={{ color: T.sub, fontWeight: "800" }}>API Base (iOS/Android)</Text>
                   <Text style={{ color: T.sub, marginTop: 6 }}>
                     If your device can’t reach the node (common with Expo Tunnel), set this to your LAN IP,
-                    e.g. http://192.168.0.11:3000
+                    e.g. http://192.168.20.11:3000
                   </Text>
                   <View style={{ height: 10 }} />
                   <TextInput
