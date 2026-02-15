@@ -45,6 +45,32 @@ const STAKE_VAULT = "HNY_STAKE_VAULT";
 // NOTE: This is a wallet-facing feature for testnet/devnet. Mainnet economics can replace this later.
 const STAKING_APR = Number(process.env.HNY_STAKING_APR || 0.05); // 5% APR default
 
+
+// ========== REAL-TIME PRICE FEEDS - PYTH NETWORK ==========
+const { fetchPythPrices } = require('./pyth-price-feed');
+
+async function fetchRealPrices() {
+  const prices = await fetchPythPrices();
+
+  for (const [symbol, price] of Object.entries(prices)) {
+    await run(
+      db,
+      `UPDATE tokens SET mockPriceUSD=? WHERE symbol=?`,
+      [price, symbol]
+    ).catch(() => { }); // Ignore errors
+  }
+
+  return prices;
+}
+
+// Fetch prices every minute
+setInterval(() => {
+  fetchRealPrices().catch(console.error);
+}, 60000);
+
+// Initial fetch
+fetchRealPrices().catch(console.error);
+
 const db = openDb();
 
 /* ======================
@@ -482,6 +508,29 @@ async function buildBlockWithRules() {
           [tx.id, from, amt, lockDays, startMs, unlockAtMs, tx.id, ts]
         );
 
+        // Mint stHNY tokens (1:1 with staked amount)
+        const stHnyBal = await get(
+          db,
+          `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol='stHNY'`,
+          [from]
+        );
+        
+        if (stHnyBal) {
+          const newBal = Number(stHnyBal.balance) + amt;
+          await run(
+            db,
+            `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol='stHNY'`,
+            [newBal, from]
+          );
+        } else {
+          await run(
+            db,
+            `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs)
+             VALUES (?, 'stHNY', ?, ?)`,
+            [from, amt, ts]
+          );
+        }
+
         await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
         confirmedIds.push(tx.id);
         continue;
@@ -707,6 +756,419 @@ async function buildBlockWithRules() {
             WHERE id=?`,
           [alreadyPaid + remainingReward, ts, tx.id, positionId]
         );
+
+        // Burn stHNY tokens (principal amount, not including rewards)
+        const stHnyBal = await get(
+          db,
+          `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol='stHNY'`,
+          [wallet]
+        );
+        
+        if (stHnyBal && Number(stHnyBal.balance) >= principal) {
+          const newBal = Number(stHnyBal.balance) - principal;
+          await run(
+            db,
+            `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol='stHNY'`,
+            [newBal, wallet]
+          );
+        }
+
+        await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
+      if (tx.type === "token_send") {
+        const wallet = tx.fromWallet;
+        const to = tx.toWallet;
+        if (!wallet || !to) {
+          await failTx(tx.id, height, "invalid_token_send");
+          continue;
+        }
+        if (isOverLimit(wallet)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        const tokenSymbol = String(meta?.tokenSymbol || "").trim();
+        if (!tokenSymbol || tokenSymbol === 'HNY') {
+          await failTx(tx.id, height, "invalid_token_symbol");
+          continue;
+        }
+
+        const amt = Number(tx.amount);
+
+        // Check sender's token balance
+        const senderTokenBal = await get(
+          db,
+          `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+          [wallet, tokenSymbol]
+        );
+        if (!senderTokenBal || Number(senderTokenBal.balance) < amt) {
+          await failTx(tx.id, height, "insufficient_token_balance");
+          continue;
+        }
+
+        // Check sender can pay HNY fees
+        const walletBal = working[wallet] || 0;
+        if (walletBal < totalFee) {
+          await failTx(tx.id, height, "insufficient_hny_for_fees");
+          continue;
+        }
+
+        bump(wallet);
+        
+        // Deduct HNY fees
+        working[wallet] = walletBal - totalFee;
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+        // ========== SPECIAL HANDLING FOR stHNY TRANSFERS ==========
+        if (tokenSymbol === 'stHNY') {
+          // When transferring stHNY, we need to split the underlying staking positions
+          // This allows the recipient to actually unstake and withdraw their portion
+          
+          // Get sender's active staking positions (oldest first for FIFO)
+          const senderPositions = await all(
+            db,
+            `SELECT id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
+                    unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId
+             FROM staking_positions
+             WHERE wallet=? AND status IN ('staked', 'unlocking')
+             ORDER BY startMs ASC`,
+            [wallet]
+          );
+
+          let remainingToTransfer = amt;
+          const splitPositions = [];
+
+          for (const pos of senderPositions) {
+            if (remainingToTransfer <= 0) break;
+
+            const posPrincipal = Number(pos.principal);
+            const transferFromThisPos = Math.min(remainingToTransfer, posPrincipal);
+
+            if (transferFromThisPos >= posPrincipal) {
+              // Transfer entire position - just change ownership
+              await run(
+                db,
+                `UPDATE staking_positions SET wallet=? WHERE id=?`,
+                [to, pos.id]
+              );
+              splitPositions.push({ positionId: pos.id, amount: posPrincipal, action: 'transferred' });
+            } else {
+              // Partial transfer - split the position
+              const remainingInOriginal = posPrincipal - transferFromThisPos;
+              
+              // Update original position with reduced principal
+              await run(
+                db,
+                `UPDATE staking_positions SET principal=? WHERE id=?`,
+                [remainingInOriginal, pos.id]
+              );
+
+              // Create new position for recipient with transferred amount
+              const newPosId = `${pos.id}_split_${Date.now()}`;
+              await run(
+                db,
+                `INSERT INTO staking_positions
+                 (id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
+                  unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId, createdAtMs)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                  newPosId,
+                  to,
+                  transferFromThisPos,
+                  pos.lockDays,
+                  pos.startMs,
+                  pos.unlockAtMs,
+                  pos.status,
+                  0, // Recipient starts with 0 rewards paid (they get their share going forward)
+                  pos.unlockingAtMs,
+                  pos.withdrawAtMs,
+                  pos.rewardsFrozenAtMs,
+                  pos.stakeTxId,
+                  ts
+                ]
+              );
+              
+              splitPositions.push({ 
+                originalId: pos.id, 
+                newId: newPosId, 
+                originalRemaining: remainingInOriginal,
+                transferred: transferFromThisPos 
+              });
+            }
+
+            remainingToTransfer -= transferFromThisPos;
+          }
+
+          if (remainingToTransfer > 0.00000001) {
+            // Shouldn't happen if balances are consistent, but safety check
+            await failTx(tx.id, height, "insufficient_staking_positions_for_sthny_transfer");
+            continue;
+          }
+        }
+
+        // Transfer token balances (works for all tokens including stHNY)
+        const newSenderBal = Number(senderTokenBal.balance) - amt;
+        await run(
+          db,
+          `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
+          [newSenderBal, wallet, tokenSymbol]
+        );
+
+        // Get or create recipient token balance
+        const recipientTokenBal = await get(
+          db,
+          `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+          [to, tokenSymbol]
+        );
+        
+        if (recipientTokenBal) {
+          const newRecipientBal = Number(recipientTokenBal.balance) + amt;
+          await run(
+            db,
+            `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
+            [newRecipientBal, to, tokenSymbol]
+          );
+        } else {
+          await run(
+            db,
+            `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs)
+             VALUES (?, ?, ?, ?)`,
+            [to, tokenSymbol, amt, ts]
+          );
+        }
+
+        // SPECIAL HANDLING: Split staking positions when stHNY is transferred
+        if (tokenSymbol === 'stHNY') {
+          // Get sender's active staking positions (staked or unlocking)
+          const positions = await all(
+            db,
+            `SELECT id, principal, lockDays, startMs, unlockAtMs, status, rewardPaid, 
+                    unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId, unlockTxId
+             FROM staking_positions 
+             WHERE wallet=? AND status IN ('staked', 'unlocking')
+             ORDER BY startMs ASC`,
+            [wallet]
+          );
+
+          let remainingToTransfer = amt;
+          const transferredPositions = [];
+
+          // Split positions to transfer the requested stHNY amount
+          for (const pos of positions) {
+            if (remainingToTransfer <= 0) break;
+
+            const posPrincipal = Number(pos.principal);
+            const transferFromThis = Math.min(remainingToTransfer, posPrincipal);
+
+            if (transferFromThis >= posPrincipal) {
+              // Transfer entire position - just change wallet owner
+              await run(
+                db,
+                `UPDATE staking_positions SET wallet=? WHERE id=?`,
+                [to, pos.id]
+              );
+              transferredPositions.push({ id: pos.id, amount: posPrincipal });
+            } else {
+              // Partial transfer - split the position
+              // Reduce sender's position
+              const newSenderPrincipal = posPrincipal - transferFromThis;
+              await run(
+                db,
+                `UPDATE staking_positions SET principal=? WHERE id=?`,
+                [newSenderPrincipal, pos.id]
+              );
+
+              // Create new position for recipient with same parameters
+              const newPositionId = `${tx.id}-split-${pos.id}`;
+              await run(
+                db,
+                `INSERT INTO staking_positions 
+                 (id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
+                  unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId, unstakeTxId, createdAtMs)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+                [
+                  newPositionId,
+                  to,
+                  transferFromThis,
+                  pos.lockDays,
+                  pos.startMs,
+                  pos.unlockAtMs,
+                  pos.status,
+                  0, // New position starts with 0 rewards paid (recipient gets all future rewards)
+                  pos.unlockingAtMs,
+                  pos.withdrawAtMs,
+                  pos.rewardsFrozenAtMs,
+                  pos.stakeTxId,
+                  ts
+                ]
+              );
+              transferredPositions.push({ id: newPositionId, amount: transferFromThis });
+            }
+
+            remainingToTransfer -= transferFromThis;
+          }
+
+          // If we couldn't transfer enough (shouldn't happen due to balance check, but safety)
+          if (remainingToTransfer > 0.00000001) {
+            await failTx(tx.id, height, "insufficient_staking_positions");
+            continue;
+          }
+        }
+
+        await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
+        confirmedIds.push(tx.id);
+        continue;
+      }
+
+      if (tx.type === "swap") {
+        const wallet = tx.fromWallet;
+        if (!wallet) {
+          await failTx(tx.id, height, "invalid_swap");
+          continue;
+        }
+        if (isOverLimit(wallet)) {
+          await failTx(tx.id, height, "per_wallet_block_limit");
+          continue;
+        }
+
+        let meta;
+        try {
+          meta = tx.metaJson ? JSON.parse(tx.metaJson) : null;
+        } catch {
+          meta = null;
+        }
+        
+        const poolId = String(meta?.poolId || "").trim();
+        const tokenIn = String(meta?.tokenIn || "").trim();
+        const tokenOut = String(meta?.tokenOut || "").trim();
+        const amountIn = Number(meta?.amountIn || 0);
+        const minAmountOut = Number(meta?.minAmountOut || 0);
+
+        if (!poolId || !tokenIn || !tokenOut || amountIn <= 0) {
+          await failTx(tx.id, height, "invalid_swap_params");
+          continue;
+        }
+
+        const pool = await get(db, `SELECT * FROM liquidity_pools WHERE id=?`, [poolId]);
+        if (!pool) {
+          await failTx(tx.id, height, "pool_not_found");
+          continue;
+        }
+
+        const reversed = pool.tokenA === tokenOut && pool.tokenB === tokenIn;
+        const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+        const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+        const feeRate = Number(pool.feeRate || 0.003);
+
+        const amountInWithFee = amountIn * (1 - feeRate);
+        const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
+
+        if (amountOut < minAmountOut) {
+          await failTx(tx.id, height, "slippage_exceeded");
+          continue;
+        }
+
+        // Check balances
+        if (tokenIn === 'HNY') {
+          const walletBal = working[wallet] || 0;
+          if (walletBal < amountIn + totalFee) {
+            await failTx(tx.id, height, "insufficient_hny");
+            continue;
+          }
+        } else {
+          const tokenBal = await get(
+            db,
+            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+            [wallet, tokenIn]
+          );
+          if (!tokenBal || Number(tokenBal.balance) < amountIn) {
+            await failTx(tx.id, height, "insufficient_token_in");
+            continue;
+          }
+          
+          const walletBal = working[wallet] || 0;
+          if (walletBal < totalFee) {
+            await failTx(tx.id, height, "insufficient_hny_for_fees");
+            continue;
+          }
+        }
+
+        bump(wallet);
+
+        // Deduct tokenIn
+        if (tokenIn === 'HNY') {
+          working[wallet] = (working[wallet] || 0) - amountIn - totalFee;
+        } else {
+          const tokenBal = await get(
+            db,
+            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+            [wallet, tokenIn]
+          );
+          const newBal = Number(tokenBal.balance) - amountIn;
+          await run(
+            db,
+            `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
+            [newBal, wallet, tokenIn]
+          );
+          working[wallet] = (working[wallet] || 0) - totalFee;
+        }
+
+        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+        // Credit tokenOut
+        if (tokenOut === 'HNY') {
+          working[wallet] = (working[wallet] || 0) + amountOut;
+        } else {
+          const tokenBal = await get(
+            db,
+            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+            [wallet, tokenOut]
+          );
+          
+          if (tokenBal) {
+            const newBal = Number(tokenBal.balance) + amountOut;
+            await run(
+              db,
+              `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
+              [newBal, wallet, tokenOut]
+            );
+          } else {
+            await run(
+              db,
+              `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs)
+               VALUES (?, ?, ?, ?)`,
+              [wallet, tokenOut, amountOut, ts]
+            );
+          }
+        }
+
+        // Update pool reserves
+        const newReserveIn = reserveIn + amountIn;
+        const newReserveOut = reserveOut - amountOut;
+
+        if (reversed) {
+          await run(
+            db,
+            `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`,
+            [newReserveOut, newReserveIn, poolId]
+          );
+        } else {
+          await run(
+            db,
+            `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`,
+            [newReserveIn, newReserveOut, poolId]
+          );
+        }
+
         await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
         confirmedIds.push(tx.id);
         continue;
@@ -1146,7 +1608,7 @@ app.get("/staking/positions", async (req, res) => {
               unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, unlockTxId, lastClaimTxId,
               unstakedAtMs, stakeTxId, unstakeTxId
          FROM staking_positions
-        WHERE wallet=?
+        WHERE wallet=? AND status != 'unstaked'
         ORDER BY startMs DESC`,
       [wallet]
     );
@@ -1205,7 +1667,7 @@ app.get("/staking/positions/:wallet", async (req, res) => {
               unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, unlockTxId, lastClaimTxId,
               unstakedAtMs, stakeTxId, unstakeTxId
          FROM staking_positions
-        WHERE wallet=?
+        WHERE wallet=? AND status != 'unstaked'
         ORDER BY startMs DESC`,
       [wallet]
     );
@@ -1845,6 +2307,529 @@ app.post("/cancel", async (req, res) => {
     return res.json({ success: true, chainId: CHAIN_ID, tx: updated });
   } catch (e) {
     return res.status(500).json({ error: e.message || "cancel failed" });
+  }
+});
+
+/* ======================
+   PRICE FEEDS (PYTH NETWORK)
+====================== */
+// Update prices every 10 seconds
+let lastPriceUpdate = 0;
+async function ensureFreshPrices() {
+  const now = Date.now();
+  if (now - lastPriceUpdate > 10000) {
+    await fetchPythPrices();
+    lastPriceUpdate = now;
+  }
+}
+
+// Endpoint to manually trigger price update
+app.post("/prices/refresh", async (req, res) => {
+  try {
+    const prices = await fetchPythPrices();
+    return res.json({ success: true, prices, timestamp: Date.now() });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "price refresh failed" });
+  }
+});
+
+// Get current prices
+app.get("/prices", async (req, res) => {
+  try {
+    await ensureFreshPrices();
+    const tokens = await all(db, `SELECT symbol, name, mockPriceUSD as price, pythPriceId FROM tokens`);
+    const prices = {};
+    for (const t of tokens) {
+      prices[t.symbol] = {
+        price: Number(t.price),
+        name: t.name,
+        hasRealPrice: !!t.pythPriceId,
+      };
+    }
+    return res.json({ success: true, prices, timestamp: Date.now() });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "failed to fetch prices" });
+  }
+});
+
+/* ======================
+   MULTI-TOKEN ENDPOINTS
+====================== */
+
+// Get all tokens
+app.get("/tokens", async (req, res) => {
+  try {
+    const tokens = await all(db, `SELECT * FROM tokens ORDER BY symbol`);
+    return res.json({ success: true, tokens });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "failed to fetch tokens" });
+  }
+});
+
+// Get current real-time prices
+app.get("/tokens/prices", async (req, res) => {
+  try {
+    const prices = await fetchRealPrices();
+    return res.json({ success: true, prices, cachedAt: priceCache.lastUpdate });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "failed to fetch prices" });
+  }
+});
+
+// Get token balances for a wallet
+app.get("/tokens/balances/:wallet", async (req, res) => {
+  try {
+    const wallet = String(req.params.wallet || "").trim();
+    if (!wallet) return res.status(400).json({ error: "Missing wallet" });
+
+    await ensureAccountExists(wallet);
+    await ensureFreshPrices(); // Refresh prices before returning balances
+
+    // Get HNY balance from accounts table
+    const account = await get(db, `SELECT balance FROM accounts WHERE wallet=?`, [wallet]);
+    const hnyBalance = Number(account?.balance || 0);
+
+    // Get all other token balances
+    const tokenBalances = await all(
+      db,
+      `SELECT tb.tokenSymbol, tb.balance, t.name, t.decimals, t.mockPriceUSD
+       FROM token_balances tb
+       JOIN tokens t ON tb.tokenSymbol = t.symbol
+       WHERE tb.wallet=?`,
+      [wallet]
+    );
+
+    // Get stHNY balance from staked positions
+    const stakedPositions = await all(
+      db,
+      `SELECT principal, rewardPaid, startMs, status, rewardsFrozenAtMs
+       FROM staking_positions
+       WHERE wallet=? AND status IN ('staked', 'unlocking')`,
+      [wallet]
+    );
+    
+    const ts = now();
+    let totalStHNY = 0;
+    for (const pos of stakedPositions) {
+      const principal = Number(pos.principal || 0);
+      const rewardEnd = String(pos.status) === 'unlocking' ? Number(pos.rewardsFrozenAtMs || ts) : ts;
+      const totalReward = computeStakingReward(principal, Number(pos.startMs), rewardEnd);
+      const paid = Number(pos.rewardPaid || 0);
+      const accrued = Math.max(0, totalReward - paid);
+      totalStHNY += principal + accrued;
+    }
+
+    // Combine all balances
+    const balances = {
+      HNY: Number(hnyBalance.toFixed(8)),
+      stHNY: Number(totalStHNY.toFixed(8)),
+    };
+
+    for (const tb of tokenBalances) {
+      balances[tb.tokenSymbol] = Number(Number(tb.balance).toFixed(8));
+    }
+
+    // Get token metadata
+    const tokens = await all(db, `SELECT * FROM tokens`);
+    const tokenMap = {};
+    for (const t of tokens) {
+      tokenMap[t.symbol] = {
+        name: t.name,
+        decimals: t.decimals,
+        price: Number(t.mockPriceUSD),
+        hasRealPrice: !!t.pythPriceId,
+      };
+    }
+
+    return res.json({ success: true, balances, tokens: tokenMap });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "failed to fetch balances" });
+  }
+});
+
+// Token faucet (mint tokens for testing)
+app.post("/tokens/faucet", async (req, res) => {
+  try {
+    const { wallet, tokenSymbol, amount } = req.body;
+    if (!wallet || !tokenSymbol) {
+      return res.status(400).json({ error: "Missing wallet or tokenSymbol" });
+    }
+
+    // Can't faucet HNY or stHNY through this endpoint
+    if (tokenSymbol === 'HNY' || tokenSymbol === 'stHNY') {
+      return res.status(400).json({ error: "Use /mint for HNY, stHNY is earned through staking" });
+    }
+
+    const token = await get(db, `SELECT * FROM tokens WHERE symbol=?`, [tokenSymbol]);
+    if (!token) return res.status(404).json({ error: "Token not found" });
+
+    const faucetAmount = amount ? Number(amount) : 1000; // Default 1000 tokens
+    if (!Number.isFinite(faucetAmount) || faucetAmount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    await ensureAccountExists(wallet);
+
+    // Get or create token balance
+    let balance = await get(
+      db,
+      `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+      [wallet, tokenSymbol]
+    );
+
+    if (balance) {
+      const newBalance = Number(balance.balance) + faucetAmount;
+      await run(
+        db,
+        `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
+        [newBalance, wallet, tokenSymbol]
+      );
+    } else {
+      await run(
+        db,
+        `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs)
+         VALUES (?, ?, ?, ?)`,
+        [wallet, tokenSymbol, faucetAmount, now()]
+      );
+    }
+
+    return res.json({
+      success: true,
+      wallet,
+      tokenSymbol,
+      amount: faucetAmount,
+      message: `Minted ${faucetAmount} ${tokenSymbol}`,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "faucet failed" });
+  }
+});
+
+// Token send
+app.post("/tokens/send", async (req, res) => {
+  try {
+    const { wallet, to, tokenSymbol, amount, nonce, timestamp, signature } = req.body;
+
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    const toAddr = String(to || "").trim();
+    const token = String(tokenSymbol || "").trim();
+    
+    if (!from || !toAddr || !token) {
+      return res.status(400).json({ error: "Missing wallet, to, or tokenSymbol" });
+    }
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const amt = Number(amount);
+    if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: "Invalid amount" });
+
+    // Can't send HNY through token endpoint
+    if (token === 'HNY') {
+      return res.status(400).json({ error: "Use /send for HNY transfers" });
+    }
+
+    // stHNY transfers are allowed!
+    const tokenInfo = await get(db, `SELECT * FROM tokens WHERE symbol=?`, [token]);
+    if (!tokenInfo) return res.status(404).json({ error: "Token not found" });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = 0;
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) {
+      return res.status(400).json({ error: "Fee too low", minGasFee });
+    }
+
+    const ttlMax = now() + TX_TTL_MS * 2;
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs < now() || expiresAtMs > ttlMax) {
+      return res.status(400).json({ error: "Invalid expiresAtMs", txTtlMs: TX_TTL_MS });
+    }
+
+    await ensureAccountExists(from);
+    await ensureAccountExists(toAddr);
+
+    const acct = await getAccountRow(from);
+    if (nonce !== acct.nonce) {
+      return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+    }
+
+    // Check token balance
+    const tokenBalance = await get(
+      db,
+      `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+      [from, token]
+    );
+    const currentBalance = Number(tokenBalance?.balance || 0);
+    if (currentBalance < amt) {
+      return res.status(400).json({ error: "Insufficient token balance", balance: currentBalance, required: amt });
+    }
+
+    // Check HNY balance for gas
+    const pendingOutgoingCost = await getPendingOutgoingCost(from);
+    const spendableHNY = Number(acct.balance) - pendingOutgoingCost;
+    if (spendableHNY < gasFee + serviceFee) {
+      return res.status(400).json({
+        error: "Insufficient HNY for fees",
+        spendableBalance: spendableHNY,
+        required: gasFee + serviceFee,
+      });
+    }
+
+    const pendingCount = await countPendingForWallet({ type: "token_send", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
+    }
+
+    const metaJson = JSON.stringify({ tokenSymbol: token });
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "token_send",
+      from,
+      to: toAddr,
+      amount: amt,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "token_send",
+      from,
+      to: toAddr,
+      amount: amt,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+
+    await insertTx(tx);
+
+    return res.json({ success: true, chainId: CHAIN_ID, tx });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "token send failed" });
+  }
+});
+
+// Swap tokens
+app.post("/swap", async (req, res) => {
+  try {
+    const { wallet, tokenIn, tokenOut, amountIn, minAmountOut, nonce, timestamp, signature } = req.body;
+
+    const chainId = String(req.body?.chainId || "");
+    if (chainId !== CHAIN_ID) return res.status(400).json({ error: "Wrong chainId", expected: CHAIN_ID });
+
+    const from = String(wallet || "").trim();
+    const tIn = String(tokenIn || "").trim();
+    const tOut = String(tokenOut || "").trim();
+    
+    if (!from || !tIn || !tOut) {
+      return res.status(400).json({ error: "Missing wallet, tokenIn, or tokenOut" });
+    }
+    if (tIn === tOut) return res.status(400).json({ error: "Cannot swap same token" });
+    if (!Number.isInteger(nonce)) return res.status(400).json({ error: "Missing/invalid nonce" });
+    if (!Number.isInteger(timestamp)) return res.status(400).json({ error: "Missing/invalid timestamp" });
+
+    const amtIn = Number(amountIn);
+    const minOut = Number(minAmountOut || 0);
+    if (!Number.isFinite(amtIn) || amtIn <= 0) return res.status(400).json({ error: "Invalid amountIn" });
+    if (!Number.isFinite(minOut) || minOut < 0) return res.status(400).json({ error: "Invalid minAmountOut" });
+
+    const { minGasFee } = await currentMinGasFee();
+    const gasFee = Number(req.body?.gasFee ?? minGasFee);
+    const serviceFee = 0;
+    const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
+
+    if (!Number.isFinite(gasFee) || gasFee < minGasFee) {
+      return res.status(400).json({ error: "Fee too low", minGasFee });
+    }
+
+    await ensureAccountExists(from);
+    const acct = await getAccountRow(from);
+    if (nonce !== acct.nonce) {
+      return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
+    }
+
+    // Find pool (try both orderings)
+    let pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, tOut]);
+    let reversed = false;
+    if (!pool) {
+      pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, tIn]);
+      reversed = true;
+    }
+    if (!pool) return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
+
+    const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+    const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+    const feeRate = Number(pool.feeRate || 0.003);
+
+    // Constant product AMM: (x + amtIn * (1 - fee)) * (y - amtOut) = x * y
+    const amountInWithFee = amtIn * (1 - feeRate);
+    const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
+    
+    if (amountOut < minOut) {
+      return res.status(400).json({
+        error: "Slippage too high",
+        expectedMin: minOut,
+        actualOutput: Number(amountOut.toFixed(8)),
+      });
+    }
+
+    // Check balances
+    if (tIn === 'HNY') {
+      const pendingCost = await getPendingOutgoingCost(from);
+      const spendable = Number(acct.balance) - pendingCost;
+      if (spendable < amtIn + gasFee + serviceFee) {
+        return res.status(400).json({ error: "Insufficient HNY balance" });
+      }
+    } else {
+      const tokenBal = await get(
+        db,
+        `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
+        [from, tIn]
+      );
+      if (Number(tokenBal?.balance || 0) < amtIn) {
+        return res.status(400).json({ error: `Insufficient ${tIn} balance` });
+      }
+      
+      // Still need HNY for gas
+      const pendingCost = await getPendingOutgoingCost(from);
+      const spendableHNY = Number(acct.balance) - pendingCost;
+      if (spendableHNY < gasFee + serviceFee) {
+        return res.status(400).json({ error: "Insufficient HNY for fees" });
+      }
+    }
+
+    const pendingCount = await countPendingForWallet({ type: "swap", wallet: from });
+    if (pendingCount >= MAX_PENDING_PER_WALLET) {
+      return res.status(429).json({ error: "Too many pending txs" });
+    }
+
+    const metaJson = JSON.stringify({
+      poolId: pool.id,
+      tokenIn: tIn,
+      tokenOut: tOut,
+      amountIn: amtIn,
+      minAmountOut: minOut,
+      expectedAmountOut: Number(amountOut.toFixed(8)),
+    });
+
+    const msg = canonicalSignedMessage({
+      chainId: CHAIN_ID,
+      type: "swap",
+      from,
+      to: from,
+      amount: amtIn,
+      nonce,
+      gasFee,
+      serviceFee,
+      expiresAtMs,
+      timestamp,
+      metaJson,
+    });
+
+    const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
+    if (!sigOk.ok) return res.status(401).json({ error: sigOk.error });
+
+    await incrementNonce(from);
+
+    const tx = createTx({
+      type: "swap",
+      from,
+      to: from,
+      amount: amtIn,
+      nonce,
+      gasFee,
+      serviceFee,
+      metaJson,
+      timestampMs: timestamp,
+      expiresAtMs,
+    });
+
+    await insertTx(tx);
+
+    return res.json({
+      success: true,
+      chainId: CHAIN_ID,
+      tx,
+      expectedAmountOut: Number(amountOut.toFixed(8)),
+      priceImpact: Number(((amountOut / reserveOut) * 100).toFixed(4)),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "swap failed" });
+  }
+});
+
+// Get swap quote
+app.post("/swap/quote", async (req, res) => {
+  try {
+    const { tokenIn, tokenOut, amountIn } = req.body;
+    
+    const tIn = String(tokenIn || "").trim();
+    const tOut = String(tokenOut || "").trim();
+    if (!tIn || !tOut) return res.status(400).json({ error: "Missing tokenIn or tokenOut" });
+    if (tIn === tOut) return res.status(400).json({ error: "Cannot swap same token" });
+
+    const amtIn = Number(amountIn);
+    if (!Number.isFinite(amtIn) || amtIn <= 0) return res.status(400).json({ error: "Invalid amountIn" });
+
+    // Find pool
+    let pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, tOut]);
+    let reversed = false;
+    if (!pool) {
+      pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, tIn]);
+      reversed = true;
+    }
+    if (!pool) return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
+
+    const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+    const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+    const feeRate = Number(pool.feeRate || 0.003);
+
+    const amountInWithFee = amtIn * (1 - feeRate);
+    const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
+    const priceImpact = (amountOut / reserveOut) * 100;
+    const exchangeRate = amountOut / amtIn;
+
+    return res.json({
+      success: true,
+      poolId: pool.id,
+      tokenIn: tIn,
+      tokenOut: tOut,
+      amountIn: amtIn,
+      amountOut: Number(amountOut.toFixed(8)),
+      exchangeRate: Number(exchangeRate.toFixed(8)),
+      priceImpact: Number(priceImpact.toFixed(4)),
+      feeRate,
+      reserveIn: Number(reserveIn.toFixed(8)),
+      reserveOut: Number(reserveOut.toFixed(8)),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "quote failed" });
+  }
+});
+
+// Get all liquidity pools
+app.get("/pools", async (req, res) => {
+  try {
+    const pools = await all(db, `SELECT * FROM liquidity_pools ORDER BY id`);
+    return res.json({ success: true, pools });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "failed to fetch pools" });
   }
 });
 

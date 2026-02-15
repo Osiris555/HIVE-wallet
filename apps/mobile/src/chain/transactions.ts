@@ -997,3 +997,253 @@ export async function cancelPending(params: { nonce: number; gasFee: number; ser
     expiresAtMs,
   });
 }
+
+/* ======================
+   MULTI-TOKEN SUPPORT
+====================== */
+
+export type Token = {
+  symbol: string;
+  name: string;
+  decimals: number;
+  isNative: boolean;
+  mockPriceUSD: number;
+  iconUrl?: string;
+};
+
+export type TokenBalance = {
+  [symbol: string]: number;
+};
+
+export type TokenInfo = {
+  name: string;
+  decimals: number;
+  price: number;
+};
+
+export type SwapQuote = {
+  poolId: string;
+  tokenIn: string;
+  tokenOut: string;
+  amountIn: number;
+  amountOut: number;
+  exchangeRate: number;
+  priceImpact: number;
+  feeRate: number;
+  reserveIn: number;
+  reserveOut: number;
+};
+
+export type LiquidityPool = {
+  id: string;
+  tokenA: string;
+  tokenB: string;
+  reserveA: number;
+  reserveB: number;
+  totalLpShares: number;
+  feeRate: number;
+};
+
+// Get all available tokens
+export async function getTokens(): Promise<Token[]> {
+  const body = await getJson("/tokens");
+  return (body?.tokens || []) as Token[];
+}
+
+// Get real-time token prices
+export async function getTokenPrices(): Promise<{ [symbol: string]: number }> {
+  const body = await getJson("/tokens/prices");
+  return body?.prices || {};
+}
+
+// Get token balances for a wallet
+export async function getTokenBalances(
+  wallet?: string
+): Promise<{ balances: TokenBalance; tokens: { [symbol: string]: TokenInfo } }> {
+  const w = wallet || (await ensureWalletId());
+  const body = await getJson(`/tokens/balances/${encodeURIComponent(w)}`);
+  return {
+    balances: body?.balances || {},
+    tokens: body?.tokens || {},
+  };
+}
+
+// Token faucet - mint test tokens
+export async function tokenFaucet(params: {
+  tokenSymbol: string;
+  amount?: number;
+}): Promise<any> {
+  const wallet = await ensureWalletId();
+  return await postJson("/tokens/faucet", {
+    wallet,
+    tokenSymbol: params.tokenSymbol,
+    amount: params.amount,
+  });
+}
+
+// Send tokens (not HNY)
+export async function sendToken(params: {
+  to: string;
+  tokenSymbol: string;
+  amount: number;
+  gasFee?: number;
+}): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const amt = Number(params.amount);
+  if (!Number.isFinite(amt) || amt <= 0) throw makeError("Amount must be positive", 400);
+
+  const to = String(params.to || "").trim();
+  if (!to) throw makeError("Missing recipient", 400);
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const serviceFee = 0;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const metaJson = JSON.stringify({ tokenSymbol: params.tokenSymbol });
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "token_send",
+    from: wallet,
+    to,
+    amount: amt,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/tokens/send", {
+    chainId,
+    wallet,
+    to,
+    tokenSymbol: params.tokenSymbol,
+    amount: amt,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
+}
+
+// Get swap quote
+export async function getSwapQuote(params: {
+  tokenIn: string;
+  tokenOut: string;
+  amountIn: number;
+}): Promise<SwapQuote> {
+  const body = await postJson("/swap/quote", {
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    amountIn: params.amountIn,
+  });
+  
+  return {
+    poolId: body.poolId,
+    tokenIn: body.tokenIn,
+    tokenOut: body.tokenOut,
+    amountIn: body.amountIn,
+    amountOut: body.amountOut,
+    exchangeRate: body.exchangeRate,
+    priceImpact: body.priceImpact,
+    feeRate: body.feeRate,
+    reserveIn: body.reserveIn,
+    reserveOut: body.reserveOut,
+  };
+}
+
+// Execute swap
+export async function swap(params: {
+  tokenIn: string;
+  tokenOut: string;
+  amountIn: number;
+  minAmountOut?: number;
+  gasFee?: number;
+}): Promise<any> {
+  const wallet = await ensureWalletId();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) await registerWallet();
+  const acct2 = await getAccount(wallet);
+  const nonce = Number(acct2?.nonce ?? 0);
+
+  const timestamp = Date.now();
+  const amtIn = Number(params.amountIn);
+  if (!Number.isFinite(amtIn) || amtIn <= 0) throw makeError("Amount must be positive", 400);
+
+  const minOut = Number(params.minAmountOut ?? 0);
+  
+  // Get quote to calculate expected output
+  const quote = await getSwapQuote({
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    amountIn: amtIn,
+  });
+
+  const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
+  const serviceFee = 0;
+  const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
+
+  const metaJson = JSON.stringify({
+    poolId: quote.poolId,
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    amountIn: amtIn,
+    minAmountOut: minOut,
+    expectedAmountOut: quote.amountOut,
+  });
+
+  const { secretKeyB64 } = await ensureKeypair();
+  const msg = canonicalSignedMessage({
+    chainId,
+    type: "swap",
+    from: wallet,
+    to: wallet,
+    amount: amtIn,
+    nonce,
+    gasFee,
+    serviceFee,
+    expiresAtMs,
+    timestamp,
+    metaJson,
+  });
+  const signature = signMessage(msg, secretKeyB64);
+
+  return await postJson("/swap", {
+    chainId,
+    wallet,
+    tokenIn: params.tokenIn,
+    tokenOut: params.tokenOut,
+    amountIn: amtIn,
+    minAmountOut: minOut,
+    nonce,
+    timestamp,
+    signature,
+    gasFee,
+    expiresAtMs,
+  });
+}
+
+// Get all liquidity pools
+export async function getLiquidityPools(): Promise<LiquidityPool[]> {
+  const body = await getJson("/pools");
+  return (body?.pools || []) as LiquidityPool[];
+}
+

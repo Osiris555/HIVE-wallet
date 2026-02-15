@@ -46,6 +46,19 @@ import {
   parseAmount8,
   getAccount,
   getTransactionById,
+  // Multi-token functions
+  getTokens,
+  getTokenBalances,
+  getTokenPrices,
+  tokenFaucet,
+  sendToken,
+  getSwapQuote,
+  swap,
+  getLiquidityPools,
+  type Token,
+  type TokenBalance,
+  type SwapQuote,
+  type LiquidityPool,
 } from "../chain/transactions";
 import type { Transaction as TxLike, StakingPosition } from "../chain/transactions";
 
@@ -319,6 +332,21 @@ export default function Index() {
   const [message, setMessage] = useState("");
   const [mintCooldown, setMintCooldown] = useState<number>(0);
   const [mintBusy, setMintBusy] = useState<boolean>(false);
+
+  // ========== MULTI-TOKEN STATE ==========
+  const [tokenBalances, setTokenBalances] = useState<TokenBalance>({});
+  const [tokenPrices, setTokenPrices] = useState<{ [symbol: string]: number }>({});
+  const [tokens, setTokens] = useState<Token[]>([]);
+  const [selectedToken, setSelectedToken] = useState<string>("HNY");
+  const [swapTokenIn, setSwapTokenIn] = useState<string>("HNY");
+  const [swapTokenOut, setSwapTokenOut] = useState<string>("ETH");
+  const [swapAmountIn, setSwapAmountIn] = useState("");
+  const [swapQuote, setSwapQuote] = useState<SwapQuote | null>(null);
+  const [swapBusy, setSwapBusy] = useState(false);
+  const [tokenSendOpen, setTokenSendOpen] = useState(false);
+  const [swapOpen, setSwapOpen] = useState(false);
+  const [portfolioOpen, setPortfolioOpen] = useState(false);
+  const [faucetModalOpen, setFaucetModalOpen] = useState(false);
 
   // ✅ Inputs (recipient and amount are separate!)
   const [toText, setToText] = useState("");
@@ -827,8 +855,22 @@ async function pasteRecipientFromClipboard() {
     try {
       const pos: any = (stakingPositions || []).find((p: any) => String(p.id) === String(positionId));
 
+      // Check if position exists and is not already withdrawn
+      if (!pos) {
+        setMessage("Position not found or already withdrawn");
+        return;
+      }
+
+      const posStatus = String(pos?.status || "");
+      
+      // If already unstaked, show appropriate message
+      if (posStatus === "unstaked") {
+        setMessage("Position has already been withdrawn");
+        return;
+      }
+
       // If still staked, initiate unlock (rewards freeze during unlock).
-      if (String(pos?.status) === "staked") {
+      if (posStatus === "staked") {
         // Use a unique variable name to avoid accidental redeclarations across edits/hot reloads.
         const unlockDelayDays = Number(pos?.unlockDelayDays ?? (Number(pos?.lockDays) === 30 ? 3 : 7));
         const ok = Platform.OS === "web"
@@ -849,14 +891,25 @@ async function pasteRecipientFromClipboard() {
         if (!ok) return;
         await unlockStake({ positionId, gasFee: chosenGas });
         setMessage("Unlock initiated ✅");
-      } else {
+      } else if (posStatus === "unlocking") {
         // If already unlocking, attempt withdraw (server will enforce unlock end time).
         await unstake({ positionId, gasFee: chosenGas });
         setMessage("Withdraw submitted ✅");
+      } else {
+        setMessage(`Cannot withdraw position with status: ${posStatus}`);
+        return;
       }
       await hardRefreshAll();
     } catch (e: any) {
-      setMessage(`Unstake failed: ${e?.message || "Unknown error"}`);
+      const errMsg = String(e?.message || "Unknown error");
+      // Provide more specific error messages
+      if (errMsg.includes("not withdrawable") || errMsg.includes("not found")) {
+        setMessage("Position has already been withdrawn or is not available");
+      } else if (errMsg.includes("unlocking")) {
+        setMessage("Position is still unlocking. Please wait for the unlock period to complete.");
+      } else {
+        setMessage(`Unstake failed: ${errMsg}`);
+      }
     } finally {
       setUnstakeBusyId(null);
     }
