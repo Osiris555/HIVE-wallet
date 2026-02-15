@@ -7,7 +7,7 @@ import Constants from "expo-constants";
 import { NativeModules, Platform } from "react-native";
 
 // Keep in sync with apps/mobile/honey-dev/server.js
-export type TxType = "mint" | "send" | "stake" | "unlock" | "claim" | "unstake";
+export type TxType = "mint" | "send" | "stake" | "unlock" | "claim" | "unstake" | "token_send" | "swap";
 
 export type Transaction = {
   id: string;

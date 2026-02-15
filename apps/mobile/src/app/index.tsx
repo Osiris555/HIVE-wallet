@@ -82,6 +82,12 @@ async function kvSet(key: string, value: string): Promise<void> {
     else await SecureStore.setItemAsync(key, value);
   } catch {}
 }
+async function kvDel(key: string): Promise<void> {
+  try {
+    if (isWeb()) window.localStorage.removeItem(key);
+    else await SecureStore.deleteItemAsync(key);
+  } catch {}
+}
 
 /* ======================
    Theme + Skin
@@ -265,6 +271,21 @@ function sanitizeAddressInfo(input: string) {
 function sanitizeAddress(input: string) {
   return sanitizeAddressInfo(input).cleaned;
 }
+
+// Token icon emojis
+const TOKEN_ICONS: { [key: string]: string } = {
+  HNY: "🍯",
+  stHNY: "🔒",
+  ETH: "💎",
+  BTC: "🟡",
+  SOL: "☀️",
+  USDT: "💵",
+  USDC: "💚",
+  XRP: "🌊",
+};
+
+const TOKEN_LIST = ["HNY", "stHNY", "ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
+const FAUCET_TOKENS = ["ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
 
 function themeKeyForChain(chainId: string) {
   return `hive:theme:${chainId || "default"}`;
@@ -474,7 +495,7 @@ export default function Index() {
   const pausePollingRef = useRef(false);
 
   const anyModalOpen =
-    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen;
+    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen || tokenSendOpen || swapOpen || portfolioOpen || faucetModalOpen;
 
   const sendFormDirty = !!toText || !!amountText;
 
@@ -657,12 +678,29 @@ async function pasteRecipientFromClipboard() {
     }
   }
 
+  async function loadTokenData() {
+    if (!wallet) return;
+    try {
+      const { balances: bals, tokens: tokenInfo } = await getTokenBalances(wallet);
+      setTokenBalances(bals);
+      // Build price map from tokenInfo
+      const priceMap: { [s: string]: number } = {};
+      for (const [sym, info] of Object.entries(tokenInfo)) {
+        priceMap[sym] = (info as any).price || 0;
+      }
+      setTokenPrices(priceMap);
+    } catch (e: any) {
+      console.warn("Token data load failed:", e?.message);
+    }
+  }
+
   async function hardRefreshAll() {
     try {
       await refreshStatus();
       await loadBalance();
       await loadTxs();
       await loadStaking();
+      await loadTokenData();
       setLastRefresh(Date.now());
     } catch (e: any) {
       setMessage(e?.message || "Refresh failed");
@@ -699,6 +737,7 @@ async function pasteRecipientFromClipboard() {
         await loadBalance();
         await loadTxs();
         await loadStaking();
+        await loadTokenData();
         setLastRefresh(Date.now());
       } catch {}
     }, 2500);
@@ -781,6 +820,10 @@ async function pasteRecipientFromClipboard() {
     setRbfOpen(false);
     setCancelOpen(false);
     setReceiveOpen(false);
+    setTokenSendOpen(false);
+    setSwapOpen(false);
+    setPortfolioOpen(false);
+    setFaucetModalOpen(false);
 
     setQuote(null);
     setRbfTx(null);
@@ -971,6 +1014,130 @@ async function pasteRecipientFromClipboard() {
   /* ======================
      Send flow (confirm modal)
   ====================== */
+
+  // ========== MULTI-TOKEN ACTIONS ==========
+  const [faucetToken, setFaucetToken] = useState("ETH");
+  const [faucetAmount, setFaucetAmount] = useState("1000");
+  const [faucetBusy, setFaucetBusy] = useState(false);
+
+  const [sendTokenSymbol, setSendTokenSymbol] = useState("ETH");
+  const [tokenSendTo, setTokenSendTo] = useState("");
+  const [tokenSendAmount, setTokenSendAmount] = useState("");
+  const [tokenSendBusy, setTokenSendBusy] = useState(false);
+
+  const [fetchingQuote, setFetchingQuote] = useState(false);
+
+  // Portfolio value
+  const portfolioValueUSD = useMemo(() => {
+    return Object.entries(tokenBalances).reduce((sum, [symbol, amount]) => {
+      const price = tokenPrices[symbol] || 0;
+      return sum + Number(amount) * price;
+    }, 0);
+  }, [tokenBalances, tokenPrices]);
+
+  async function handleFaucet() {
+    if (faucetBusy) return;
+    setFaucetBusy(true);
+    setMessage("");
+    try {
+      const amt = Number(faucetAmount) || 1000;
+      await tokenFaucet({ tokenSymbol: faucetToken, amount: amt });
+      setMessage(`✅ Minted ${amt} ${faucetToken}`);
+      setFaucetModalOpen(false);
+      await loadTokenData();
+    } catch (e: any) {
+      setMessage(`Faucet failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setFaucetBusy(false);
+    }
+  }
+
+  async function handleTokenSend() {
+    if (tokenSendBusy) return;
+    if (!tokenSendTo || !tokenSendAmount) {
+      setMessage("Enter recipient and amount");
+      return;
+    }
+    const amt = Number(tokenSendAmount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setMessage("Invalid amount");
+      return;
+    }
+    if ((tokenBalances[sendTokenSymbol] || 0) < amt) {
+      setMessage(`Insufficient ${sendTokenSymbol} balance`);
+      return;
+    }
+    setTokenSendBusy(true);
+    setMessage("");
+    try {
+      await sendToken({ to: sanitizeAddress(tokenSendTo), tokenSymbol: sendTokenSymbol, amount: amt });
+      setMessage(`✅ Sent ${amt} ${sendTokenSymbol}`);
+      setTokenSendTo("");
+      setTokenSendAmount("");
+      setTokenSendOpen(false);
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Token send failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setTokenSendBusy(false);
+    }
+  }
+
+  // Swap quote auto-fetch
+  useEffect(() => {
+    if (!swapAmountIn || Number(swapAmountIn) <= 0) {
+      setSwapQuote(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setFetchingQuote(true);
+        const q = await getSwapQuote({
+          tokenIn: swapTokenIn,
+          tokenOut: swapTokenOut,
+          amountIn: Number(swapAmountIn),
+        });
+        setSwapQuote(q);
+      } catch {
+        setSwapQuote(null);
+      } finally {
+        setFetchingQuote(false);
+      }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [swapAmountIn, swapTokenIn, swapTokenOut]);
+
+  async function handleSwap() {
+    if (swapBusy || !swapQuote) return;
+    const amt = Number(swapAmountIn);
+    if ((tokenBalances[swapTokenIn] || 0) < amt && swapTokenIn !== "HNY") {
+      setMessage(`Insufficient ${swapTokenIn} balance`);
+      return;
+    }
+    if (swapTokenIn === "HNY" && balancesView.spendable < amt) {
+      setMessage("Insufficient HNY balance");
+      return;
+    }
+    setSwapBusy(true);
+    setMessage("");
+    try {
+      await swap({
+        tokenIn: swapTokenIn,
+        tokenOut: swapTokenOut,
+        amountIn: amt,
+        minAmountOut: swapQuote.amountOut * 0.95,
+      });
+      setMessage(`✅ Swapped ${amt} ${swapTokenIn} → ${swapQuote.amountOut.toFixed(8)} ${swapTokenOut}`);
+      setSwapAmountIn("");
+      setSwapQuote(null);
+      setSwapOpen(false);
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Swap failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setSwapBusy(false);
+    }
+  }
   async function openSendConfirm() {
     setMessage("");
 
@@ -1335,6 +1502,91 @@ async function pasteRecipientFromClipboard() {
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
             Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleTimeString() : "—"}
           </Text>
+        </Card>
+
+        {/* Multi-Token Portfolio */}
+        <Card T={T} style={{ marginTop: 12 }}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Portfolio</Text>
+            <Text style={{ color: T.green, fontSize: 20, fontWeight: "900" }}>
+              ${portfolioValueUSD.toFixed(2)}
+            </Text>
+          </View>
+
+          <View style={{ height: 12 }} />
+
+          {/* Token list (compact) */}
+          {TOKEN_LIST.map((sym) => {
+            const bal = sym === "HNY" ? confirmedBalance : (tokenBalances[sym] || 0);
+            if (bal <= 0 && sym !== "HNY") return null;
+            const price = tokenPrices[sym] || 0;
+            const value = bal * price;
+            return (
+              <View key={sym} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: T.border }}>
+                <Text style={{ fontSize: 22, width: 36 }}>{TOKEN_ICONS[sym] || "🪙"}</Text>
+                <View style={{ flex: 1, marginLeft: 4 }}>
+                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 16 }}>{sym}</Text>
+                  <Text style={{ color: T.sub, fontWeight: "600", fontSize: 12 }}>
+                    {Number(bal).toFixed(bal < 1 ? 8 : 4)} {sym}
+                  </Text>
+                </View>
+                <View style={{ alignItems: "flex-end" }}>
+                  <Text style={{ color: T.text, fontWeight: "800", fontSize: 14 }}>${value.toFixed(2)}</Text>
+                  <Text style={{ color: T.sub, fontSize: 11 }}>${price.toFixed(price < 1 ? 4 : 2)}</Text>
+                </View>
+              </View>
+            );
+          })}
+
+          {/* Show all tokens button */}
+          <Pressable
+            onPress={() => {
+              pausePollingRef.current = true;
+              setPortfolioOpen(true);
+            }}
+            style={{ paddingVertical: 10, alignItems: "center", marginTop: 8 }}
+          >
+            <Text style={{ color: T.blue, fontWeight: "900" }}>View All Tokens →</Text>
+          </Pressable>
+
+          <View style={{ height: 8 }} />
+
+          {/* Multi-token action buttons */}
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Button
+                T={T}
+                label="🚰 Faucet"
+                variant="purple"
+                onPress={() => {
+                  pausePollingRef.current = true;
+                  setFaucetModalOpen(true);
+                }}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                T={T}
+                label="🔄 Swap"
+                variant="green"
+                onPress={() => {
+                  pausePollingRef.current = true;
+                  setSwapOpen(true);
+                }}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button
+                T={T}
+                label="📤 Token Send"
+                variant="blue"
+                onPress={() => {
+                  pausePollingRef.current = true;
+                  setTokenSendOpen(true);
+                }}
+              />
+            </View>
+          </View>
         </Card>
 
         {/* Send */}
@@ -2271,6 +2523,362 @@ async function pasteRecipientFromClipboard() {
       )}
 
       {/* Toast (global) */}
+
+      {/* ===== PORTFOLIO MODAL ===== */}
+      {portfolioOpen && (
+        <Overlay onClose={closeAllModals}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>All Tokens</Text>
+                <Pressable onPress={closeAllModals}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.green, fontSize: 28, fontWeight: "900", marginTop: 10 }}>
+                ${portfolioValueUSD.toFixed(2)}
+              </Text>
+              <Text style={{ color: T.sub, fontWeight: "800", marginTop: 4 }}>Total Portfolio Value (USD)</Text>
+
+              <View style={{ height: 16 }} />
+
+              <ScrollView style={{ maxHeight: 400 }}>
+                {TOKEN_LIST.map((sym) => {
+                  const bal = sym === "HNY" ? confirmedBalance : (tokenBalances[sym] || 0);
+                  const price = tokenPrices[sym] || 0;
+                  const value = bal * price;
+                  return (
+                    <View key={sym} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: T.border }}>
+                      <Text style={{ fontSize: 26, width: 40 }}>{TOKEN_ICONS[sym] || "🪙"}</Text>
+                      <View style={{ flex: 1, marginLeft: 6 }}>
+                        <Text style={{ color: T.text, fontWeight: "900", fontSize: 16 }}>{sym}</Text>
+                        <Text style={{ color: T.sub, fontWeight: "600", fontSize: 13 }}>
+                          {Number(bal).toFixed(8)}
+                        </Text>
+                      </View>
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text style={{ color: T.green, fontWeight: "900", fontSize: 16 }}>${value.toFixed(2)}</Text>
+                        <Text style={{ color: T.sub, fontSize: 12 }}>@${price.toFixed(price < 1 ? 4 : 2)}</Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={{ height: 14 }} />
+              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== FAUCET MODAL ===== */}
+      {faucetModalOpen && (
+        <Overlay onClose={closeAllModals}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🚰 Test Token Faucet</Text>
+                <Pressable onPress={closeAllModals}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Select Token</Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                {FAUCET_TOKENS.map((t) => (
+                  <Pressable
+                    key={t}
+                    onPress={() => setFaucetToken(t)}
+                    style={{
+                      padding: 10,
+                      borderRadius: 10,
+                      backgroundColor: faucetToken === t ? T.green : T.glass2,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                    }}
+                  >
+                    <Text style={{ color: faucetToken === t ? "#000" : T.text, fontWeight: "900" }}>
+                      {TOKEN_ICONS[t]} {t}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
+              <TextInput
+                value={faucetAmount}
+                onChangeText={setFaucetAmount}
+                placeholder="1000"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+                style={{
+                  marginTop: 8,
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  color: T.text,
+                  backgroundColor: T.glass2,
+                  fontWeight: "800",
+                }}
+              />
+
+              <View style={{ height: 16 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label={faucetBusy ? "Minting…" : `Mint ${faucetToken}`} variant="green" onPress={handleFaucet} disabled={faucetBusy} />
+                </View>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
+                Note: Use /mint for HNY. stHNY is earned through staking.
+              </Text>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== SWAP MODAL ===== */}
+      {swapOpen && (
+        <Overlay onClose={closeAllModals}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🔄 Swap Tokens</Text>
+                <Pressable onPress={closeAllModals}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>From</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                {TOKEN_LIST.filter(t => t !== "stHNY").map((t) => (
+                  <Pressable
+                    key={t}
+                    onPress={() => {
+                      setSwapTokenIn(t);
+                      if (t === swapTokenOut) setSwapTokenOut(t === "HNY" ? "ETH" : "HNY");
+                    }}
+                    style={{
+                      padding: 10,
+                      marginRight: 8,
+                      borderRadius: 10,
+                      backgroundColor: swapTokenIn === t ? T.blue : T.glass2,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>
+                      {TOKEN_ICONS[t]} {t}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              <TextInput
+                value={swapAmountIn}
+                onChangeText={(t) => setSwapAmountIn(normalizeAmountText(t))}
+                placeholder="0.00"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+                style={{
+                  marginTop: 10,
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  color: T.text,
+                  backgroundColor: T.glass2,
+                  fontWeight: "800",
+                }}
+              />
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "600" }}>
+                Balance: {swapTokenIn === "HNY" ? fmt8(balancesView.spendable) : fmt8(tokenBalances[swapTokenIn] || 0)}
+              </Text>
+
+              <View style={{ alignItems: "center", marginVertical: 10 }}>
+                <Pressable
+                  onPress={() => {
+                    const tmp = swapTokenIn;
+                    setSwapTokenIn(swapTokenOut);
+                    setSwapTokenOut(tmp);
+                    setSwapAmountIn("");
+                    setSwapQuote(null);
+                  }}
+                  style={{ padding: 8, borderRadius: 20, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}
+                >
+                  <Text style={{ fontSize: 20 }}>⬇️ ⬆️</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, fontWeight: "800" }}>To</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                {TOKEN_LIST.filter(t => t !== "stHNY" && t !== swapTokenIn).map((t) => (
+                  <Pressable
+                    key={t}
+                    onPress={() => setSwapTokenOut(t)}
+                    style={{
+                      padding: 10,
+                      marginRight: 8,
+                      borderRadius: 10,
+                      backgroundColor: swapTokenOut === t ? T.green : T.glass2,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                    }}
+                  >
+                    <Text style={{ color: swapTokenOut === t ? "#000" : T.text, fontWeight: "900" }}>
+                      {TOKEN_ICONS[t]} {t}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+
+              {fetchingQuote && (
+                <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Fetching quote…</Text>
+              )}
+
+              {swapQuote && (
+                <View style={{ marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(57,255,20,0.08)", borderWidth: 1, borderColor: "rgba(57,255,20,0.2)" }}>
+                  <Text style={{ color: T.green, fontWeight: "900", fontSize: 18 }}>
+                    {swapQuote.amountOut.toFixed(8)} {swapTokenOut}
+                  </Text>
+                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
+                    Rate: 1 {swapTokenIn} = {swapQuote.exchangeRate.toFixed(8)} {swapTokenOut}
+                  </Text>
+                  <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>
+                    Price Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool Fee: {(swapQuote.feeRate * 100).toFixed(2)}%
+                  </Text>
+                </View>
+              )}
+
+              <View style={{ height: 16 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
+                    label={swapBusy ? "Swapping…" : "Swap"}
+                    variant="green"
+                    onPress={handleSwap}
+                    disabled={swapBusy || !swapQuote}
+                  />
+                </View>
+              </View>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== TOKEN SEND MODAL ===== */}
+      {tokenSendOpen && (
+        <Overlay onClose={closeAllModals}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📤 Send Token</Text>
+                <Pressable onPress={closeAllModals}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Select Token</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                {TOKEN_LIST.filter(t => t !== "HNY").map((t) => (
+                  <Pressable
+                    key={t}
+                    onPress={() => setSendTokenSymbol(t)}
+                    style={{
+                      padding: 10,
+                      marginRight: 8,
+                      borderRadius: 10,
+                      backgroundColor: sendTokenSymbol === t ? T.purple : T.glass2,
+                      borderWidth: 1,
+                      borderColor: T.border,
+                    }}
+                  >
+                    <Text style={{ color: T.text, fontWeight: "900" }}>
+                      {TOKEN_ICONS[t]} {t}
+                    </Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
+                Balance: {fmt8(tokenBalances[sendTokenSymbol] || 0)} {sendTokenSymbol}
+              </Text>
+
+              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Recipient</Text>
+              <TextInput
+                value={tokenSendTo}
+                onChangeText={(t) => setTokenSendTo(sanitizeAddress(t))}
+                placeholder="HNY_<40 hex>"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={{
+                  marginTop: 8,
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  color: T.text,
+                  backgroundColor: T.glass2,
+                  fontWeight: "800",
+                }}
+              />
+
+              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
+              <TextInput
+                value={tokenSendAmount}
+                onChangeText={(t) => setTokenSendAmount(normalizeAmountText(t))}
+                placeholder="0.00"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+                style={{
+                  marginTop: 8,
+                  paddingVertical: 12,
+                  paddingHorizontal: 12,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: T.border,
+                  color: T.text,
+                  backgroundColor: T.glass2,
+                  fontWeight: "800",
+                }}
+              />
+
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
+                Gas fees are paid in HNY. Spendable HNY: {fmt8(balancesView.spendable)}
+              </Text>
+
+              <View style={{ height: 16 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    T={T}
+                    label={tokenSendBusy ? "Sending…" : `Send ${sendTokenSymbol}`}
+                    variant="purple"
+                    onPress={handleTokenSend}
+                    disabled={tokenSendBusy}
+                  />
+                </View>
+              </View>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
       {toast && (
         <View
           pointerEvents="none"
