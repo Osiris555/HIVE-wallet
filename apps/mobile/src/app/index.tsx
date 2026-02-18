@@ -19,6 +19,7 @@ import {
   Text,
   TextInput,
   Alert,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 
@@ -87,6 +88,38 @@ async function kvDel(key: string): Promise<void> {
     if (isWeb()) window.localStorage.removeItem(key);
     else await SecureStore.deleteItemAsync(key);
   } catch {}
+}
+
+// Number formatting with commas
+function fmtNum(n: number, decimals?: number): string {
+  const d = decimals !== undefined ? decimals : (n < 1 && n > 0 ? 8 : n < 1000 ? 4 : 2);
+  const parts = n.toFixed(d).split(".");
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return parts.join(".");
+}
+function fmtUSD(n: number): string {
+  const parts = n.toFixed(2).split(".");
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return "$" + parts.join(".");
+}
+
+// Token icon emojis
+const TOKEN_ICONS: { [key: string]: string } = {
+  HNY: "🍯", stHNY: "🔒", ETH: "💎", BTC: "🟡", SOL: "☀️", USDT: "💵", USDC: "💚", XRP: "🌊",
+};
+const TOKEN_LIST = ["HNY", "stHNY", "ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
+const FAUCET_TOKENS = ["HNY", "ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
+const SWAP_TOKENS = ["HNY", "stHNY", "ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
+
+type SavedContact = { name: string; address: string };
+const CONTACTS_STORAGE_KEY = "HIVE_CONTACTS";
+async function loadContacts(): Promise<SavedContact[]> {
+  const raw = await kvGet(CONTACTS_STORAGE_KEY);
+  if (!raw) return [];
+  try { return JSON.parse(raw); } catch { return []; }
+}
+async function saveContactsToStorage(contacts: SavedContact[]) {
+  await kvSet(CONTACTS_STORAGE_KEY, JSON.stringify(contacts));
 }
 
 /* ======================
@@ -272,21 +305,6 @@ function sanitizeAddress(input: string) {
   return sanitizeAddressInfo(input).cleaned;
 }
 
-// Token icon emojis
-const TOKEN_ICONS: { [key: string]: string } = {
-  HNY: "🍯",
-  stHNY: "🔒",
-  ETH: "💎",
-  BTC: "🟡",
-  SOL: "☀️",
-  USDT: "💵",
-  USDC: "💚",
-  XRP: "🌊",
-};
-
-const TOKEN_LIST = ["HNY", "stHNY", "ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
-const FAUCET_TOKENS = ["ETH", "BTC", "SOL", "USDT", "USDC", "XRP"];
-
 function themeKeyForChain(chainId: string) {
   return `hive:theme:${chainId || "default"}`;
 }
@@ -295,7 +313,7 @@ function skinKeyForChain(chainId: string) {
 }
 
 /** Full-screen modal overlay */
-function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
+function Overlay(props: { children: React.ReactNode; onClose: () => void; zIndex?: number }) {
   return (
     <View
       style={{
@@ -308,7 +326,7 @@ function Overlay(props: { children: React.ReactNode; onClose: () => void }) {
         alignItems: "center",
         padding: 16,
         backgroundColor: "rgba(0,0,0,0.65)",
-        zIndex: 9999,
+        zIndex: props.zIndex ?? 9999,
       }}
       pointerEvents="auto"
     >
@@ -368,6 +386,35 @@ export default function Index() {
   const [swapOpen, setSwapOpen] = useState(false);
   const [portfolioOpen, setPortfolioOpen] = useState(false);
   const [faucetModalOpen, setFaucetModalOpen] = useState(false);
+
+  // Token detail view
+  const [tokenDetailSymbol, setTokenDetailSymbol] = useState<string | null>(null);
+
+  // Address book
+  const [contacts, setContacts] = useState<SavedContact[]>([]);
+  const [contactsOpen, setContactsOpen] = useState(false);
+  const [newContactName, setNewContactName] = useState("");
+  const [newContactAddr, setNewContactAddr] = useState("");
+
+  // Unified send state
+  const [unifiedSendToken, setUnifiedSendToken] = useState("HNY");
+  const [unifiedSendTo, setUnifiedSendTo] = useState("");
+  const [unifiedSendAmount, setUnifiedSendAmount] = useState("");
+  const [unifiedSendBusy, setUnifiedSendBusy] = useState(false);
+  const [unifiedSendConfirmOpen, setUnifiedSendConfirmOpen] = useState(false);
+  const [unifiedSendQuote, setUnifiedSendQuote] = useState<any>(null);
+
+  // Faucet state
+  const [faucetToken, setFaucetToken] = useState("ETH");
+  const [faucetAmount, setFaucetAmount] = useState("1000");
+  const [faucetBusy, setFaucetBusy] = useState(false);
+
+  // Swap extra state
+  const [fetchingQuote, setFetchingQuote] = useState(false);
+  const [swapConfirmOpen, setSwapConfirmOpen] = useState(false);
+
+  // Staking load error tracking
+  const [stakingLoadError, setStakingLoadError] = useState<string | null>(null);
 
   // ✅ Inputs (recipient and amount are separate!)
   const [toText, setToText] = useState("");
@@ -495,7 +542,7 @@ export default function Index() {
   const pausePollingRef = useRef(false);
 
   const anyModalOpen =
-    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen || tokenSendOpen || swapOpen || portfolioOpen || faucetModalOpen;
+    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen || tokenSendOpen || swapOpen || swapConfirmOpen || portfolioOpen || faucetModalOpen || unifiedSendConfirmOpen || !!tokenDetailSymbol || contactsOpen || stakingModalOpen;
 
   const sendFormDirty = !!toText || !!amountText;
 
@@ -573,6 +620,7 @@ async function pasteRecipientFromClipboard() {
       return;
     }
     setToText(sanitizeAddress(addr));
+    setUnifiedSendTo(sanitizeAddress(addr));
     showToast("Recipient pasted");
     setQrScanOpen(false);
   } catch {
@@ -670,9 +718,10 @@ async function pasteRecipientFromClipboard() {
       const res = await getStakingPositions(wallet);
       setStakingPositions(res?.positions || []);
       setStakingApr(Number(res?.apr || 0));
+      setStakingLoadError(null);
     } catch (e: any) {
-      // Don't swallow this on iOS — it's exactly why the Unstake tab can look blank.
       const msg = String(e?.message || e || "");
+      setStakingLoadError(msg);
       if (msg) setMessage(`Staking load failed: ${msg}`);
       console.warn("Staking load failed", e);
     }
@@ -683,7 +732,6 @@ async function pasteRecipientFromClipboard() {
     try {
       const { balances: bals, tokens: tokenInfo } = await getTokenBalances(wallet);
       setTokenBalances(bals);
-      // Build price map from tokenInfo
       const priceMap: { [s: string]: number } = {};
       for (const [sym, info] of Object.entries(tokenInfo)) {
         priceMap[sym] = (info as any).price || 0;
@@ -692,6 +740,11 @@ async function pasteRecipientFromClipboard() {
     } catch (e: any) {
       console.warn("Token data load failed:", e?.message);
     }
+  }
+
+  async function loadContactsOnBoot() {
+    const c = await loadContacts();
+    setContacts(c);
   }
 
   async function hardRefreshAll() {
@@ -714,6 +767,7 @@ async function pasteRecipientFromClipboard() {
     (async () => {
       await loadWallet();
       await refreshStatus();
+      await loadContactsOnBoot();
     })().catch((e) => setMessage(String((e as any)?.message || e)));
   }, []);
 
@@ -822,12 +876,18 @@ async function pasteRecipientFromClipboard() {
     setReceiveOpen(false);
     setTokenSendOpen(false);
     setSwapOpen(false);
+    setSwapConfirmOpen(false);
     setPortfolioOpen(false);
     setFaucetModalOpen(false);
+    setUnifiedSendConfirmOpen(false);
+    setTokenDetailSymbol(null);
+    setContactsOpen(false);
+    setQrScanOpen(false);
 
     setQuote(null);
     setRbfTx(null);
     setCancelTx(null);
+    setUnifiedSendQuote(null);
 
     pausePollingRef.current = false;
     if (!opts?.keepMessage) setMessage("");
@@ -1015,19 +1075,7 @@ async function pasteRecipientFromClipboard() {
      Send flow (confirm modal)
   ====================== */
 
-  // ========== MULTI-TOKEN ACTIONS ==========
-  const [faucetToken, setFaucetToken] = useState("ETH");
-  const [faucetAmount, setFaucetAmount] = useState("1000");
-  const [faucetBusy, setFaucetBusy] = useState(false);
-
-  const [sendTokenSymbol, setSendTokenSymbol] = useState("ETH");
-  const [tokenSendTo, setTokenSendTo] = useState("");
-  const [tokenSendAmount, setTokenSendAmount] = useState("");
-  const [tokenSendBusy, setTokenSendBusy] = useState(false);
-
-  const [fetchingQuote, setFetchingQuote] = useState(false);
-
-  // Portfolio value
+  // ========== PORTFOLIO VALUE ==========
   const portfolioValueUSD = useMemo(() => {
     return Object.entries(tokenBalances).reduce((sum, [symbol, amount]) => {
       const price = tokenPrices[symbol] || 0;
@@ -1035,16 +1083,23 @@ async function pasteRecipientFromClipboard() {
     }, 0);
   }, [tokenBalances, tokenPrices]);
 
+  // ========== FAUCET (includes HNY mint) ==========
   async function handleFaucet() {
     if (faucetBusy) return;
     setFaucetBusy(true);
     setMessage("");
     try {
-      const amt = Number(faucetAmount) || 1000;
-      await tokenFaucet({ tokenSymbol: faucetToken, amount: amt });
-      setMessage(`✅ Minted ${amt} ${faucetToken}`);
+      if (faucetToken === "HNY") {
+        const res: any = await mint();
+        setMessage("HNY Mint submitted ✅");
+        setMintCooldown(Number(res?.cooldownSeconds || 60));
+      } else {
+        const amt = Number(faucetAmount) || 1000;
+        await tokenFaucet({ tokenSymbol: faucetToken, amount: amt });
+        setMessage(`✅ Minted ${fmtNum(amt, 0)} ${faucetToken}`);
+      }
       setFaucetModalOpen(false);
-      await loadTokenData();
+      await hardRefreshAll();
     } catch (e: any) {
       setMessage(`Faucet failed: ${e?.message || "Unknown error"}`);
     } finally {
@@ -1052,91 +1107,145 @@ async function pasteRecipientFromClipboard() {
     }
   }
 
-  async function handleTokenSend() {
-    if (tokenSendBusy) return;
-    if (!tokenSendTo || !tokenSendAmount) {
-      setMessage("Enter recipient and amount");
+  // ========== UNIFIED SEND (all tokens incl HNY, stHNY) ==========
+  async function openUnifiedSendConfirm() {
+    setMessage("");
+    const to = sanitizeAddress(unifiedSendTo).replace(/^hny_/i, "HNY_").replace(/^HNY_0x/i, "HNY_");
+    if (to.includes("…") || to.includes("...")) {
+      setMessage("That looks like a shortened address. Use the full HNY_<40hex> address.");
       return;
     }
-    const amt = Number(tokenSendAmount);
-    if (!Number.isFinite(amt) || amt <= 0) {
-      setMessage("Invalid amount");
+    if (!/^HNY_[0-9a-fA-F]{40}$/.test(to)) {
+      setMessage("Recipient address must be HNY_<40hex>.");
       return;
     }
-    if ((tokenBalances[sendTokenSymbol] || 0) < amt) {
-      setMessage(`Insufficient ${sendTokenSymbol} balance`);
+    const amtTextClean = normalizeAmountText(unifiedSendAmount);
+    const amtCheck = parseAmount8(amtTextClean);
+    if (!amtCheck.ok || Number(amtCheck.value) <= 0) {
+      setMessage("Amount is required.");
       return;
     }
-    setTokenSendBusy(true);
+    const totalAmt = Number(amtCheck.value);
+    const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
+    const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+    const serviceFee = computeServiceFee(totalAmt, serviceFeeRate);
+
+    if (unifiedSendToken === "HNY") {
+      const totalCost = Number((totalAmt + chosenGas + serviceFee).toFixed(8));
+      if (balancesView.spendable < totalCost) {
+        setMessage(`Insufficient HNY. Need ${fmtNum(totalCost)} (amount + fees).`);
+        return;
+      }
+      setUnifiedSendQuote({ token: "HNY", to, amount: totalAmt, gasFee: chosenGas, serviceFee, totalCost });
+    } else {
+      const tokenBal = tokenBalances[unifiedSendToken] || 0;
+      if (tokenBal < totalAmt) {
+        setMessage(`Insufficient ${unifiedSendToken} balance. Have ${fmtNum(tokenBal)}`);
+        return;
+      }
+      const feesInHNY = chosenGas + serviceFee;
+      if (balancesView.spendable < feesInHNY) {
+        setMessage(`Insufficient HNY for fees. Need ${fmtNum(feesInHNY)} HNY.`);
+        return;
+      }
+      setUnifiedSendQuote({ token: unifiedSendToken, to, amount: totalAmt, gasFee: chosenGas, serviceFee, totalCost: totalAmt });
+    }
+    pausePollingRef.current = true;
+    setUnifiedSendConfirmOpen(true);
+  }
+
+  async function handleUnifiedSendSubmit() {
+    if (!unifiedSendQuote || unifiedSendBusy) return;
+    setUnifiedSendBusy(true);
     setMessage("");
     try {
-      await sendToken({ to: sanitizeAddress(tokenSendTo), tokenSymbol: sendTokenSymbol, amount: amt });
-      setMessage(`✅ Sent ${amt} ${sendTokenSymbol}`);
-      setTokenSendTo("");
-      setTokenSendAmount("");
+      if (unifiedSendQuote.token === "HNY") {
+        await send({
+          to: unifiedSendQuote.to,
+          amount: Number(unifiedSendQuote.amount),
+          gasFee: Number(unifiedSendQuote.gasFee),
+          serviceFee: Number(unifiedSendQuote.serviceFee),
+        });
+      } else {
+        await sendToken({
+          to: unifiedSendQuote.to,
+          tokenSymbol: unifiedSendQuote.token,
+          amount: unifiedSendQuote.amount,
+          gasFee: unifiedSendQuote.gasFee,
+          serviceFee: unifiedSendQuote.serviceFee,
+        });
+      }
+      setMessage(`✅ Sent ${fmtNum(unifiedSendQuote.amount)} ${unifiedSendQuote.token}`);
+      setUnifiedSendTo("");
+      setUnifiedSendAmount("");
+      setUnifiedSendConfirmOpen(false);
       setTokenSendOpen(false);
+      setUnifiedSendQuote(null);
       await hardRefreshAll();
     } catch (e: any) {
-      setMessage(`Token send failed: ${e?.message || "Unknown error"}`);
+      setMessage(`Send failed: ${e?.message || "Unknown error"}`);
     } finally {
-      setTokenSendBusy(false);
+      setUnifiedSendBusy(false);
+      pausePollingRef.current = false;
     }
   }
 
-  // Swap quote auto-fetch
+  // ========== SWAP ==========
   useEffect(() => {
-    if (!swapAmountIn || Number(swapAmountIn) <= 0) {
-      setSwapQuote(null);
-      return;
-    }
+    if (!swapAmountIn || Number(swapAmountIn) <= 0) { setSwapQuote(null); return; }
     const timer = setTimeout(async () => {
       try {
         setFetchingQuote(true);
-        const q = await getSwapQuote({
-          tokenIn: swapTokenIn,
-          tokenOut: swapTokenOut,
-          amountIn: Number(swapAmountIn),
-        });
+        const q = await getSwapQuote({ tokenIn: swapTokenIn, tokenOut: swapTokenOut, amountIn: Number(swapAmountIn) });
         setSwapQuote(q);
-      } catch {
-        setSwapQuote(null);
-      } finally {
-        setFetchingQuote(false);
-      }
+      } catch { setSwapQuote(null); } finally { setFetchingQuote(false); }
     }, 500);
     return () => clearTimeout(timer);
   }, [swapAmountIn, swapTokenIn, swapTokenOut]);
 
-  async function handleSwap() {
-    if (swapBusy || !swapQuote) return;
+  function openSwapConfirm() {
+    if (!swapQuote) return;
     const amt = Number(swapAmountIn);
-    if ((tokenBalances[swapTokenIn] || 0) < amt && swapTokenIn !== "HNY") {
-      setMessage(`Insufficient ${swapTokenIn} balance`);
-      return;
-    }
-    if (swapTokenIn === "HNY" && balancesView.spendable < amt) {
-      setMessage("Insufficient HNY balance");
-      return;
-    }
+    if (swapTokenIn === "HNY" && balancesView.spendable < amt) { setMessage("Insufficient HNY"); return; }
+    if (swapTokenIn === "stHNY" && (tokenBalances["stHNY"] || 0) < amt) { setMessage("Insufficient stHNY"); return; }
+    if (swapTokenIn !== "HNY" && swapTokenIn !== "stHNY" && (tokenBalances[swapTokenIn] || 0) < amt) { setMessage(`Insufficient ${swapTokenIn}`); return; }
+    pausePollingRef.current = true;
+    setSwapConfirmOpen(true);
+  }
+
+  async function handleSwapConfirm() {
+    if (swapBusy || !swapQuote) return;
     setSwapBusy(true);
     setMessage("");
     try {
-      await swap({
-        tokenIn: swapTokenIn,
-        tokenOut: swapTokenOut,
-        amountIn: amt,
-        minAmountOut: swapQuote.amountOut * 0.95,
-      });
-      setMessage(`✅ Swapped ${amt} ${swapTokenIn} → ${swapQuote.amountOut.toFixed(8)} ${swapTokenOut}`);
+      const amt = Number(swapAmountIn);
+      await swap({ tokenIn: swapTokenIn, tokenOut: swapTokenOut, amountIn: amt, minAmountOut: swapQuote.amountOut * 0.95 });
+      setMessage(`✅ Swapped ${fmtNum(amt)} ${swapTokenIn} → ${fmtNum(swapQuote.amountOut)} ${swapTokenOut}`);
       setSwapAmountIn("");
       setSwapQuote(null);
+      setSwapConfirmOpen(false);
       setSwapOpen(false);
       await hardRefreshAll();
-    } catch (e: any) {
-      setMessage(`Swap failed: ${e?.message || "Unknown error"}`);
-    } finally {
-      setSwapBusy(false);
-    }
+    } catch (e: any) { setMessage(`Swap failed: ${e?.message || "Unknown error"}`); } finally { setSwapBusy(false); pausePollingRef.current = false; }
+  }
+
+  // ========== ADDRESS BOOK ==========
+  async function addContact(name: string, address: string) {
+    const addr = sanitizeAddress(address);
+    if (!/^HNY_[0-9a-fA-F]{40}$/.test(addr)) { showToast("Invalid address", "warn"); return; }
+    if (!name.trim()) { showToast("Name is required", "warn"); return; }
+    const updated = [...contacts, { name: name.trim(), address: addr }];
+    setContacts(updated);
+    await saveContactsToStorage(updated);
+    setNewContactName("");
+    setNewContactAddr("");
+    showToast("Contact saved ✅");
+  }
+
+  async function removeContact(idx: number) {
+    const updated = contacts.filter((_, i) => i !== idx);
+    setContacts(updated);
+    await saveContactsToStorage(updated);
   }
   async function openSendConfirm() {
     setMessage("");
@@ -1435,256 +1544,86 @@ async function pasteRecipientFromClipboard() {
           </Card>
         )}
 
-        {/* Wallet + balances */}
+        {/* Wallet address (slim) */}
         <Card T={T} style={{ marginTop: 12 }}>
-          <Text style={{ color: T.sub, fontWeight: "800" }}>Wallet</Text>
-
-          <View style={{ flexDirection: "row", alignItems: "center", marginTop: 6 }}>
-            <Text style={{ color: T.text, fontSize: 16, fontWeight: "900", flex: 1 }}>
-              {wallet ? shortAddr(wallet) : "Loading…"}
-            </Text>
-
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12 }}>Wallet</Text>
+              <Text style={{ color: T.text, fontSize: 15, fontWeight: "900", marginTop: 4 }}>
+                {wallet ? shortAddr(wallet) : "Loading…"}
+              </Text>
+            </View>
             {!!wallet && (
-              <Pressable
-                onPress={copyWalletToClipboard}
-                hitSlop={10}
-                style={{
-                  padding: 6,
-                  marginLeft: 6,
-                  borderRadius: 8,
-                  backgroundColor: "rgba(0,0,0,0.25)",
-                  borderWidth: 1,
-                  borderColor: T.border,
-                }}
-              >
+              <Pressable onPress={copyWalletToClipboard} hitSlop={10} style={{ padding: 6, marginLeft: 6, borderRadius: 8, backgroundColor: "rgba(0,0,0,0.25)", borderWidth: 1, borderColor: T.border }}>
                 <Ionicons name="copy-outline" size={18} color={T.text} />
               </Pressable>
             )}
           </View>
-
-          <View style={{ height: 12 }} />
-
-          <Text style={{ color: T.sub, fontWeight: "800" }}>Balances</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 6 }}>Total: {fmt8(balancesView.total)}</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Spendable: {fmt8(balancesView.spendable)}</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Staked: {fmt8(stakedBalance)}</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Pending Δ: {pendingDelta}</Text>
-          <Text style={{ color: T.text, fontWeight: "900", marginTop: 4 }}>Fee Vault: {feeVaultBalance}</Text>
-
-          <View style={{ height: 14 }} />
-
-          <View style={{ flexDirection: "row", gap: 10 }}>
+          <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="Receive" variant="blue" onPress={() => { pausePollingRef.current = true; setReceiveOpen(true); }} />
+            </View>
             <View style={{ flex: 1 }}>
               <Button T={T} label="Refresh" variant="outline" onPress={hardRefreshAll} />
             </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                T={T}
-                label="Receive"
-                variant="blue"
-                onPress={() => {
-                  pausePollingRef.current = true;
-                  setReceiveOpen(true);
-                }}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                T={T}
-                label={mintLabel}
-                variant="purple"
-                disabled={mintBusy || mintCooldown > 0}
-                onPress={handleMint}
-              />
-            </View>
           </View>
-
-          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-            Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleTimeString() : "—"}
+          <Text style={{ color: T.sub, marginTop: 8, fontWeight: "600", fontSize: 11 }}>
+            Height: {chainHeight} • Next: {formatTime(msUntilNextBlock)} • {lastRefresh ? new Date(lastRefresh).toLocaleTimeString() : "—"}
           </Text>
         </Card>
 
-        {/* Multi-Token Portfolio */}
+        {/* Portfolio Hub */}
         <Card T={T} style={{ marginTop: 12 }}>
           <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>Portfolio</Text>
-            <Text style={{ color: T.green, fontSize: 20, fontWeight: "900" }}>
-              ${portfolioValueUSD.toFixed(2)}
-            </Text>
+            <Text style={{ color: T.green, fontSize: 20, fontWeight: "900" }}>{fmtUSD(portfolioValueUSD)}</Text>
           </View>
 
-          <View style={{ height: 12 }} />
+          <View style={{ height: 10 }} />
 
-          {/* Token list (compact) */}
           {TOKEN_LIST.map((sym) => {
             const bal = sym === "HNY" ? confirmedBalance : (tokenBalances[sym] || 0);
             if (bal <= 0 && sym !== "HNY") return null;
             const price = tokenPrices[sym] || 0;
             const value = bal * price;
             return (
-              <View key={sym} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: T.border }}>
+              <Pressable
+                key={sym}
+                onPress={() => { pausePollingRef.current = true; setTokenDetailSymbol(sym); }}
+                style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: T.border }}
+              >
                 <Text style={{ fontSize: 22, width: 36 }}>{TOKEN_ICONS[sym] || "🪙"}</Text>
                 <View style={{ flex: 1, marginLeft: 4 }}>
                   <Text style={{ color: T.text, fontWeight: "900", fontSize: 16 }}>{sym}</Text>
                   <Text style={{ color: T.sub, fontWeight: "600", fontSize: 12 }}>
-                    {Number(bal).toFixed(bal < 1 ? 8 : 4)} {sym}
+                    {fmtNum(bal, bal < 1 ? 8 : 4)} {sym}
                   </Text>
                 </View>
                 <View style={{ alignItems: "flex-end" }}>
-                  <Text style={{ color: T.text, fontWeight: "800", fontSize: 14 }}>${value.toFixed(2)}</Text>
-                  <Text style={{ color: T.sub, fontSize: 11 }}>${price.toFixed(price < 1 ? 4 : 2)}</Text>
+                  <Text style={{ color: T.text, fontWeight: "800", fontSize: 14 }}>{fmtUSD(value)}</Text>
+                  <Text style={{ color: T.sub, fontSize: 11 }}>${fmtNum(price, price < 1 ? 4 : 2)}</Text>
                 </View>
-              </View>
+                <Ionicons name="chevron-forward" size={16} color={T.sub} style={{ marginLeft: 6 }} />
+              </Pressable>
             );
           })}
 
-          {/* Show all tokens button */}
-          <Pressable
-            onPress={() => {
-              pausePollingRef.current = true;
-              setPortfolioOpen(true);
-            }}
-            style={{ paddingVertical: 10, alignItems: "center", marginTop: 8 }}
-          >
-            <Text style={{ color: T.blue, fontWeight: "900" }}>View All Tokens →</Text>
-          </Pressable>
-
-          <View style={{ height: 8 }} />
-
-          {/* Multi-token action buttons */}
-          <View style={{ flexDirection: "row", gap: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button
-                T={T}
-                label="🚰 Faucet"
-                variant="purple"
-                onPress={() => {
-                  pausePollingRef.current = true;
-                  setFaucetModalOpen(true);
-                }}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                T={T}
-                label="🔄 Swap"
-                variant="green"
-                onPress={() => {
-                  pausePollingRef.current = true;
-                  setSwapOpen(true);
-                }}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                T={T}
-                label="📤 Token Send"
-                variant="blue"
-                onPress={() => {
-                  pausePollingRef.current = true;
-                  setTokenSendOpen(true);
-                }}
-              />
-            </View>
-          </View>
-        </Card>
-
-        {/* Send */}
-        <Card T={T} style={{ marginTop: 12 }}>
-          <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Send</Text>
-
-          
-<Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Recipient</Text>
-<View style={{ flexDirection: "row", gap: 10, alignItems: "center", marginTop: 8 }}>
-  <TextInput
-    value={toText}
-    onChangeText={(t) => setToText(sanitizeAddress(t))}
-    onFocus={() => (editingRef.current = true)}
-    onBlur={() => (editingRef.current = false)}
-    placeholder="HNY_<40 hex>"
-    placeholderTextColor={"rgba(255,255,255,0.35)"}
-    autoCapitalize="none"
-    autoCorrect={false}
-    style={{
-      flex: 1,
-      paddingVertical: 12,
-      paddingHorizontal: 12,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: T.border,
-      color: T.text,
-      backgroundColor: T.glass2,
-      fontWeight: "800",
-    }}
-  />
-  <Pressable
-    onPress={openQrScanner}
-    style={{
-      width: 48,
-      height: 48,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: T.border,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: T.glass2,
-    }}
-  >
-    <Ionicons name="qr-code-outline" size={22} color={T.text} />
-  </Pressable>
-</View>
-<Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
-          <TextInput
-            value={amountText}
-            onChangeText={(t) => setAmountText(normalizeAmountText(t))}
-            onFocus={() => (editingRef.current = true)}
-            onBlur={() => (editingRef.current = false)}
-            placeholder="0.00"
-            placeholderTextColor={"rgba(255,255,255,0.35)"}
-            keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-            style={{
-              marginTop: 8,
-              paddingVertical: 12,
-              paddingHorizontal: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: T.border,
-              color: T.text,
-              backgroundColor: T.glass2,
-              fontWeight: "800",
-            }}
-          />
-
-          <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Priority Fee</Text>
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button T={T} label="None" variant={priorityTier === "none" ? "blue" : "outline"} onPress={() => setPriorityTier("none")} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button T={T} label="Small" variant={priorityTier === "small" ? "blue" : "outline"} onPress={() => setPriorityTier("small")} />
-            </View>
-          </View>
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button T={T} label="Medium" variant={priorityTier === "medium" ? "blue" : "outline"} onPress={() => setPriorityTier("medium")} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button T={T} label="Large" variant={priorityTier === "large" ? "blue" : "outline"} onPress={() => setPriorityTier("large")} />
-            </View>
-          </View>
-
           <View style={{ height: 12 }} />
 
-          <Button
-            T={T}
-            label={sendBusy ? "Sending…" : "Send"}
-            variant="green"
-            disabled={sendBusy}
-            onPress={openSendConfirm}
-          />
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="🚰 Faucet" variant="purple" onPress={() => { pausePollingRef.current = true; setFaucetModalOpen(true); }} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="🔄 Swap" variant="green" onPress={() => { pausePollingRef.current = true; setSwapOpen(true); }} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button T={T} label="📤 Send" variant="blue" onPress={() => { pausePollingRef.current = true; setUnifiedSendToken("HNY"); setTokenSendOpen(true); }} />
+            </View>
+          </View>
 
-          <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-            Min gas: {fmt8(minGasFee)} • Selected gas: {gasFeeText} • Service fee rate: {serviceFeeRate}
+          <Text style={{ color: T.sub, marginTop: 8, fontWeight: "600", fontSize: 11 }}>
+            Spendable: {fmtNum(balancesView.spendable)} HNY • Staked: {fmtNum(stakedBalance)} • Fee Vault: {fmtNum(feeVaultBalance)}
           </Text>
         </Card>
         {/* Staking */}
@@ -1706,7 +1645,10 @@ async function pasteRecipientFromClipboard() {
             APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}
           </Text>
           <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
-            Staked: {fmt8(stakedBalance)}
+            Principal Staked: {fmtNum(stakedBalance)} HNY
+          </Text>
+          <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+            stHNY Value: {fmtNum(tokenBalances["stHNY"] || stakedBalance)} stHNY (incl. rewards)
           </Text>
 
           <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
@@ -2001,7 +1943,7 @@ async function pasteRecipientFromClipboard() {
                         <Text style={{ color: T.sub, fontWeight: "800" }}>No staking positions.</Text>
                         <View style={{ marginTop: 10, padding: 10, borderWidth: 1, borderColor: T.border, borderRadius: 12, backgroundColor: "rgba(0,0,0,0.25)" }}>
                         <Text style={{ color: T.sub, fontWeight: "800" }}>Wallet: {wallet}</Text>
-                        <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>API: {apiBase || "(default)"}</Text>
+                        <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>API: {apiBaseText || "(default)"}</Text>
                         {stakingLoadError ? <Text style={{ color: "#ffb3b3", marginTop: 4, fontWeight: "900" }}>Error: {stakingLoadError}</Text> : null}
                       </View>
                       </>
@@ -2231,7 +2173,7 @@ async function pasteRecipientFromClipboard() {
       
 {/* QR scan modal */}
 {qrScanOpen && (
-  <Overlay onClose={() => setQrScanOpen(false)}>
+  <Overlay onClose={() => setQrScanOpen(false)} zIndex={10001}>
     <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
       <View style={{ padding: 14, width: 360, maxWidth: 420 }}>
         <View style={{ flexDirection: "row", alignItems: "center" }}>
@@ -2267,21 +2209,18 @@ async function pasteRecipientFromClipboard() {
                 const raw = String(ev?.data || "");
                 const addr = extractHnyAddress(raw);
                 if (!addr) {
-                  // allow retry
                   scanLockRef.current = false;
                   showToast("QR doesn't contain an HNY address", "warn");
                   return;
                 }
                 scanLockRef.current = true;
                 setToText(sanitizeAddress(addr));
+                setUnifiedSendTo(sanitizeAddress(addr));
                 showToast("Recipient set from QR");
                 setQrScanOpen(false);
-                setTimeout(() => {
-                  scanLockRef.current = false;
-                }, 800);
+                setTimeout(() => { scanLockRef.current = false; }, 800);
               }}
               onBarcodeScanned={(ev: any) => {
-                // compatibility
                 if (scanLockRef.current) return;
                 const raw = String(ev?.data || "");
                 const addr = extractHnyAddress(raw);
@@ -2292,11 +2231,10 @@ async function pasteRecipientFromClipboard() {
                 }
                 scanLockRef.current = true;
                 setToText(sanitizeAddress(addr));
+                setUnifiedSendTo(sanitizeAddress(addr));
                 showToast("Recipient set from QR");
                 setQrScanOpen(false);
-                setTimeout(() => {
-                  scanLockRef.current = false;
-                }, 800);
+                setTimeout(() => { scanLockRef.current = false; }, 800);
               }}
             />
           ) : (
@@ -2522,65 +2460,279 @@ async function pasteRecipientFromClipboard() {
         </Overlay>
       )}
 
-      {/* Toast (global) */}
-
-      {/* ===== PORTFOLIO MODAL ===== */}
-      {portfolioOpen && (
-        <Overlay onClose={closeAllModals}>
+      {/* ===== TOKEN DETAIL VIEW ===== */}
+      {tokenDetailSymbol && (
+        <Overlay onClose={() => { setTokenDetailSymbol(null); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>All Tokens</Text>
-                <Pressable onPress={closeAllModals}>
-                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                <Text style={{ fontSize: 32 }}>{TOKEN_ICONS[tokenDetailSymbol] || "🪙"}</Text>
+                <View style={{ flex: 1, marginLeft: 10 }}>
+                  <Text style={{ color: T.text, fontSize: 22, fontWeight: "900" }}>{tokenDetailSymbol}</Text>
+                  <Text style={{ color: T.sub, fontWeight: "600" }}>
+                    ${fmtNum(tokenPrices[tokenDetailSymbol] || 0, (tokenPrices[tokenDetailSymbol] || 0) < 1 ? 4 : 2)} USD
+                  </Text>
+                </View>
+                <Pressable onPress={() => { setTokenDetailSymbol(null); pausePollingRef.current = false; }}>
+                  <Text style={{ color: T.text, fontWeight: "900", fontSize: 16 }}>✕</Text>
                 </Pressable>
               </View>
 
-              <Text style={{ color: T.green, fontSize: 28, fontWeight: "900", marginTop: 10 }}>
-                ${portfolioValueUSD.toFixed(2)}
-              </Text>
-              <Text style={{ color: T.sub, fontWeight: "800", marginTop: 4 }}>Total Portfolio Value (USD)</Text>
+              <View style={{ height: 16 }} />
+
+              <View style={{ padding: 16, borderRadius: 14, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}>
+                <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12 }}>Your Balance</Text>
+                <Text style={{ color: T.text, fontSize: 24, fontWeight: "900", marginTop: 6 }}>
+                  {fmtNum(tokenDetailSymbol === "HNY" ? confirmedBalance : (tokenBalances[tokenDetailSymbol] || 0))}
+                </Text>
+                <Text style={{ color: T.green, fontSize: 16, fontWeight: "800", marginTop: 4 }}>
+                  {fmtUSD((tokenDetailSymbol === "HNY" ? confirmedBalance : (tokenBalances[tokenDetailSymbol] || 0)) * (tokenPrices[tokenDetailSymbol] || 0))}
+                </Text>
+              </View>
+
+              <View style={{ height: 14 }} />
+
+              <View style={{ padding: 14, borderRadius: 14, backgroundColor: "rgba(57,255,20,0.06)", borderWidth: 1, borderColor: "rgba(57,255,20,0.15)" }}>
+                <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12 }}>Live Price (Pyth Network)</Text>
+                <Text style={{ color: T.green, fontSize: 28, fontWeight: "900", marginTop: 6 }}>
+                  ${fmtNum(tokenPrices[tokenDetailSymbol] || 0, (tokenPrices[tokenDetailSymbol] || 0) < 1 ? 6 : 2)}
+                </Text>
+                <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600", fontSize: 11 }}>
+                  Prices update every ~60s from Pyth Network oracle feeds
+                </Text>
+              </View>
 
               <View style={{ height: 16 }} />
 
-              <ScrollView style={{ maxHeight: 400 }}>
-                {TOKEN_LIST.map((sym) => {
-                  const bal = sym === "HNY" ? confirmedBalance : (tokenBalances[sym] || 0);
-                  const price = tokenPrices[sym] || 0;
-                  const value = bal * price;
-                  return (
-                    <View key={sym} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: T.border }}>
-                      <Text style={{ fontSize: 26, width: 40 }}>{TOKEN_ICONS[sym] || "🪙"}</Text>
-                      <View style={{ flex: 1, marginLeft: 6 }}>
-                        <Text style={{ color: T.text, fontWeight: "900", fontSize: 16 }}>{sym}</Text>
-                        <Text style={{ color: T.sub, fontWeight: "600", fontSize: 13 }}>
-                          {Number(bal).toFixed(8)}
-                        </Text>
-                      </View>
-                      <View style={{ alignItems: "flex-end" }}>
-                        <Text style={{ color: T.green, fontWeight: "900", fontSize: 16 }}>${value.toFixed(2)}</Text>
-                        <Text style={{ color: T.sub, fontSize: 12 }}>@${price.toFixed(price < 1 ? 4 : 2)}</Text>
-                      </View>
-                    </View>
-                  );
-                })}
-              </ScrollView>
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="📤 Send" variant="blue" onPress={() => {
+                    setUnifiedSendToken(tokenDetailSymbol);
+                    setTokenDetailSymbol(null);
+                    setTokenSendOpen(true);
+                  }} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="📥 Receive" variant="outline" onPress={() => {
+                    setTokenDetailSymbol(null);
+                    setReceiveOpen(true);
+                  }} />
+                </View>
+              </View>
+              <View style={{ height: 10 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="🔄 Swap" variant="green" onPress={() => {
+                    setSwapTokenIn(tokenDetailSymbol);
+                    setTokenDetailSymbol(null);
+                    setSwapOpen(true);
+                  }} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Close" variant="outline" onPress={() => { setTokenDetailSymbol(null); pausePollingRef.current = false; }} />
+                </View>
+              </View>
 
-              <View style={{ height: 14 }} />
-              <Button T={T} label="Close" variant="outline" onPress={closeAllModals} />
+              <Text style={{ color: T.sub, marginTop: 12, fontWeight: "600", fontSize: 11, textAlign: "center" }}>
+                All tokens are sent/received at your single Honey wallet address
+              </Text>
             </View>
           </GlassCard>
         </Overlay>
       )}
 
-      {/* ===== FAUCET MODAL ===== */}
-      {faucetModalOpen && (
-        <Overlay onClose={closeAllModals}>
+      {/* ===== UNIFIED SEND MODAL ===== */}
+      {tokenSendOpen && (
+        <Overlay onClose={() => { setTokenSendOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🚰 Test Token Faucet</Text>
-                <Pressable onPress={closeAllModals}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📤 Send</Text>
+                <Pressable onPress={() => { setTokenSendOpen(false); pausePollingRef.current = false; }}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Token</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                {TOKEN_LIST.map((t) => (
+                  <Pressable key={t} onPress={() => setUnifiedSendToken(t)}
+                    style={{ padding: 10, marginRight: 8, borderRadius: 10, backgroundColor: unifiedSendToken === t ? T.purple : T.glass2, borderWidth: 1, borderColor: T.border }}>
+                    <Text style={{ color: T.text, fontWeight: "900" }}>{TOKEN_ICONS[t]} {t}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600", fontSize: 12 }}>
+                Balance: {fmtNum(unifiedSendToken === "HNY" ? balancesView.spendable : (tokenBalances[unifiedSendToken] || 0))} {unifiedSendToken}
+              </Text>
+
+              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Recipient</Text>
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "center", marginTop: 8 }}>
+                <TextInput
+                  value={unifiedSendTo}
+                  onChangeText={(t) => setUnifiedSendTo(sanitizeAddress(t))}
+                  onFocus={() => (editingRef.current = true)}
+                  onBlur={() => (editingRef.current = false)}
+                  placeholder="HNY_<40 hex>"
+                  placeholderTextColor={"rgba(255,255,255,0.35)"}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={{ flex: 1, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }}
+                />
+                <Pressable onPress={openQrScanner}
+                  style={{ width: 44, height: 44, borderRadius: 12, borderWidth: 1, borderColor: T.border, alignItems: "center", justifyContent: "center", backgroundColor: T.glass2 }}>
+                  <Ionicons name="qr-code-outline" size={20} color={T.text} />
+                </Pressable>
+                <Pressable onPress={() => setContactsOpen(true)}
+                  style={{ width: 44, height: 44, borderRadius: 12, borderWidth: 1, borderColor: T.border, alignItems: "center", justifyContent: "center", backgroundColor: T.glass2 }}>
+                  <Ionicons name="people-outline" size={20} color={T.text} />
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
+              <TextInput
+                value={unifiedSendAmount}
+                onChangeText={(t) => setUnifiedSendAmount(normalizeAmountText(t))}
+                onFocus={() => (editingRef.current = true)}
+                onBlur={() => (editingRef.current = false)}
+                placeholder="0.00"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+                style={{ marginTop: 8, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }}
+              />
+
+              {unifiedSendToken === "HNY" && (
+                <>
+                  <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Priority Fee</Text>
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                    {(["none", "small", "medium", "large"] as PriorityTier[]).map((tier) => (
+                      <View key={tier} style={{ flex: 1 }}>
+                        <Button T={T} label={tier.charAt(0).toUpperCase() + tier.slice(1)} variant={priorityTier === tier ? "blue" : "outline"} onPress={() => setPriorityTier(tier)} />
+                      </View>
+                    ))}
+                  </View>
+                </>
+              )}
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "600", fontSize: 11 }}>
+                Gas: {fmt8(computeChosenGas(Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR)))} HNY
+                {` • Svc fee (${(serviceFeeRate * 100).toFixed(4)}%): ${fmt8(computeServiceFee(Number(parseAmount8(normalizeAmountText(unifiedSendAmount)).value || 0), serviceFeeRate))} HNY`}
+              </Text>
+
+              <View style={{ height: 14 }} />
+              <Button T={T} label="Review Send" variant="green" onPress={openUnifiedSendConfirm} />
+            </View>
+            </TouchableWithoutFeedback>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== UNIFIED SEND CONFIRMATION ===== */}
+      {unifiedSendConfirmOpen && unifiedSendQuote && (
+        <Overlay onClose={() => { setUnifiedSendConfirmOpen(false); setUnifiedSendQuote(null); pausePollingRef.current = false; }} zIndex={10000}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Confirm Send</Text>
+
+              <View style={{ marginTop: 14, padding: 14, borderRadius: 14, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}>
+                <Text style={{ color: T.sub, fontWeight: "800" }}>Token</Text>
+                <Text style={{ color: T.text, fontWeight: "900", fontSize: 18, marginTop: 4 }}>
+                  {TOKEN_ICONS[unifiedSendQuote.token]} {fmtNum(unifiedSendQuote.amount)} {unifiedSendQuote.token}
+                </Text>
+
+                <Text style={{ color: T.sub, fontWeight: "800", marginTop: 12 }}>To</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4, fontSize: 13 }}>{unifiedSendQuote.to}</Text>
+
+                <View style={{ height: 1, backgroundColor: T.border, marginVertical: 12 }} />
+
+                <Text style={{ color: T.sub, fontWeight: "800" }}>Fee Breakdown (paid in HNY)</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 6 }}>Gas fee: {fmt8(unifiedSendQuote.gasFee)} HNY</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Service fee ({(serviceFeeRate * 100).toFixed(4)}%): {fmt8(unifiedSendQuote.serviceFee)} HNY</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Total fees: {fmt8(unifiedSendQuote.gasFee + unifiedSendQuote.serviceFee)} HNY</Text>
+
+                {unifiedSendQuote.token === "HNY" && (
+                  <Text style={{ color: T.gold, fontWeight: "900", marginTop: 8 }}>
+                    Total deducted: {fmtNum(unifiedSendQuote.totalCost)} HNY
+                  </Text>
+                )}
+              </View>
+
+              <View style={{ height: 14 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Back" variant="outline" onPress={() => { setUnifiedSendConfirmOpen(false); setUnifiedSendQuote(null); }} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label={unifiedSendBusy ? "Sending…" : "Confirm Send"} variant="green" disabled={unifiedSendBusy} onPress={handleUnifiedSendSubmit} />
+                </View>
+              </View>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== ADDRESS BOOK MODAL ===== */}
+      {contactsOpen && (
+        <Overlay onClose={() => setContactsOpen(false)} zIndex={10001}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📇 Address Book</Text>
+                <Pressable onPress={() => setContactsOpen(false)}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <ScrollView style={{ maxHeight: 300, marginTop: 12 }}>
+                {contacts.length === 0 ? (
+                  <Text style={{ color: T.sub, fontWeight: "800" }}>No saved contacts yet.</Text>
+                ) : (
+                  contacts.map((c, idx) => (
+                    <View key={idx} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: T.border }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: T.text, fontWeight: "900" }}>{c.name}</Text>
+                        <Text style={{ color: T.sub, fontSize: 12, fontWeight: "600" }}>{shortAddr(c.address)}</Text>
+                      </View>
+                      <Pressable onPress={() => { setUnifiedSendTo(c.address); setContactsOpen(false); showToast(`Selected ${c.name}`); }}
+                        style={{ padding: 8, borderRadius: 8, backgroundColor: T.blue, marginRight: 8 }}>
+                        <Text style={{ color: "#fff", fontWeight: "900", fontSize: 12 }}>Use</Text>
+                      </Pressable>
+                      <Pressable onPress={() => removeContact(idx)}
+                        style={{ padding: 8, borderRadius: 8, backgroundColor: T.danger }}>
+                        <Text style={{ color: "#fff", fontWeight: "900", fontSize: 12 }}>✕</Text>
+                      </Pressable>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+
+              <View style={{ height: 14 }} />
+              <Text style={{ color: T.sub, fontWeight: "800" }}>Add New Contact</Text>
+              <TextInput value={newContactName} onChangeText={setNewContactName} placeholder="Name"
+                placeholderTextColor={"rgba(255,255,255,0.35)"}
+                style={{ marginTop: 8, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }} />
+              <TextInput value={newContactAddr} onChangeText={(t) => setNewContactAddr(sanitizeAddress(t))} placeholder="HNY_<40 hex>"
+                placeholderTextColor={"rgba(255,255,255,0.35)"} autoCapitalize="none" autoCorrect={false}
+                style={{ marginTop: 8, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }} />
+              <View style={{ height: 10 }} />
+              <Button T={T} label="Save Contact" variant="blue" onPress={() => addContact(newContactName, newContactAddr)} />
+            </View>
+            </TouchableWithoutFeedback>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== FAUCET MODAL (includes HNY mint) ===== */}
+      {faucetModalOpen && (
+        <Overlay onClose={() => { setFaucetModalOpen(false); pausePollingRef.current = false; }}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🚰 Token Faucet</Text>
+                <Pressable onPress={() => { setFaucetModalOpen(false); pausePollingRef.current = false; }}>
                   <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
                 </Pressable>
               </View>
@@ -2588,297 +2740,170 @@ async function pasteRecipientFromClipboard() {
               <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Select Token</Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
                 {FAUCET_TOKENS.map((t) => (
-                  <Pressable
-                    key={t}
-                    onPress={() => setFaucetToken(t)}
-                    style={{
-                      padding: 10,
-                      borderRadius: 10,
-                      backgroundColor: faucetToken === t ? T.green : T.glass2,
-                      borderWidth: 1,
-                      borderColor: T.border,
-                    }}
-                  >
-                    <Text style={{ color: faucetToken === t ? "#000" : T.text, fontWeight: "900" }}>
-                      {TOKEN_ICONS[t]} {t}
-                    </Text>
+                  <Pressable key={t} onPress={() => setFaucetToken(t)}
+                    style={{ padding: 10, borderRadius: 10, backgroundColor: faucetToken === t ? T.green : T.glass2, borderWidth: 1, borderColor: T.border }}>
+                    <Text style={{ color: faucetToken === t ? "#000" : T.text, fontWeight: "900" }}>{TOKEN_ICONS[t]} {t}</Text>
                   </Pressable>
                 ))}
               </View>
 
-              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
-              <TextInput
-                value={faucetAmount}
-                onChangeText={setFaucetAmount}
-                placeholder="1000"
-                placeholderTextColor={"rgba(255,255,255,0.35)"}
-                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-                style={{
-                  marginTop: 8,
-                  paddingVertical: 12,
-                  paddingHorizontal: 12,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: T.border,
-                  color: T.text,
-                  backgroundColor: T.glass2,
-                  fontWeight: "800",
-                }}
-              />
+              {faucetToken === "HNY" ? (
+                <View style={{ marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: "rgba(255,191,47,0.08)", borderWidth: 1, borderColor: "rgba(255,191,47,0.2)" }}>
+                  <Text style={{ color: T.gold, fontWeight: "900" }}>🍯 Mint 100 HNY (Devnet Faucet)</Text>
+                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600", fontSize: 12 }}>
+                    {mintCooldown > 0 ? `Cooldown: ${mintCooldown}s remaining` : "Ready to mint"}
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
+                  <TextInput value={faucetAmount} onChangeText={setFaucetAmount} placeholder="1000"
+                    placeholderTextColor={"rgba(255,255,255,0.35)"}
+                    keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
+                    style={{ marginTop: 8, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }} />
+                </>
+              )}
 
               <View style={{ height: 16 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                  <Button T={T} label="Cancel" variant="outline" onPress={() => { setFaucetModalOpen(false); pausePollingRef.current = false; }} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button T={T} label={faucetBusy ? "Minting…" : `Mint ${faucetToken}`} variant="green" onPress={handleFaucet} disabled={faucetBusy} />
+                  <Button T={T}
+                    label={faucetBusy ? "Minting…" : faucetToken === "HNY" ? "Mint 100 HNY" : `Mint ${faucetToken}`}
+                    variant="green"
+                    onPress={handleFaucet}
+                    disabled={faucetBusy || (faucetToken === "HNY" && mintCooldown > 0)} />
                 </View>
               </View>
-
-              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>
-                Note: Use /mint for HNY. stHNY is earned through staking.
-              </Text>
             </View>
+            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}
 
       {/* ===== SWAP MODAL ===== */}
       {swapOpen && (
-        <Overlay onClose={closeAllModals}>
+        <Overlay onClose={() => { setSwapOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🔄 Swap Tokens</Text>
-                <Pressable onPress={closeAllModals}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🔄 Swap</Text>
+                <Pressable onPress={() => { setSwapOpen(false); pausePollingRef.current = false; }}>
                   <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
                 </Pressable>
               </View>
 
               <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>From</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-                {TOKEN_LIST.filter(t => t !== "stHNY").map((t) => (
-                  <Pressable
-                    key={t}
-                    onPress={() => {
-                      setSwapTokenIn(t);
-                      if (t === swapTokenOut) setSwapTokenOut(t === "HNY" ? "ETH" : "HNY");
-                    }}
-                    style={{
-                      padding: 10,
-                      marginRight: 8,
-                      borderRadius: 10,
-                      backgroundColor: swapTokenIn === t ? T.blue : T.glass2,
-                      borderWidth: 1,
-                      borderColor: T.border,
-                    }}
-                  >
-                    <Text style={{ color: T.text, fontWeight: "900" }}>
-                      {TOKEN_ICONS[t]} {t}
-                    </Text>
+                {SWAP_TOKENS.map((t) => (
+                  <Pressable key={t} onPress={() => { setSwapTokenIn(t); if (t === swapTokenOut) setSwapTokenOut(t === "HNY" ? "ETH" : "HNY"); }}
+                    style={{ padding: 10, marginRight: 8, borderRadius: 10, backgroundColor: swapTokenIn === t ? T.blue : T.glass2, borderWidth: 1, borderColor: T.border }}>
+                    <Text style={{ color: T.text, fontWeight: "900" }}>{TOKEN_ICONS[t]} {t}</Text>
                   </Pressable>
                 ))}
               </ScrollView>
-
-              <TextInput
-                value={swapAmountIn}
-                onChangeText={(t) => setSwapAmountIn(normalizeAmountText(t))}
-                placeholder="0.00"
+              <TextInput value={swapAmountIn} onChangeText={(t) => setSwapAmountIn(normalizeAmountText(t))} placeholder="0.00"
+                onFocus={() => (editingRef.current = true)}
+                onBlur={() => (editingRef.current = false)}
                 placeholderTextColor={"rgba(255,255,255,0.35)"}
                 keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-                style={{
-                  marginTop: 10,
-                  paddingVertical: 12,
-                  paddingHorizontal: 12,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: T.border,
-                  color: T.text,
-                  backgroundColor: T.glass2,
-                  fontWeight: "800",
-                }}
-              />
-              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "600" }}>
-                Balance: {swapTokenIn === "HNY" ? fmt8(balancesView.spendable) : fmt8(tokenBalances[swapTokenIn] || 0)}
+                style={{ marginTop: 10, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }} />
+              <Text style={{ color: T.sub, marginTop: 4, fontWeight: "600", fontSize: 12 }}>
+                Balance: {fmtNum(swapTokenIn === "HNY" ? balancesView.spendable : (tokenBalances[swapTokenIn] || 0))}
               </Text>
 
               <View style={{ alignItems: "center", marginVertical: 10 }}>
-                <Pressable
-                  onPress={() => {
-                    const tmp = swapTokenIn;
-                    setSwapTokenIn(swapTokenOut);
-                    setSwapTokenOut(tmp);
-                    setSwapAmountIn("");
-                    setSwapQuote(null);
-                  }}
-                  style={{ padding: 8, borderRadius: 20, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}
-                >
-                  <Text style={{ fontSize: 20 }}>⬇️ ⬆️</Text>
+                <Pressable onPress={() => { const tmp = swapTokenIn; setSwapTokenIn(swapTokenOut); setSwapTokenOut(tmp); setSwapAmountIn(""); setSwapQuote(null); }}
+                  style={{ padding: 8, borderRadius: 20, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}>
+                  <Text style={{ fontSize: 18 }}>⬇️ ⬆️</Text>
                 </Pressable>
               </View>
 
               <Text style={{ color: T.sub, fontWeight: "800" }}>To</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-                {TOKEN_LIST.filter(t => t !== "stHNY" && t !== swapTokenIn).map((t) => (
-                  <Pressable
-                    key={t}
-                    onPress={() => setSwapTokenOut(t)}
-                    style={{
-                      padding: 10,
-                      marginRight: 8,
-                      borderRadius: 10,
-                      backgroundColor: swapTokenOut === t ? T.green : T.glass2,
-                      borderWidth: 1,
-                      borderColor: T.border,
-                    }}
-                  >
-                    <Text style={{ color: swapTokenOut === t ? "#000" : T.text, fontWeight: "900" }}>
-                      {TOKEN_ICONS[t]} {t}
-                    </Text>
+                {SWAP_TOKENS.filter(t => t !== swapTokenIn).map((t) => (
+                  <Pressable key={t} onPress={() => setSwapTokenOut(t)}
+                    style={{ padding: 10, marginRight: 8, borderRadius: 10, backgroundColor: swapTokenOut === t ? T.green : T.glass2, borderWidth: 1, borderColor: T.border }}>
+                    <Text style={{ color: swapTokenOut === t ? "#000" : T.text, fontWeight: "900" }}>{TOKEN_ICONS[t]} {t}</Text>
                   </Pressable>
                 ))}
               </ScrollView>
 
-              {fetchingQuote && (
-                <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Fetching quote…</Text>
-              )}
-
+              {fetchingQuote && <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Fetching quote…</Text>}
               {swapQuote && (
                 <View style={{ marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(57,255,20,0.08)", borderWidth: 1, borderColor: "rgba(57,255,20,0.2)" }}>
-                  <Text style={{ color: T.green, fontWeight: "900", fontSize: 18 }}>
-                    {swapQuote.amountOut.toFixed(8)} {swapTokenOut}
-                  </Text>
-                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
-                    Rate: 1 {swapTokenIn} = {swapQuote.exchangeRate.toFixed(8)} {swapTokenOut}
-                  </Text>
-                  <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>
-                    Price Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool Fee: {(swapQuote.feeRate * 100).toFixed(2)}%
-                  </Text>
+                  <Text style={{ color: T.green, fontWeight: "900", fontSize: 18 }}>≈ {fmtNum(swapQuote.amountOut)} {swapTokenOut}</Text>
+                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>Rate: 1 {swapTokenIn} = {fmtNum(swapQuote.exchangeRate)} {swapTokenOut}</Text>
+                  <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool fee: {(swapQuote.feeRate * 100).toFixed(2)}%</Text>
                 </View>
               )}
 
-              <View style={{ height: 16 }} />
+              <View style={{ height: 14 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                  <Button T={T} label="Cancel" variant="outline" onPress={() => { setSwapOpen(false); pausePollingRef.current = false; }} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    T={T}
-                    label={swapBusy ? "Swapping…" : "Swap"}
-                    variant="green"
-                    onPress={handleSwap}
-                    disabled={swapBusy || !swapQuote}
-                  />
+                  <Button T={T} label="Confirm Swap" variant="green" onPress={openSwapConfirm} disabled={!swapQuote || swapBusy} />
                 </View>
               </View>
             </View>
+            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}
 
-      {/* ===== TOKEN SEND MODAL ===== */}
-      {tokenSendOpen && (
-        <Overlay onClose={closeAllModals}>
+      {/* ===== SWAP CONFIRMATION ===== */}
+      {swapConfirmOpen && swapQuote && (
+        <Overlay onClose={() => { setSwapConfirmOpen(false); pausePollingRef.current = false; }} zIndex={10000}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
             <View style={{ padding: 14 }}>
-              <View style={{ flexDirection: "row", alignItems: "center" }}>
-                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📤 Send Token</Text>
-                <Pressable onPress={closeAllModals}>
-                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
-                </Pressable>
+              <Text style={{ color: T.text, fontSize: 18, fontWeight: "900" }}>Confirm Swap</Text>
+
+              <View style={{ marginTop: 14, padding: 14, borderRadius: 14, backgroundColor: T.glass2, borderWidth: 1, borderColor: T.border }}>
+                <Text style={{ color: T.sub, fontWeight: "800" }}>You Send</Text>
+                <Text style={{ color: T.text, fontWeight: "900", fontSize: 18, marginTop: 4 }}>
+                  {TOKEN_ICONS[swapTokenIn]} {fmtNum(Number(swapAmountIn))} {swapTokenIn}
+                </Text>
+
+                <View style={{ alignItems: "center", marginVertical: 8 }}>
+                  <Text style={{ fontSize: 16 }}>⬇️</Text>
+                </View>
+
+                <Text style={{ color: T.sub, fontWeight: "800" }}>You Receive</Text>
+                <Text style={{ color: T.green, fontWeight: "900", fontSize: 18, marginTop: 4 }}>
+                  {TOKEN_ICONS[swapTokenOut]} ≈ {fmtNum(swapQuote.amountOut)} {swapTokenOut}
+                </Text>
+                <Text style={{ color: T.sub, marginTop: 4, fontWeight: "600", fontSize: 12 }}>
+                  Min received (5% slippage): {fmtNum(swapQuote.amountOut * 0.95)} {swapTokenOut}
+                </Text>
+
+                <View style={{ height: 1, backgroundColor: T.border, marginVertical: 12 }} />
+
+                <Text style={{ color: T.sub, fontWeight: "800" }}>Fee Breakdown</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 6 }}>Exchange rate: 1 {swapTokenIn} = {fmtNum(swapQuote.exchangeRate)} {swapTokenOut}</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Pool fee: {(swapQuote.feeRate * 100).toFixed(2)}%</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Price impact: {swapQuote.priceImpact.toFixed(4)}%</Text>
               </View>
 
-              <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Select Token</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
-                {TOKEN_LIST.filter(t => t !== "HNY").map((t) => (
-                  <Pressable
-                    key={t}
-                    onPress={() => setSendTokenSymbol(t)}
-                    style={{
-                      padding: 10,
-                      marginRight: 8,
-                      borderRadius: 10,
-                      backgroundColor: sendTokenSymbol === t ? T.purple : T.glass2,
-                      borderWidth: 1,
-                      borderColor: T.border,
-                    }}
-                  >
-                    <Text style={{ color: T.text, fontWeight: "900" }}>
-                      {TOKEN_ICONS[t]} {t}
-                    </Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
-                Balance: {fmt8(tokenBalances[sendTokenSymbol] || 0)} {sendTokenSymbol}
-              </Text>
-
-              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Recipient</Text>
-              <TextInput
-                value={tokenSendTo}
-                onChangeText={(t) => setTokenSendTo(sanitizeAddress(t))}
-                placeholder="HNY_<40 hex>"
-                placeholderTextColor={"rgba(255,255,255,0.35)"}
-                autoCapitalize="none"
-                autoCorrect={false}
-                style={{
-                  marginTop: 8,
-                  paddingVertical: 12,
-                  paddingHorizontal: 12,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: T.border,
-                  color: T.text,
-                  backgroundColor: T.glass2,
-                  fontWeight: "800",
-                }}
-              />
-
-              <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
-              <TextInput
-                value={tokenSendAmount}
-                onChangeText={(t) => setTokenSendAmount(normalizeAmountText(t))}
-                placeholder="0.00"
-                placeholderTextColor={"rgba(255,255,255,0.35)"}
-                keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-                style={{
-                  marginTop: 8,
-                  paddingVertical: 12,
-                  paddingHorizontal: 12,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: T.border,
-                  color: T.text,
-                  backgroundColor: T.glass2,
-                  fontWeight: "800",
-                }}
-              />
-
-              <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>
-                Gas fees are paid in HNY. Spendable HNY: {fmt8(balancesView.spendable)}
-              </Text>
-
-              <View style={{ height: 16 }} />
+              <View style={{ height: 14 }} />
               <View style={{ flexDirection: "row", gap: 10 }}>
                 <View style={{ flex: 1 }}>
-                  <Button T={T} label="Cancel" variant="outline" onPress={closeAllModals} />
+                  <Button T={T} label="Back" variant="outline" onPress={() => setSwapConfirmOpen(false)} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Button
-                    T={T}
-                    label={tokenSendBusy ? "Sending…" : `Send ${sendTokenSymbol}`}
-                    variant="purple"
-                    onPress={handleTokenSend}
-                    disabled={tokenSendBusy}
-                  />
+                  <Button T={T} label={swapBusy ? "Swapping…" : "Confirm Swap"} variant="green" disabled={swapBusy} onPress={handleSwapConfirm} />
                 </View>
               </View>
             </View>
           </GlassCard>
         </Overlay>
       )}
+
+      {/* Toast (global) */}
       {toast && (
         <View
           pointerEvents="none"

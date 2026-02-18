@@ -322,6 +322,8 @@ async function initDb(db) {
       { tokenA: 'HNY', tokenB: 'XRP', reserveA: 100000, reserveB: 40000 },
       { tokenA: 'ETH', tokenB: 'USDT', reserveA: 28.57, reserveB: 100000 },
       { tokenA: 'BTC', tokenB: 'USDT', reserveA: 1.54, reserveB: 100000 },
+      { tokenA: 'stHNY', tokenB: 'HNY', reserveA: 50000, reserveB: 52500 }, // stHNY trades at slight premium (~1.05x)
+      { tokenA: 'stHNY', tokenB: 'USDT', reserveA: 50000, reserveB: 52500 },
     ];
 
     for (const pool of defaultPools) {

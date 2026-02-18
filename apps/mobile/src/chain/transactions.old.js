@@ -1,6 +1,6 @@
 // apps/mobile/src/chain/transactions.js
 
-const API_BASE = "http://192.168.0.11:3000";
+const API_BASE = "http://192.168.0.21:3000";
 
 /* -----------------------
    Helpers

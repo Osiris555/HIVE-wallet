@@ -2426,7 +2426,12 @@ app.get("/tokens/balances/:wallet", async (req, res) => {
     };
 
     for (const tb of tokenBalances) {
-      balances[tb.tokenSymbol] = Number(Number(tb.balance).toFixed(8));
+      if (tb.tokenSymbol === 'stHNY') {
+        // ADD transferred stHNY to staking-derived stHNY instead of overwriting
+        balances.stHNY = Number((balances.stHNY + Number(tb.balance || 0)).toFixed(8));
+      } else {
+        balances[tb.tokenSymbol] = Number(Number(tb.balance).toFixed(8));
+      }
     }
 
     // Get token metadata
@@ -2537,7 +2542,12 @@ app.post("/tokens/send", async (req, res) => {
 
     const { minGasFee } = await currentMinGasFee();
     const gasFee = Number(req.body?.gasFee ?? minGasFee);
-    const serviceFee = 0;
+    // Apply service fee to ALL token sends (same 0.005% rate as HNY)
+    const serviceFee = Number(req.body?.serviceFee ?? 0);
+    const svcExpected = computeServiceFee(amt);
+    if (Math.abs(serviceFee - svcExpected) > 0.00000002) {
+      return res.status(400).json({ error: "Bad serviceFee", expectedServiceFee: svcExpected, gotServiceFee: serviceFee, rate: SERVICE_FEE_RATE });
+    }
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 
     if (!Number.isFinite(gasFee) || gasFee < minGasFee) {

@@ -78,10 +78,10 @@ function isWeb() {
 
 function stripHost(input: string): string {
   // Accept:
-  //  - 192.168.0.20:8081
-  //  - http://192.168.0.20:8081
-  //  - http://192.168.0.20:8081/...
-  //  - 192.168.0.20
+  //  - 192.168.0.21:8081
+  //  - http://192.168.0.21:8081
+  //  - http://192.168.0.21:8081/...
+  //  - 192.168.0.21
   const s = String(input || "").trim();
   if (!s) return "";
   try {
@@ -1087,6 +1087,7 @@ export async function sendToken(params: {
   tokenSymbol: string;
   amount: number;
   gasFee?: number;
+  serviceFee?: number;
 }): Promise<any> {
   const wallet = await ensureWalletId();
   const status = await getChainStatus();
@@ -1106,7 +1107,7 @@ export async function sendToken(params: {
   if (!to) throw makeError("Missing recipient", 400);
 
   const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
-  const serviceFee = 0;
+  const serviceFee = Number(params.serviceFee ?? 0);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({ tokenSymbol: params.tokenSymbol });
@@ -1136,6 +1137,7 @@ export async function sendToken(params: {
     timestamp,
     signature,
     gasFee,
+    serviceFee,
     expiresAtMs,
   });
 }
