@@ -31,8 +31,9 @@ const MAX_TXS_PER_WALLET_PER_BLOCK = 5;
 // Fees (base)
 // Base gas is the smallest on-chain unit (1 Honey Cone).
 const BASE_MIN_GAS_FEE = 0.00000001;
-// 0.005% = 0.00005
-const SERVICE_FEE_RATE = 0.00005;
+// 0.0005% of USD value, paid in HNY (at $1/HNY)
+const SERVICE_FEE_RATE = 0.000005;
+const HNY_PRICE_USD = 1.00;
 
 // 1 satoshi-like unit
 const ONE_SAT = 0.00000001;
@@ -126,8 +127,15 @@ function canonicalSignedMessage({
   ].join("|");
 }
 
-function expectedServiceFee(amount) {
-  return Number((Number(amount) * SERVICE_FEE_RATE).toFixed(8));
+// Service fee = 0.0005% of USD value, paid in HNY.
+// e.g. 1 BTC @ $65,000 => fee = 65000 * 0.000005 = 0.325 HNY
+// e.g. 1 ETH @ $3,500  => fee = 3500 * 0.000005 = 0.0175 HNY
+// e.g. 100 HNY @ $1    => fee = 100 * 0.000005 = 0.0005 HNY
+function expectedServiceFee(amount, tokenPriceUSD) {
+  const price = Number(tokenPriceUSD || HNY_PRICE_USD);
+  const usdValue = Number(amount) * price;
+  const feeInHNY = (usdValue * SERVICE_FEE_RATE) / HNY_PRICE_USD;
+  return Number(feeInHNY.toFixed(8));
 }
 
 function daysToMs(days) {
@@ -946,83 +954,7 @@ async function buildBlockWithRules() {
           );
         }
 
-        // SPECIAL HANDLING: Split staking positions when stHNY is transferred
-        if (tokenSymbol === 'stHNY') {
-          // Get sender's active staking positions (staked or unlocking)
-          const positions = await all(
-            db,
-            `SELECT id, principal, lockDays, startMs, unlockAtMs, status, rewardPaid, 
-                    unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId, unlockTxId
-             FROM staking_positions 
-             WHERE wallet=? AND status IN ('staked', 'unlocking')
-             ORDER BY startMs ASC`,
-            [wallet]
-          );
-
-          let remainingToTransfer = amt;
-          const transferredPositions = [];
-
-          // Split positions to transfer the requested stHNY amount
-          for (const pos of positions) {
-            if (remainingToTransfer <= 0) break;
-
-            const posPrincipal = Number(pos.principal);
-            const transferFromThis = Math.min(remainingToTransfer, posPrincipal);
-
-            if (transferFromThis >= posPrincipal) {
-              // Transfer entire position - just change wallet owner
-              await run(
-                db,
-                `UPDATE staking_positions SET wallet=? WHERE id=?`,
-                [to, pos.id]
-              );
-              transferredPositions.push({ id: pos.id, amount: posPrincipal });
-            } else {
-              // Partial transfer - split the position
-              // Reduce sender's position
-              const newSenderPrincipal = posPrincipal - transferFromThis;
-              await run(
-                db,
-                `UPDATE staking_positions SET principal=? WHERE id=?`,
-                [newSenderPrincipal, pos.id]
-              );
-
-              // Create new position for recipient with same parameters
-              const newPositionId = `${tx.id}-split-${pos.id}`;
-              await run(
-                db,
-                `INSERT INTO staking_positions 
-                 (id, wallet, principal, lockDays, startMs, unlockAtMs, status, rewardPaid,
-                  unlockingAtMs, withdrawAtMs, rewardsFrozenAtMs, stakeTxId, unstakeTxId, createdAtMs)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-                [
-                  newPositionId,
-                  to,
-                  transferFromThis,
-                  pos.lockDays,
-                  pos.startMs,
-                  pos.unlockAtMs,
-                  pos.status,
-                  0, // New position starts with 0 rewards paid (recipient gets all future rewards)
-                  pos.unlockingAtMs,
-                  pos.withdrawAtMs,
-                  pos.rewardsFrozenAtMs,
-                  pos.stakeTxId,
-                  ts
-                ]
-              );
-              transferredPositions.push({ id: newPositionId, amount: transferFromThis });
-            }
-
-            remainingToTransfer -= transferFromThis;
-          }
-
-          // If we couldn't transfer enough (shouldn't happen due to balance check, but safety)
-          if (remainingToTransfer > 0.00000001) {
-            await failTx(tx.id, height, "insufficient_staking_positions");
-            continue;
-          }
-        }
+        // stHNY position splitting already handled above (line 831 block).
 
         await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
         confirmedIds.push(tx.id);
@@ -1236,6 +1168,13 @@ app.get("/status", async (_req, res) => {
     const { mempool, minGasFee } = await currentMinGasFee();
     const feeVaultBalance = await getFeeVaultBalance();
 
+    // Include token prices so client can compute USD-based service fees
+    const tokenRows = await all(db, `SELECT symbol, mockPriceUSD FROM tokens`);
+    const tokenPricesUSD = {};
+    for (const t of tokenRows) {
+      tokenPricesUSD[t.symbol] = Number(t.mockPriceUSD || 0);
+    }
+
     res.json({
       chainId: CHAIN_ID,
       chainHeight,
@@ -1246,6 +1185,7 @@ app.get("/status", async (_req, res) => {
       baseMinGasFee: BASE_MIN_GAS_FEE,
       minGasFee,
       serviceFeeRate: SERVICE_FEE_RATE,
+      tokenPricesUSD,
       txTtlMs: TX_TTL_MS,
       latestBlock: latest || null,
       feeVaultBalance: Number(Number(feeVaultBalance || 0).toFixed(8)),
@@ -2426,12 +2366,11 @@ app.get("/tokens/balances/:wallet", async (req, res) => {
     };
 
     for (const tb of tokenBalances) {
-      if (tb.tokenSymbol === 'stHNY') {
-        // ADD transferred stHNY to staking-derived stHNY instead of overwriting
-        balances.stHNY = Number((balances.stHNY + Number(tb.balance || 0)).toFixed(8));
-      } else {
-        balances[tb.tokenSymbol] = Number(Number(tb.balance).toFixed(8));
-      }
+      // Skip stHNY — it's already computed from staking positions above.
+      // The block producer mints stHNY into token_balances AND we calculate from positions,
+      // so including it here would double-count.
+      if (tb.tokenSymbol === 'stHNY') continue;
+      balances[tb.tokenSymbol] = Number(Number(tb.balance).toFixed(8));
     }
 
     // Get token metadata
@@ -2540,13 +2479,14 @@ app.post("/tokens/send", async (req, res) => {
     const tokenInfo = await get(db, `SELECT * FROM tokens WHERE symbol=?`, [token]);
     if (!tokenInfo) return res.status(404).json({ error: "Token not found" });
 
+    const tokenPriceUSD = Number(tokenInfo.mockPriceUSD || 1);
     const { minGasFee } = await currentMinGasFee();
     const gasFee = Number(req.body?.gasFee ?? minGasFee);
-    // Apply service fee to ALL token sends (same 0.005% rate as HNY)
+    // Service fee based on USD value of tokens being sent
     const serviceFee = Number(req.body?.serviceFee ?? 0);
-    const svcExpected = computeServiceFee(amt);
-    if (Math.abs(serviceFee - svcExpected) > 0.00000002) {
-      return res.status(400).json({ error: "Bad serviceFee", expectedServiceFee: svcExpected, gotServiceFee: serviceFee, rate: SERVICE_FEE_RATE });
+    const svcExpected = expectedServiceFee(amt, tokenPriceUSD);
+    if (Math.abs(serviceFee - svcExpected) > 0.01) {
+      return res.status(400).json({ error: "Bad serviceFee", expectedServiceFee: svcExpected, gotServiceFee: serviceFee, rate: SERVICE_FEE_RATE, tokenPriceUSD });
     }
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 

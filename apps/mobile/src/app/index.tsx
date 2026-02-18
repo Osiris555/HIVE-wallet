@@ -19,7 +19,6 @@ import {
   Text,
   TextInput,
   Alert,
-  TouchableWithoutFeedback,
   View,
 } from "react-native";
 
@@ -185,7 +184,15 @@ function GlassCard(props: { children: React.ReactNode; style?: any }) {
       : null;
 
   return (
-    <View style={[{ borderRadius: 18, overflow: "hidden" }, webBlur, props.style]}>
+    <View
+      style={[{ borderRadius: 18, overflow: "hidden" }, webBlur, props.style]}
+      // On iOS, tapping non-interactive areas inside the card dismisses the keyboard.
+      // On web, we skip this so clicks on TextInputs aren't intercepted.
+      onStartShouldSetResponder={Platform.OS !== "web" ? () => {
+        Keyboard.dismiss();
+        return false; // Don't capture the touch — let it pass to children
+      } : undefined}
+    >
       {props.children}
     </View>
   );
@@ -312,6 +319,19 @@ function skinKeyForChain(chainId: string) {
   return `hive:skin:${chainId || "default"}`;
 }
 
+/** iOS keyboard dismiss helper — wraps content so tapping empty space dismisses keyboard.
+ *  On web this is a no-op passthrough to avoid stealing focus from TextInputs. */
+function DismissKeyboardView(props: { children: React.ReactNode }) {
+  if (Platform.OS === "web") {
+    return <>{props.children}</>;
+  }
+  return (
+    <Pressable onPress={Keyboard.dismiss} style={{ flex: 1 }}>
+      {props.children}
+    </Pressable>
+  );
+}
+
 /** Full-screen modal overlay */
 function Overlay(props: { children: React.ReactNode; onClose: () => void; zIndex?: number }) {
   return (
@@ -328,10 +348,16 @@ function Overlay(props: { children: React.ReactNode; onClose: () => void; zIndex
         backgroundColor: "rgba(0,0,0,0.65)",
         zIndex: props.zIndex ?? 9999,
       }}
-      pointerEvents="auto"
+      pointerEvents="box-none"
     >
-      <Pressable onPress={props.onClose} style={StyleSheet.absoluteFillObject} />
-      <View style={{ width: "100%", maxWidth: 900 }} pointerEvents="auto">
+      <Pressable
+        onPress={() => {
+          if (Platform.OS !== "web") Keyboard.dismiss();
+          props.onClose();
+        }}
+        style={StyleSheet.absoluteFillObject}
+      />
+      <View style={{ width: "100%", maxWidth: 900 }} pointerEvents="box-none">
         {props.children}
       </View>
     </View>
@@ -1128,7 +1154,10 @@ async function pasteRecipientFromClipboard() {
     const totalAmt = Number(amtCheck.value);
     const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
     const chosenGas = Math.max(minGas, computeChosenGas(minGas));
-    const serviceFee = computeServiceFee(totalAmt, serviceFeeRate);
+    // Service fee = 0.0005% of USD value, paid in HNY
+    const tokenPriceUSD = tokenPrices[unifiedSendToken] || 1;
+    const usdValue = totalAmt * tokenPriceUSD;
+    const serviceFee = Number((usdValue * serviceFeeRate).toFixed(8));
 
     if (unifiedSendToken === "HNY") {
       const totalCost = Number((totalAmt + chosenGas + serviceFee).toFixed(8));
@@ -1489,8 +1518,9 @@ async function pasteRecipientFromClipboard() {
 
       <ScrollView
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === "ios" ? "on-drag" : "none"}
+        keyboardDismissMode="interactive"
         contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 28 }}
+        onScrollBeginDrag={() => { if (Platform.OS !== "web") Keyboard.dismiss(); }}
       >
         {/* Header */}
         <View style={{ paddingTop: 18, paddingBottom: 10, flexDirection: "row", alignItems: "center" }}>
@@ -2545,7 +2575,6 @@ async function pasteRecipientFromClipboard() {
       {tokenSendOpen && (
         <Overlay onClose={() => { setTokenSendOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📤 Send</Text>
@@ -2617,13 +2646,12 @@ async function pasteRecipientFromClipboard() {
 
               <Text style={{ color: T.sub, marginTop: 10, fontWeight: "600", fontSize: 11 }}>
                 Gas: {fmt8(computeChosenGas(Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR)))} HNY
-                {` • Svc fee (${(serviceFeeRate * 100).toFixed(4)}%): ${fmt8(computeServiceFee(Number(parseAmount8(normalizeAmountText(unifiedSendAmount)).value || 0), serviceFeeRate))} HNY`}
+                {` • Svc fee (0.0005% of USD): ${fmt8(Number(parseAmount8(normalizeAmountText(unifiedSendAmount)).value || 0) * (tokenPrices[unifiedSendToken] || 1) * serviceFeeRate)} HNY`}
               </Text>
 
               <View style={{ height: 14 }} />
               <Button T={T} label="Review Send" variant="green" onPress={openUnifiedSendConfirm} />
             </View>
-            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}
@@ -2648,7 +2676,7 @@ async function pasteRecipientFromClipboard() {
 
                 <Text style={{ color: T.sub, fontWeight: "800" }}>Fee Breakdown (paid in HNY)</Text>
                 <Text style={{ color: T.text, fontWeight: "800", marginTop: 6 }}>Gas fee: {fmt8(unifiedSendQuote.gasFee)} HNY</Text>
-                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Service fee ({(serviceFeeRate * 100).toFixed(4)}%): {fmt8(unifiedSendQuote.serviceFee)} HNY</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Service fee (0.0005% of USD): {fmt8(unifiedSendQuote.serviceFee)} HNY</Text>
                 <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Total fees: {fmt8(unifiedSendQuote.gasFee + unifiedSendQuote.serviceFee)} HNY</Text>
 
                 {unifiedSendQuote.token === "HNY" && (
@@ -2676,7 +2704,6 @@ async function pasteRecipientFromClipboard() {
       {contactsOpen && (
         <Overlay onClose={() => setContactsOpen(false)} zIndex={10001}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>📇 Address Book</Text>
@@ -2719,7 +2746,6 @@ async function pasteRecipientFromClipboard() {
               <View style={{ height: 10 }} />
               <Button T={T} label="Save Contact" variant="blue" onPress={() => addContact(newContactName, newContactAddr)} />
             </View>
-            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}
@@ -2728,7 +2754,6 @@ async function pasteRecipientFromClipboard() {
       {faucetModalOpen && (
         <Overlay onClose={() => { setFaucetModalOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🚰 Token Faucet</Text>
@@ -2778,7 +2803,6 @@ async function pasteRecipientFromClipboard() {
                 </View>
               </View>
             </View>
-            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}
@@ -2787,7 +2811,6 @@ async function pasteRecipientFromClipboard() {
       {swapOpen && (
         <Overlay onClose={() => { setSwapOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={{ padding: 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center" }}>
                 <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>🔄 Swap</Text>
@@ -2834,10 +2857,15 @@ async function pasteRecipientFromClipboard() {
 
               {fetchingQuote && <Text style={{ color: T.sub, marginTop: 10, fontWeight: "800" }}>Fetching quote…</Text>}
               {swapQuote && (
-                <View style={{ marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(57,255,20,0.08)", borderWidth: 1, borderColor: "rgba(57,255,20,0.2)" }}>
+                <View style={{ marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(57,255,20,0.08)", borderWidth: 1, borderColor: swapQuote.priceImpact > 5 ? "rgba(255,90,90,0.5)" : "rgba(57,255,20,0.2)" }}>
                   <Text style={{ color: T.green, fontWeight: "900", fontSize: 18 }}>≈ {fmtNum(swapQuote.amountOut)} {swapTokenOut}</Text>
                   <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>Rate: 1 {swapTokenIn} = {fmtNum(swapQuote.exchangeRate)} {swapTokenOut}</Text>
                   <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool fee: {(swapQuote.feeRate * 100).toFixed(2)}%</Text>
+                  {swapQuote.priceImpact > 5 && (
+                    <Text style={{ color: T.danger, marginTop: 6, fontWeight: "900", fontSize: 13 }}>
+                      ⚠️ High price impact! Consider a smaller amount.
+                    </Text>
+                  )}
                 </View>
               )}
 
@@ -2851,7 +2879,6 @@ async function pasteRecipientFromClipboard() {
                 </View>
               </View>
             </View>
-            </TouchableWithoutFeedback>
           </GlassCard>
         </Overlay>
       )}

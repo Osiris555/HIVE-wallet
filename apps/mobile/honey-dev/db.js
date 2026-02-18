@@ -314,16 +314,16 @@ async function initDb(db) {
 
     // Initialize default liquidity pools
     const defaultPools = [
-      { tokenA: 'HNY', tokenB: 'ETH', reserveA: 100000, reserveB: 28.57 }, // ~$100k liquidity
-      { tokenA: 'HNY', tokenB: 'BTC', reserveA: 100000, reserveB: 1.54 },
-      { tokenA: 'HNY', tokenB: 'SOL', reserveA: 100000, reserveB: 689.66 },
-      { tokenA: 'HNY', tokenB: 'USDT', reserveA: 100000, reserveB: 100000 },
-      { tokenA: 'HNY', tokenB: 'USDC', reserveA: 100000, reserveB: 100000 },
-      { tokenA: 'HNY', tokenB: 'XRP', reserveA: 100000, reserveB: 40000 },
-      { tokenA: 'ETH', tokenB: 'USDT', reserveA: 28.57, reserveB: 100000 },
-      { tokenA: 'BTC', tokenB: 'USDT', reserveA: 1.54, reserveB: 100000 },
-      { tokenA: 'stHNY', tokenB: 'HNY', reserveA: 50000, reserveB: 52500 }, // stHNY trades at slight premium (~1.05x)
-      { tokenA: 'stHNY', tokenB: 'USDT', reserveA: 50000, reserveB: 52500 },
+      { tokenA: 'HNY', tokenB: 'ETH', reserveA: 10000000, reserveB: 2857.14 },    // 10M HNY / 2857 ETH (~$10M liquidity each side)
+      { tokenA: 'HNY', tokenB: 'BTC', reserveA: 10000000, reserveB: 153.85 },      // 10M HNY / 154 BTC
+      { tokenA: 'HNY', tokenB: 'SOL', reserveA: 10000000, reserveB: 68965.52 },    // 10M HNY / 69k SOL
+      { tokenA: 'HNY', tokenB: 'USDT', reserveA: 10000000, reserveB: 10000000 },   // 10M HNY / 10M USDT (1:1)
+      { tokenA: 'HNY', tokenB: 'USDC', reserveA: 10000000, reserveB: 10000000 },   // 10M HNY / 10M USDC (1:1)
+      { tokenA: 'HNY', tokenB: 'XRP', reserveA: 10000000, reserveB: 4000000 },     // 10M HNY / 4M XRP
+      { tokenA: 'ETH', tokenB: 'USDT', reserveA: 2857.14, reserveB: 10000000 },    // 2857 ETH / 10M USDT
+      { tokenA: 'BTC', tokenB: 'USDT', reserveA: 153.85, reserveB: 10000000 },     // 154 BTC / 10M USDT
+      { tokenA: 'stHNY', tokenB: 'HNY', reserveA: 5000000, reserveB: 5250000 },    // 5M stHNY / 5.25M HNY (1.05 ratio)
+      { tokenA: 'stHNY', tokenB: 'USDT', reserveA: 5000000, reserveB: 5250000 },   // 5M stHNY / 5.25M USDT
     ];
 
     for (const pool of defaultPools) {
