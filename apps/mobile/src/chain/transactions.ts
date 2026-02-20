@@ -472,6 +472,21 @@ export async function ensureWalletId(): Promise<string> {
   return reg.wallet;
 }
 
+/**
+ * Ensures the wallet is registered on the server and returns the correct wallet address.
+ * Call this before any signed transaction to prevent "missing public key" errors.
+ */
+export async function ensureRegisteredWallet(): Promise<string> {
+  let wallet = await ensureWalletId();
+  const acct = await getAccount(wallet);
+  if (!acct?.registered) {
+    const regResult = await registerWallet();
+    // Re-read wallet in case registration derived a different address
+    wallet = regResult.wallet || await ensureWalletId();
+  }
+  return wallet;
+}
+
 export async function getChainStatus(): Promise<ChainStatus> {
   return await getJson(`/status`);
 }
@@ -569,13 +584,11 @@ export async function getStakingPositions(wallet?: string): Promise<{ positions:
 }
 
 export async function stake(params: { amount: number; lockDays: number; gasFee?: number; serviceFee?: number }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 
@@ -621,13 +634,11 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
 }
 
 export async function unstake(params: { positionId: string; gasFee?: number }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const chainStatus = await getChainStatus();
   const chainId = String(chainStatus.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, chainStatus);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 
@@ -686,13 +697,11 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
 }
 
 export async function unlockStakePosition(params: { positionId: string; gasFee?: number }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 
@@ -737,13 +746,11 @@ export async function unlockStakePosition(params: { positionId: string; gasFee?:
 export const unlockStake = unlockStakePosition;
 
 export async function claimStakingReward(params: { positionId: string; gasFee?: number }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const chainStatus = await getChainStatus();
   const chainId = String(chainStatus.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, chainStatus);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 
@@ -803,13 +810,10 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
 }
 
 export async function mint(options?: { seedFingerprint?: string }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
-
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
 
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
@@ -855,14 +859,11 @@ export async function send(params: {
   gasFee: number;
   serviceFee: number;
 }): Promise<any> {
-  const from = await ensureWalletId();
+  const from = await ensureRegisteredWallet();
 
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
-
-  const acct = await getAccount(from);
-  if (!acct?.registered) await registerWallet();
 
   const acct2 = await getAccount(from);
   const nonce = Number(acct2?.nonce ?? 0);
@@ -916,14 +917,11 @@ export async function rbfReplacePending(params: {
   gasFee: number;
   serviceFee: number;
 }): Promise<any> {
-  const from = await ensureWalletId();
+  const from = await ensureRegisteredWallet();
 
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
-
-  const acct = await getAccount(from);
-  if (!acct?.registered) await registerWallet();
 
   const nonce = Number(params.nonce);
   if (!Number.isInteger(nonce) || nonce < 0) throw makeError("Missing/invalid nonce", 400);
@@ -969,14 +967,11 @@ export async function rbfReplacePending(params: {
  * Cancel an existing pending send by replacing it with a self-send (net 0 transfer), paying only fees.
  */
 export async function cancelPending(params: { nonce: number; gasFee: number; serviceFee: number }): Promise<any> {
-  const from = await ensureWalletId();
+  const from = await ensureRegisteredWallet();
 
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
-
-  const acct = await getAccount(from);
-  if (!acct?.registered) await registerWallet();
 
   const nonce = Number(params.nonce);
   if (!Number.isInteger(nonce) || nonce < 0) throw makeError("Missing/invalid nonce", 400);
@@ -1091,7 +1086,7 @@ export async function tokenFaucet(params: {
   amount?: number;
   seedFingerprint?: string;
 }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   return await postJson("/tokens/faucet", {
     wallet,
     tokenSymbol: params.tokenSymbol,
@@ -1108,13 +1103,11 @@ export async function sendToken(params: {
   gasFee?: number;
   serviceFee?: number;
 }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 
@@ -1196,13 +1189,11 @@ export async function swap(params: {
   gasFee?: number;
   serviceFee?: number;
 }): Promise<any> {
-  const wallet = await ensureWalletId();
+  const wallet = await ensureRegisteredWallet();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
   if (!chainId) throw makeError("Server did not return chainId", 500, status);
 
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) await registerWallet();
   const acct2 = await getAccount(wallet);
   const nonce = Number(acct2?.nonce ?? 0);
 

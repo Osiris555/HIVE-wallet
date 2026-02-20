@@ -89,11 +89,11 @@ async function deriveKeypair(masterSeedB64: string, index: number): Promise<{
   };
 }
 
-// Derive wallet address from public key (same as server)
-function pubKeyToAddress(publicKeyB64: string): string {
+// Derive wallet address from public key (same as server: SHA256 of pubkey bytes)
+async function pubKeyToAddress(publicKeyB64: string): Promise<string> {
   const pubBytes = b64ToU8(publicKeyB64);
-  const hex = Array.from(pubBytes).map(b => b.toString(16).padStart(2, "0")).join("");
-  // Use first 40 hex chars of pubkey
+  const hash = await sha256(pubBytes);
+  const hex = Array.from(hash).map(b => b.toString(16).padStart(2, "0")).join("");
   return `HNY_${hex.slice(0, 40)}`;
 }
 
@@ -161,22 +161,22 @@ export async function getWallets(): Promise<WalletList> {
     const legacyWallet = await kvGet("HIVE_WALLET_ID");
     
     if (legacyPub && legacyPriv && legacyWallet) {
-      // Migrate: keep the legacy wallet as a "seed-0" wallet
-      // We can't derive it from a new master seed, so we store the seed
-      // that would have generated this keypair — but actually we can't reverse it.
-      // Instead, ensure a master seed exists and add the legacy wallet as index 0
-      // but store its keypair separately.
       const seed = await ensureMasterSeed();
       
-      // Store legacy wallet address as wallet 0
+      // Derive correct address from public key using SHA256 (matching server)
+      const correctAddress = await pubKeyToAddress(legacyPub);
+      
       list.wallets.push({
         index: 0,
         label: "Main Wallet",
-        address: legacyWallet,
+        address: correctAddress,
         publicKeyB64: legacyPub,
       });
       list.activeIndex = 0;
       await saveWalletList(list);
+      
+      // Update legacy storage with correct address
+      await kvSet("HIVE_WALLET_ID", correctAddress);
       
       // Mark that index 0 uses legacy keys
       await kvSet("HIVE_WALLET_0_IS_LEGACY", "true");
@@ -184,6 +184,26 @@ export async function getWallets(): Promise<WalletList> {
       // Fresh start: create master seed and derive wallet 0
       await createWallet("Main Wallet");
       list = await loadWalletList();
+    }
+  }
+  
+  // Verify and fix wallet addresses (handles migration from old address derivation)
+  let needsSave = false;
+  for (const w of list.wallets) {
+    if (w.publicKeyB64) {
+      const correctAddr = await pubKeyToAddress(w.publicKeyB64);
+      if (w.address !== correctAddr) {
+        w.address = correctAddr;
+        needsSave = true;
+      }
+    }
+  }
+  if (needsSave) {
+    await saveWalletList(list);
+    // Update legacy storage keys for active wallet
+    const active = list.wallets.find(w => w.index === list.activeIndex) || list.wallets[0];
+    if (active) {
+      await kvSet("HIVE_WALLET_ID", active.address);
     }
   }
   
@@ -204,7 +224,7 @@ export async function createWallet(label?: string): Promise<WalletEntry> {
   while (usedIndices.has(nextIndex)) nextIndex++;
   
   const kp = await deriveKeypair(seed, nextIndex);
-  const address = pubKeyToAddress(kp.publicKeyB64);
+  const address = await pubKeyToAddress(kp.publicKeyB64);
   
   const entry: WalletEntry = {
     index: nextIndex,
