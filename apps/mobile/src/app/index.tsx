@@ -67,6 +67,7 @@ import {
   switchWallet,
   getActiveWallet,
   renameWallet,
+  deleteWallet,
   getSeedFingerprint,
   type WalletEntry,
   type WalletList,
@@ -417,6 +418,8 @@ export default function Index() {
   const [walletBalances, setWalletBalances] = useState<{ [addr: string]: number }>({});
   const [newWalletLabel, setNewWalletLabel] = useState("");
   const [creatingWallet, setCreatingWallet] = useState(false);
+  const [editingWalletIdx, setEditingWalletIdx] = useState<number | null>(null);
+  const [editWalletName, setEditWalletName] = useState("");
 
   const [txs, setTxs] = useState<TxLike[]>([]);
   const [liveRefresh, setLiveRefresh] = useState(true);
@@ -745,8 +748,15 @@ async function pasteRecipientFromClipboard() {
     const bals: { [addr: string]: number } = {};
     for (const w of wallets) {
       try {
-        const b: any = await getBalance(w.address);
-        bals[w.address] = Number(b?.confirmed ?? b?.balance ?? 0);
+        const data: any = await getTokenBalances(w.address);
+        const balances = data?.balances || {};
+        const tokens = data?.tokens || {};
+        let totalUsd = 0;
+        for (const [sym, amt] of Object.entries(balances)) {
+          const price = Number((tokens[sym] as any)?.price || 0);
+          totalUsd += Number(amt) * price;
+        }
+        bals[w.address] = totalUsd;
       } catch {
         bals[w.address] = 0;
       }
@@ -2974,37 +2984,89 @@ async function pasteRecipientFromClipboard() {
                 All wallets share the same seed phrase. Tap to switch.
               </Text>
 
-              <ScrollView style={{ marginTop: 12, maxHeight: 320 }}>
+              <ScrollView style={{ marginTop: 12, maxHeight: 380 }}>
                 {walletList.map((w) => {
                   const isActive = w.index === activeWalletIndex;
-                  const bal = walletBalances[w.address] || 0;
+                  const usdBal = walletBalances[w.address] || 0;
+                  const isEditing = editingWalletIdx === w.index;
                   return (
-                    <Pressable
-                      key={w.index}
-                      onPress={() => handleSwitchWallet(w.index)}
-                      style={{
-                        padding: 12,
-                        borderRadius: 12,
-                        marginBottom: 8,
-                        borderWidth: isActive ? 2 : 1,
-                        borderColor: isActive ? T.green : T.border,
-                        backgroundColor: isActive ? "rgba(57,255,20,0.08)" : T.glass2,
-                      }}
-                    >
-                      <View style={{ flexDirection: "row", alignItems: "center" }}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ color: T.text, fontWeight: "900" }}>
-                            {w.label} {isActive ? "✓" : ""}
+                    <View key={w.index} style={{ marginBottom: 8 }}>
+                      <Pressable
+                        onPress={() => { if (!isEditing) handleSwitchWallet(w.index); }}
+                        style={{
+                          padding: 12,
+                          borderRadius: 12,
+                          borderWidth: isActive ? 2 : 1,
+                          borderColor: isActive ? T.green : T.border,
+                          backgroundColor: isActive ? "rgba(57,255,20,0.08)" : T.glass2,
+                        }}
+                      >
+                        <View style={{ flexDirection: "row", alignItems: "center" }}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: T.text, fontWeight: "900" }}>
+                              {w.label} {isActive ? "✓" : ""}
+                            </Text>
+                            <Text style={{ color: T.sub, fontWeight: "700", fontSize: 12, marginTop: 2 }}>
+                              {shortAddr(w.address)}
+                            </Text>
+                          </View>
+                          <Text style={{ color: T.green, fontWeight: "900", fontSize: 14, marginRight: 8 }}>
+                            {fmtUSD(usdBal)}
                           </Text>
-                          <Text style={{ color: T.sub, fontWeight: "700", fontSize: 12, marginTop: 2 }}>
-                            {shortAddr(w.address)}
-                          </Text>
+                          <Pressable hitSlop={8} onPress={(e) => {
+                            e.stopPropagation?.();
+                            if (isEditing) { setEditingWalletIdx(null); }
+                            else { setEditingWalletIdx(w.index); setEditWalletName(w.label); }
+                          }}>
+                            <Text style={{ color: T.sub, fontSize: 16 }}>⚙️</Text>
+                          </Pressable>
                         </View>
-                        <Text style={{ color: T.green, fontWeight: "900", fontSize: 14 }}>
-                          {fmtNum(bal)} HNY
-                        </Text>
-                      </View>
-                    </Pressable>
+                      </Pressable>
+
+                      {isEditing && (
+                        <View style={{ padding: 10, backgroundColor: T.glass2, borderRadius: 10, marginTop: 4, borderWidth: 1, borderColor: T.border }}>
+                          <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12, marginBottom: 6 }}>Rename</Text>
+                          <TextInput
+                            value={editWalletName}
+                            onChangeText={setEditWalletName}
+                            style={{ paddingVertical: 8, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass, fontWeight: "800", fontSize: 13 }}
+                          />
+                          <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+                            <View style={{ flex: 1 }}>
+                              <Button T={T} label="Save" variant="green" onPress={async () => {
+                                if (editWalletName.trim()) {
+                                  await renameWallet(w.index, editWalletName.trim());
+                                  const list = await getWallets();
+                                  setWalletList(list.wallets);
+                                }
+                                setEditingWalletIdx(null);
+                              }} />
+                            </View>
+                            {walletList.length > 1 && (
+                              <View style={{ flex: 1 }}>
+                                <Button T={T} label="Delete" variant="outline" onPress={async () => {
+                                  try {
+                                    await deleteWallet(w.index);
+                                    const list = await getWallets();
+                                    setWalletList(list.wallets);
+                                    setActiveWalletIndex(list.activeIndex);
+                                    if (w.index === activeWalletIndex) {
+                                      await hardRefreshAll();
+                                    }
+                                  } catch (e: any) {
+                                    showToast(e?.message || "Cannot delete");
+                                  }
+                                  setEditingWalletIdx(null);
+                                }} />
+                              </View>
+                            )}
+                            <View style={{ flex: 1 }}>
+                              <Button T={T} label="Cancel" variant="outline" onPress={() => setEditingWalletIdx(null)} />
+                            </View>
+                          </View>
+                        </View>
+                      )}
+                    </View>
                   );
                 })}
               </ScrollView>

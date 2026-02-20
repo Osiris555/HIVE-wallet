@@ -423,19 +423,34 @@ async function getByWalletFlexible(route: string, wallet: string) {
 }
 
 export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
+  // First check legacy storage (fast path - wallet-manager keeps these updated)
   const pub = await kvGet(KEY_STORAGE_PUB);
   const priv = await kvGet(KEY_STORAGE_PRIV);
   if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
 
+  // Fall back: let wallet-manager initialize and write legacy keys
+  try {
+    const { getWallets, getKeypairForIndex } = require("./wallet-manager");
+    const list = await getWallets();
+    const active = list.wallets.find((w: any) => w.index === list.activeIndex) || list.wallets[0];
+    if (active) {
+      const kp = await getKeypairForIndex(active.index);
+      await kvSet(KEY_STORAGE_PUB, kp.publicKeyB64);
+      await kvSet(KEY_STORAGE_PRIV, kp.secretKeyB64);
+      await kvSet(WALLET_STORAGE, active.address);
+      return kp;
+    }
+  } catch (e) {
+    console.warn("wallet-manager fallback failed, generating fresh keypair:", e);
+  }
+
+  // Last resort: generate fresh keypair
   const seed = await randomBytes(32);
   const kp = nacl.sign.keyPair.fromSeed(seed);
-
   const pubB64 = u8ToB64(kp.publicKey);
   const privB64 = u8ToB64(kp.secretKey);
-
   await kvSet(KEY_STORAGE_PUB, pubB64);
   await kvSet(KEY_STORAGE_PRIV, privB64);
-
   return { publicKeyB64: pubB64, secretKeyB64: privB64 };
 }
 

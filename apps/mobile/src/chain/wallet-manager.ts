@@ -110,8 +110,20 @@ async function ensureMasterSeed(): Promise<string> {
   let seed = await getMasterSeed();
   if (seed) return seed;
   
-  // Generate new 32-byte master seed
-  const seedBytes = nacl.randomBytes(32);
+  // Generate new 32-byte master seed using expo-crypto (works on all platforms)
+  let seedBytes: Uint8Array;
+  try {
+    // expo-crypto's getRandomBytes is available on all platforms
+    const randomHex = await Crypto.digestStringAsync(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      `${Date.now()}-${Math.random()}-${Math.random()}-${Math.random()}`,
+      { encoding: Crypto.CryptoEncoding.HEX }
+    );
+    seedBytes = new Uint8Array(randomHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+  } catch {
+    // Fallback
+    seedBytes = nacl.randomBytes(32);
+  }
   seed = u8ToB64(seedBytes);
   await setMasterSeed(seed);
   return seed;
@@ -291,4 +303,26 @@ export async function getSeedFingerprint(): Promise<string> {
   const seedBytes = b64ToU8(seed);
   const hash = await sha256(seedBytes);
   return Array.from(hash.slice(0, 4)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Delete a wallet by index. Cannot delete the last wallet.
+ */
+export async function deleteWallet(index: number): Promise<void> {
+  const list = await loadWalletList();
+  if (list.wallets.length <= 1) throw new Error("Cannot delete the only wallet");
+  
+  list.wallets = list.wallets.filter(w => w.index !== index);
+  
+  // If we deleted the active wallet, switch to the first remaining
+  if (list.activeIndex === index) {
+    list.activeIndex = list.wallets[0].index;
+    // Update legacy keys
+    const kp = await getKeypairForIndex(list.activeIndex);
+    await kvSet("HIVE_PUBKEY_B64", kp.publicKeyB64);
+    await kvSet("HIVE_PRIVKEY_B64", kp.secretKeyB64);
+    await kvSet("HIVE_WALLET_ID", list.wallets[0].address);
+  }
+  
+  await saveWalletList(list);
 }
