@@ -313,17 +313,38 @@ async function initDb(db) {
     }
 
     // Initialize default liquidity pools
+    // Direct pools for ALL major pairs — no multi-hop needed for common trades
+    // Reserves balanced at ~$10M per side using mock prices:
+    // HNY=$1, ETH=$3500, BTC=$65000, SOL=$145, USDT=$1, USDC=$1, XRP=$2.50, stHNY=$1.05
     const defaultPools = [
-      { tokenA: 'HNY', tokenB: 'ETH', reserveA: 10000000, reserveB: 2857.14 },    // 10M HNY / 2857 ETH (~$10M liquidity each side)
-      { tokenA: 'HNY', tokenB: 'BTC', reserveA: 10000000, reserveB: 153.85 },      // 10M HNY / 154 BTC
-      { tokenA: 'HNY', tokenB: 'SOL', reserveA: 10000000, reserveB: 68965.52 },    // 10M HNY / 69k SOL
-      { tokenA: 'HNY', tokenB: 'USDT', reserveA: 10000000, reserveB: 10000000 },   // 10M HNY / 10M USDT (1:1)
-      { tokenA: 'HNY', tokenB: 'USDC', reserveA: 10000000, reserveB: 10000000 },   // 10M HNY / 10M USDC (1:1)
-      { tokenA: 'HNY', tokenB: 'XRP', reserveA: 10000000, reserveB: 4000000 },     // 10M HNY / 4M XRP
-      { tokenA: 'ETH', tokenB: 'USDT', reserveA: 2857.14, reserveB: 10000000 },    // 2857 ETH / 10M USDT
-      { tokenA: 'BTC', tokenB: 'USDT', reserveA: 153.85, reserveB: 10000000 },     // 154 BTC / 10M USDT
-      { tokenA: 'stHNY', tokenB: 'HNY', reserveA: 5000000, reserveB: 5250000 },    // 5M stHNY / 5.25M HNY (1.05 ratio)
-      { tokenA: 'stHNY', tokenB: 'USDT', reserveA: 5000000, reserveB: 5250000 },   // 5M stHNY / 5.25M USDT
+      // HNY pairs
+      { tokenA: 'HNY', tokenB: 'ETH', reserveA: 10000000, reserveB: 2857.14 },
+      { tokenA: 'HNY', tokenB: 'BTC', reserveA: 10000000, reserveB: 153.85 },
+      { tokenA: 'HNY', tokenB: 'SOL', reserveA: 10000000, reserveB: 68965.52 },
+      { tokenA: 'HNY', tokenB: 'USDT', reserveA: 10000000, reserveB: 10000000 },
+      { tokenA: 'HNY', tokenB: 'USDC', reserveA: 10000000, reserveB: 10000000 },
+      { tokenA: 'HNY', tokenB: 'XRP', reserveA: 10000000, reserveB: 4000000 },
+      // Cross pairs (direct pools — no multi-hop needed)
+      { tokenA: 'ETH', tokenB: 'BTC', reserveA: 2857.14, reserveB: 153.85 },
+      { tokenA: 'ETH', tokenB: 'SOL', reserveA: 2857.14, reserveB: 68965.52 },
+      { tokenA: 'ETH', tokenB: 'USDT', reserveA: 2857.14, reserveB: 10000000 },
+      { tokenA: 'ETH', tokenB: 'USDC', reserveA: 2857.14, reserveB: 10000000 },
+      { tokenA: 'ETH', tokenB: 'XRP', reserveA: 2857.14, reserveB: 4000000 },
+      { tokenA: 'BTC', tokenB: 'SOL', reserveA: 153.85, reserveB: 68965.52 },
+      { tokenA: 'BTC', tokenB: 'USDT', reserveA: 153.85, reserveB: 10000000 },
+      { tokenA: 'BTC', tokenB: 'USDC', reserveA: 153.85, reserveB: 10000000 },
+      { tokenA: 'BTC', tokenB: 'XRP', reserveA: 153.85, reserveB: 4000000 },
+      { tokenA: 'SOL', tokenB: 'USDT', reserveA: 68965.52, reserveB: 10000000 },
+      { tokenA: 'SOL', tokenB: 'USDC', reserveA: 68965.52, reserveB: 10000000 },
+      { tokenA: 'SOL', tokenB: 'XRP', reserveA: 68965.52, reserveB: 4000000 },
+      { tokenA: 'USDT', tokenB: 'USDC', reserveA: 10000000, reserveB: 10000000 },
+      { tokenA: 'USDT', tokenB: 'XRP', reserveA: 10000000, reserveB: 4000000 },
+      { tokenA: 'USDC', tokenB: 'XRP', reserveA: 10000000, reserveB: 4000000 },
+      // stHNY pairs
+      { tokenA: 'stHNY', tokenB: 'HNY', reserveA: 5000000, reserveB: 5250000 },
+      { tokenA: 'stHNY', tokenB: 'USDT', reserveA: 5000000, reserveB: 5250000 },
+      { tokenA: 'stHNY', tokenB: 'ETH', reserveA: 5000000, reserveB: 1500 },
+      { tokenA: 'stHNY', tokenB: 'BTC', reserveA: 5000000, reserveB: 80.77 },
     ];
 
     for (const pool of defaultPools) {

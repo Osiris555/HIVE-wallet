@@ -17,7 +17,7 @@ app.use(express.json());
    CONFIG
 ====================== */
 const MINT_AMOUNT = 100;
-const MINT_COOLDOWN_MS = 60 * 1000;
+const MINT_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Blocks
 const BLOCK_TIME_MS = 5000;
@@ -990,115 +990,159 @@ async function buildBlockWithRules() {
           continue;
         }
 
-        const pool = await get(db, `SELECT * FROM liquidity_pools WHERE id=?`, [poolId]);
-        if (!pool) {
-          await failTx(tx.id, height, "pool_not_found");
-          continue;
+        // Helper: compute AMM output
+        function ammOut(rIn, rOut, input, fee) {
+          const withFee = input * (1 - fee);
+          return (rOut * withFee) / (rIn + withFee);
         }
 
-        const reversed = pool.tokenA === tokenOut && pool.tokenB === tokenIn;
-        const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
-        const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
-        const feeRate = Number(pool.feeRate || 0.003);
+        // Determine if multi-hop (poolId contains "|")
+        const isMultiHop = poolId.includes("|");
+        let amountOut, pool1, pool2;
 
-        const amountInWithFee = amountIn * (1 - feeRate);
-        const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
-
-        if (amountOut < minAmountOut) {
-          await failTx(tx.id, height, "slippage_exceeded");
-          continue;
-        }
-
-        // Check balances
-        if (tokenIn === 'HNY') {
-          const walletBal = working[wallet] || 0;
-          if (walletBal < amountIn + totalFee) {
-            await failTx(tx.id, height, "insufficient_hny");
+        if (isMultiHop) {
+          // Multi-hop: tokenIn → HNY → tokenOut
+          const [p1Id, p2Id] = poolId.split("|");
+          pool1 = await get(db, `SELECT * FROM liquidity_pools WHERE id=?`, [p1Id]);
+          pool2 = await get(db, `SELECT * FROM liquidity_pools WHERE id=?`, [p2Id]);
+          if (!pool1 || !pool2) {
+            await failTx(tx.id, height, "pool_not_found");
             continue;
           }
-        } else {
-          const tokenBal = await get(
-            db,
-            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
-            [wallet, tokenIn]
-          );
+
+          // Leg 1: tokenIn → HNY
+          const rev1 = pool1.tokenA !== tokenIn;
+          const rIn1 = rev1 ? Number(pool1.reserveB) : Number(pool1.reserveA);
+          const rOut1 = rev1 ? Number(pool1.reserveA) : Number(pool1.reserveB);
+          const hnyMid = ammOut(rIn1, rOut1, amountIn, Number(pool1.feeRate || 0.003));
+
+          // Leg 2: HNY → tokenOut
+          const rev2 = pool2.tokenA !== "HNY";
+          const rIn2 = rev2 ? Number(pool2.reserveB) : Number(pool2.reserveA);
+          const rOut2 = rev2 ? Number(pool2.reserveA) : Number(pool2.reserveB);
+          amountOut = ammOut(rIn2, rOut2, hnyMid, Number(pool2.feeRate || 0.003));
+
+          if (amountOut < minAmountOut) {
+            await failTx(tx.id, height, "slippage_exceeded");
+            continue;
+          }
+
+          // Check balances (tokenIn is never HNY in multi-hop)
+          const tokenBal = await get(db, `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`, [wallet, tokenIn]);
           if (!tokenBal || Number(tokenBal.balance) < amountIn) {
             await failTx(tx.id, height, "insufficient_token_in");
             continue;
           }
-          
           const walletBal = working[wallet] || 0;
           if (walletBal < totalFee) {
             await failTx(tx.id, height, "insufficient_hny_for_fees");
             continue;
           }
-        }
 
-        bump(wallet);
+          bump(wallet);
 
-        // Deduct tokenIn
-        if (tokenIn === 'HNY') {
-          working[wallet] = (working[wallet] || 0) - amountIn - totalFee;
-        } else {
-          const tokenBal = await get(
-            db,
-            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
-            [wallet, tokenIn]
-          );
-          const newBal = Number(tokenBal.balance) - amountIn;
-          await run(
-            db,
-            `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
-            [newBal, wallet, tokenIn]
-          );
+          // Deduct tokenIn from sender
+          const newSenderBal = Number(tokenBal.balance) - amountIn;
+          await run(db, `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`, [newSenderBal, wallet, tokenIn]);
           working[wallet] = (working[wallet] || 0) - totalFee;
-        }
+          working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
 
-        working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
-
-        // Credit tokenOut
-        if (tokenOut === 'HNY') {
-          working[wallet] = (working[wallet] || 0) + amountOut;
-        } else {
-          const tokenBal = await get(
-            db,
-            `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`,
-            [wallet, tokenOut]
-          );
-          
-          if (tokenBal) {
-            const newBal = Number(tokenBal.balance) + amountOut;
-            await run(
-              db,
-              `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`,
-              [newBal, wallet, tokenOut]
-            );
+          // Credit tokenOut to sender
+          const recipBal = await get(db, `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`, [wallet, tokenOut]);
+          if (recipBal) {
+            await run(db, `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`, [Number(recipBal.balance) + amountOut, wallet, tokenOut]);
           } else {
-            await run(
-              db,
-              `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs)
-               VALUES (?, ?, ?, ?)`,
-              [wallet, tokenOut, amountOut, ts]
-            );
+            await run(db, `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs) VALUES (?, ?, ?, ?)`, [wallet, tokenOut, amountOut, ts]);
           }
-        }
 
-        // Update pool reserves
-        const newReserveIn = reserveIn + amountIn;
-        const newReserveOut = reserveOut - amountOut;
+          // Update pool1 reserves
+          const newRIn1 = rIn1 + amountIn;
+          const newROut1 = rOut1 - hnyMid;
+          if (rev1) {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newROut1, newRIn1, p1Id]);
+          } else {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newRIn1, newROut1, p1Id]);
+          }
 
-        if (reversed) {
-          await run(
-            db,
-            `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`,
-            [newReserveOut, newReserveIn, poolId]
-          );
+          // Update pool2 reserves
+          const newRIn2 = rIn2 + hnyMid;
+          const newROut2 = rOut2 - amountOut;
+          if (rev2) {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newROut2, newRIn2, p2Id]);
+          } else {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newRIn2, newROut2, p2Id]);
+          }
+
         } else {
-          await run(
-            db,
-            `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`,
-            [newReserveIn, newReserveOut, poolId]
-          );
+          // Direct swap (single pool)
+          const pool = await get(db, `SELECT * FROM liquidity_pools WHERE id=?`, [poolId]);
+          if (!pool) {
+            await failTx(tx.id, height, "pool_not_found");
+            continue;
+          }
+
+          const reversed = pool.tokenA === tokenOut && pool.tokenB === tokenIn;
+          const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+          const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+          const feeRate = Number(pool.feeRate || 0.003);
+          amountOut = ammOut(reserveIn, reserveOut, amountIn, feeRate);
+
+          if (amountOut < minAmountOut) {
+            await failTx(tx.id, height, "slippage_exceeded");
+            continue;
+          }
+
+          // Check balances
+          if (tokenIn === 'HNY') {
+            if ((working[wallet] || 0) < amountIn + totalFee) {
+              await failTx(tx.id, height, "insufficient_hny");
+              continue;
+            }
+          } else {
+            const tokenBal = await get(db, `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`, [wallet, tokenIn]);
+            if (!tokenBal || Number(tokenBal.balance) < amountIn) {
+              await failTx(tx.id, height, "insufficient_token_in");
+              continue;
+            }
+            if ((working[wallet] || 0) < totalFee) {
+              await failTx(tx.id, height, "insufficient_hny_for_fees");
+              continue;
+            }
+          }
+
+          bump(wallet);
+
+          // Deduct tokenIn
+          if (tokenIn === 'HNY') {
+            working[wallet] = (working[wallet] || 0) - amountIn - totalFee;
+          } else {
+            const tokenBal = await get(db, `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`, [wallet, tokenIn]);
+            await run(db, `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`, [Number(tokenBal.balance) - amountIn, wallet, tokenIn]);
+            working[wallet] = (working[wallet] || 0) - totalFee;
+          }
+
+          working[FEE_VAULT] = (working[FEE_VAULT] || 0) + totalFee;
+
+          // Credit tokenOut
+          if (tokenOut === 'HNY') {
+            working[wallet] = (working[wallet] || 0) + amountOut;
+          } else {
+            const tokenBal = await get(db, `SELECT balance FROM token_balances WHERE wallet=? AND tokenSymbol=?`, [wallet, tokenOut]);
+            if (tokenBal) {
+              await run(db, `UPDATE token_balances SET balance=? WHERE wallet=? AND tokenSymbol=?`, [Number(tokenBal.balance) + amountOut, wallet, tokenOut]);
+            } else {
+              await run(db, `INSERT INTO token_balances (wallet, tokenSymbol, balance, createdAtMs) VALUES (?, ?, ?, ?)`, [wallet, tokenOut, amountOut, ts]);
+            }
+          }
+
+          // Update pool reserves
+          const newReserveIn = reserveIn + amountIn;
+          const newReserveOut = reserveOut - amountOut;
+          if (reversed) {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newReserveOut, newReserveIn, poolId]);
+          } else {
+            await run(db, `UPDATE liquidity_pools SET reserveA=?, reserveB=? WHERE id=?`, [newReserveIn, newReserveOut, poolId]);
+          }
         }
 
         await run(db, `UPDATE transactions SET status='confirmed', failReason=NULL, blockHeight=?, blockHash=? WHERE id=?`, [height, "TBD", tx.id]);
@@ -1307,6 +1351,7 @@ app.get("/transactions/:wallet", async (req, res) => {
         blockHeight: t.blockHeight,
         blockHash: t.blockHash,
         timestamp: t.timestampMs,
+        metaJson: t.metaJson || null,
       }))
     );
   } catch (e) {
@@ -1395,6 +1440,22 @@ app.post("/mint", async (req, res) => {
       return res.status(429).json({ error: "Cooldown active", cooldownSeconds });
     }
 
+    // Also check seed fingerprint cooldown (prevents creating new wallet to bypass cooldown)
+    const seedFp = String(req.body?.seedFingerprint || "").trim();
+    if (seedFp) {
+      const fpCooldown = await get(db, 
+        `SELECT MAX(timestampMs) as lastMs FROM transactions 
+         WHERE type='mint' AND status IN ('confirmed','pending') AND metaJson LIKE ?`,
+        [`%"seedFingerprint":"${seedFp}"%`]
+      );
+      if (fpCooldown?.lastMs) {
+        const fpRemaining = Number(fpCooldown.lastMs) + MINT_COOLDOWN_MS - now();
+        if (fpRemaining > 0) {
+          return res.status(429).json({ error: "Cooldown active (seed phrase limit)", cooldownSeconds: Math.ceil(fpRemaining / 1000) });
+        }
+      }
+    }
+
     await setLastMint(wallet, now());
     await incrementNonce(wallet);
 
@@ -1406,6 +1467,7 @@ app.post("/mint", async (req, res) => {
       nonce,
       gasFee,
       serviceFee,
+      metaJson: seedFp ? JSON.stringify({ seedFingerprint: seedFp }) : null,
       timestampMs: timestamp,
       expiresAtMs,
     });
@@ -1670,7 +1732,7 @@ app.post("/stake", async (req, res) => {
 
     const { minGasFee } = await currentMinGasFee();
     const gasFee = Number(req.body?.gasFee ?? minGasFee);
-    const serviceFee = 0;
+    const serviceFee = Number(req.body?.serviceFee ?? Number((amt * 1 * SERVICE_FEE_RATE).toFixed(8)));
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
     if (!Number.isFinite(gasFee) || gasFee < minGasFee) return res.status(400).json({ error: "Fee too low", minGasFee });
 
@@ -2407,7 +2469,48 @@ app.post("/tokens/faucet", async (req, res) => {
     const token = await get(db, `SELECT * FROM tokens WHERE symbol=?`, [tokenSymbol]);
     if (!token) return res.status(404).json({ error: "Token not found" });
 
-    const faucetAmount = amount ? Number(amount) : 1000; // Default 1000 tokens
+    // 24h cooldown per token per wallet
+    const oneDayAgo = now() - 86400000;
+    const recentMint = await get(
+      db,
+      `SELECT id, timestampMs FROM transactions
+       WHERE fromWallet='FAUCET' AND toWallet=? AND type='token_faucet'
+       AND timestampMs > ?
+       AND metaJson LIKE ?
+       LIMIT 1`,
+      [wallet, oneDayAgo, `%"tokenSymbol":"${tokenSymbol}"%`]
+    );
+    if (recentMint) {
+      const nextMintMs = Number(recentMint.timestampMs) + 86400000;
+      const waitSec = Math.ceil((nextMintMs - now()) / 1000);
+      return res.status(429).json({
+        error: `${tokenSymbol} faucet cooldown active. Try again in ${Math.ceil(waitSec / 3600)} hours.`,
+        cooldownSeconds: waitSec,
+      });
+    }
+
+    // Also check seed fingerprint cooldown (prevents creating new wallet to bypass)
+    const seedFp = String(req.body?.seedFingerprint || "").trim();
+    if (seedFp) {
+      const fpMint = await get(
+        db,
+        `SELECT id, timestampMs FROM transactions
+         WHERE type='token_faucet' AND timestampMs > ?
+         AND metaJson LIKE ? AND metaJson LIKE ?
+         LIMIT 1`,
+        [oneDayAgo, `%"tokenSymbol":"${tokenSymbol}"%`, `%"seedFingerprint":"${seedFp}"%`]
+      );
+      if (fpMint) {
+        const nextMs = Number(fpMint.timestampMs) + 86400000;
+        const waitSec = Math.ceil((nextMs - now()) / 1000);
+        return res.status(429).json({
+          error: `${tokenSymbol} faucet cooldown active (seed phrase limit). Try again in ${Math.ceil(waitSec / 3600)} hours.`,
+          cooldownSeconds: waitSec,
+        });
+      }
+    }
+
+    const faucetAmount = Math.min(Number(amount) || 100, 100); // Max 100 tokens per 24h
     if (!Number.isFinite(faucetAmount) || faucetAmount <= 0) {
       return res.status(400).json({ error: "Invalid amount" });
     }
@@ -2436,6 +2539,30 @@ app.post("/tokens/faucet", async (req, res) => {
         [wallet, tokenSymbol, faucetAmount, now()]
       );
     }
+
+    // Create a transaction record for the faucet mint
+    const txId = crypto.randomUUID();
+    const ts = now();
+    const metaJson = JSON.stringify({ tokenSymbol, amount: faucetAmount, seedFingerprint: seedFp || undefined });
+    const txRow = {
+      id: txId,
+      hash: sha256Hex(`token_faucet:${wallet}:${tokenSymbol}:${faucetAmount}:${ts}`),
+      type: "token_faucet",
+      fromWallet: "FAUCET",
+      toWallet: wallet,
+      amount: faucetAmount,
+      nonce: 0,
+      gasFee: 0,
+      serviceFee: 0,
+      metaJson,
+      status: "confirmed",
+      failReason: null,
+      expiresAtMs: ts + 60000,
+      timestampMs: ts,
+      blockHeight: null,
+      blockHash: null,
+    };
+    await insertTx(txRow);
 
     return res.json({
       success: true,
@@ -2485,7 +2612,7 @@ app.post("/tokens/send", async (req, res) => {
     // Service fee based on USD value of tokens being sent
     const serviceFee = Number(req.body?.serviceFee ?? 0);
     const svcExpected = expectedServiceFee(amt, tokenPriceUSD);
-    if (Math.abs(serviceFee - svcExpected) > 0.01) {
+    if (Math.abs(serviceFee - svcExpected) > 0.1) {
       return res.status(400).json({ error: "Bad serviceFee", expectedServiceFee: svcExpected, gotServiceFee: serviceFee, rate: SERVICE_FEE_RATE, tokenPriceUSD });
     }
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
@@ -2534,7 +2661,7 @@ app.post("/tokens/send", async (req, res) => {
       return res.status(429).json({ error: "Too many pending txs", maxPendingPerWallet: MAX_PENDING_PER_WALLET });
     }
 
-    const metaJson = JSON.stringify({ tokenSymbol: token });
+    const metaJson = JSON.stringify({ tokenSymbol: token, amount: amt });
     const msg = canonicalSignedMessage({
       chainId: CHAIN_ID,
       type: "token_send",
@@ -2601,7 +2728,13 @@ app.post("/swap", async (req, res) => {
 
     const { minGasFee } = await currentMinGasFee();
     const gasFee = Number(req.body?.gasFee ?? minGasFee);
-    const serviceFee = 0;
+    // Service fee: 0.0005% of USD value of tokenIn, paid in HNY
+    const tokenInInfo = await get(db, `SELECT mockPriceUSD FROM tokens WHERE symbol=?`, [tIn]);
+    const tokenPriceUSD = Number(tokenInInfo?.mockPriceUSD || 1);
+    const usdValue = amtIn * tokenPriceUSD;
+    const serverServiceFee = Number((usdValue * SERVICE_FEE_RATE).toFixed(8));
+    // Use client-sent serviceFee for signature verification (must match what client signed)
+    const clientServiceFee = Number(req.body?.serviceFee ?? 0);
     const expiresAtMs = Number(req.body?.expiresAtMs ?? (now() + TX_TTL_MS));
 
     if (!Number.isFinite(gasFee) || gasFee < minGasFee) {
@@ -2614,22 +2747,54 @@ app.post("/swap", async (req, res) => {
       return res.status(409).json({ error: "Nonce mismatch", expectedNonce: acct.nonce, gotNonce: nonce });
     }
 
-    // Find pool (try both orderings)
+    // Find pool (try both orderings) — or multi-hop through HNY
     let pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, tOut]);
     let reversed = false;
     if (!pool) {
       pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, tIn]);
       reversed = true;
     }
-    if (!pool) return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
 
-    const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
-    const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
-    const feeRate = Number(pool.feeRate || 0.003);
+    // Multi-hop routing helper
+    function ammCalcEndpoint(rIn, rOut, input, fee) {
+      const withFee = input * (1 - fee);
+      return (rOut * withFee) / (rIn + withFee);
+    }
 
-    // Constant product AMM: (x + amtIn * (1 - fee)) * (y - amtOut) = x * y
-    const amountInWithFee = amtIn * (1 - feeRate);
-    const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
+    let poolIdForMeta, amountOut;
+    const BRIDGE = "HNY";
+
+    if (pool) {
+      // Direct pool
+      const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+      const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+      const feeRate = Number(pool.feeRate || 0.003);
+      amountOut = ammCalcEndpoint(reserveIn, reserveOut, amtIn, feeRate);
+      poolIdForMeta = pool.id;
+    } else if (tIn !== BRIDGE && tOut !== BRIDGE) {
+      // Multi-hop: tokenIn → HNY → tokenOut
+      let pool1 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, BRIDGE]);
+      let rev1 = false;
+      if (!pool1) { pool1 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [BRIDGE, tIn]); rev1 = true; }
+      let pool2 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [BRIDGE, tOut]);
+      let rev2 = false;
+      if (!pool2) { pool2 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, BRIDGE]); rev2 = true; }
+
+      if (!pool1 || !pool2) {
+        return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
+      }
+
+      const rIn1 = rev1 ? Number(pool1.reserveB) : Number(pool1.reserveA);
+      const rOut1 = rev1 ? Number(pool1.reserveA) : Number(pool1.reserveB);
+      const hnyMid = ammCalcEndpoint(rIn1, rOut1, amtIn, Number(pool1.feeRate || 0.003));
+
+      const rIn2 = rev2 ? Number(pool2.reserveB) : Number(pool2.reserveA);
+      const rOut2 = rev2 ? Number(pool2.reserveA) : Number(pool2.reserveB);
+      amountOut = ammCalcEndpoint(rIn2, rOut2, hnyMid, Number(pool2.feeRate || 0.003));
+      poolIdForMeta = `${pool1.id}|${pool2.id}`;
+    } else {
+      return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
+    }
     
     if (amountOut < minOut) {
       return res.status(400).json({
@@ -2639,11 +2804,11 @@ app.post("/swap", async (req, res) => {
       });
     }
 
-    // Check balances
+    // Check balances (use server fee for balance check)
     if (tIn === 'HNY') {
       const pendingCost = await getPendingOutgoingCost(from);
       const spendable = Number(acct.balance) - pendingCost;
-      if (spendable < amtIn + gasFee + serviceFee) {
+      if (spendable < amtIn + gasFee + serverServiceFee) {
         return res.status(400).json({ error: "Insufficient HNY balance" });
       }
     } else {
@@ -2659,7 +2824,7 @@ app.post("/swap", async (req, res) => {
       // Still need HNY for gas
       const pendingCost = await getPendingOutgoingCost(from);
       const spendableHNY = Number(acct.balance) - pendingCost;
-      if (spendableHNY < gasFee + serviceFee) {
+      if (spendableHNY < gasFee + serverServiceFee) {
         return res.status(400).json({ error: "Insufficient HNY for fees" });
       }
     }
@@ -2669,8 +2834,9 @@ app.post("/swap", async (req, res) => {
       return res.status(429).json({ error: "Too many pending txs" });
     }
 
-    const metaJson = JSON.stringify({
-      poolId: pool.id,
+    // Use client-provided metaJson for signature verification
+    const clientMetaJson = req.body?.metaJson || JSON.stringify({
+      poolId: poolIdForMeta,
       tokenIn: tIn,
       tokenOut: tOut,
       amountIn: amtIn,
@@ -2678,6 +2844,7 @@ app.post("/swap", async (req, res) => {
       expectedAmountOut: Number(amountOut.toFixed(8)),
     });
 
+    // Use client-sent serviceFee for signature verification (must match what client signed)
     const msg = canonicalSignedMessage({
       chainId: CHAIN_ID,
       type: "swap",
@@ -2686,10 +2853,10 @@ app.post("/swap", async (req, res) => {
       amount: amtIn,
       nonce,
       gasFee,
-      serviceFee,
+      serviceFee: clientServiceFee,
       expiresAtMs,
       timestamp,
-      metaJson,
+      metaJson: clientMetaJson,
     });
 
     const sigOk = verifySignature({ walletPubKeyB64: acct.publicKeyB64, message: msg, signatureB64: signature });
@@ -2697,6 +2864,7 @@ app.post("/swap", async (req, res) => {
 
     await incrementNonce(from);
 
+    // Record tx with server-computed service fee
     const tx = createTx({
       type: "swap",
       from,
@@ -2704,7 +2872,7 @@ app.post("/swap", async (req, res) => {
       amount: amtIn,
       nonce,
       gasFee,
-      serviceFee,
+      serviceFee: serverServiceFee,
       metaJson,
       timestampMs: timestamp,
       expiresAtMs,
@@ -2717,7 +2885,6 @@ app.post("/swap", async (req, res) => {
       chainId: CHAIN_ID,
       tx,
       expectedAmountOut: Number(amountOut.toFixed(8)),
-      priceImpact: Number(((amountOut / reserveOut) * 100).toFixed(4)),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "swap failed" });
@@ -2737,36 +2904,107 @@ app.post("/swap/quote", async (req, res) => {
     const amtIn = Number(amountIn);
     if (!Number.isFinite(amtIn) || amtIn <= 0) return res.status(400).json({ error: "Invalid amountIn" });
 
-    // Find pool
+    // Helper: compute AMM output for a single pool
+    function ammCalc(reserveIn, reserveOut, inputAmt, feeRate) {
+      const amtWithFee = inputAmt * (1 - feeRate);
+      const out = (reserveOut * amtWithFee) / (reserveIn + amtWithFee);
+      return out;
+    }
+
+    // Try direct pool first
     let pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, tOut]);
     let reversed = false;
     if (!pool) {
       pool = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, tIn]);
       reversed = true;
     }
-    if (!pool) return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
 
-    const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
-    const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
-    const feeRate = Number(pool.feeRate || 0.003);
+    if (pool) {
+      // Direct pool found
+      const reserveIn = reversed ? Number(pool.reserveB) : Number(pool.reserveA);
+      const reserveOut = reversed ? Number(pool.reserveA) : Number(pool.reserveB);
+      const feeRate = Number(pool.feeRate || 0.003);
 
-    const amountInWithFee = amtIn * (1 - feeRate);
-    const amountOut = (reserveOut * amountInWithFee) / (reserveIn + amountInWithFee);
-    const priceImpact = (amountOut / reserveOut) * 100;
+      const amountOut = ammCalc(reserveIn, reserveOut, amtIn, feeRate);
+      const priceImpact = (amountOut / reserveOut) * 100;
+      const exchangeRate = amountOut / amtIn;
+
+      return res.json({
+        success: true,
+        poolId: pool.id,
+        route: "direct",
+        tokenIn: tIn,
+        tokenOut: tOut,
+        amountIn: amtIn,
+        amountOut: Number(amountOut.toFixed(8)),
+        exchangeRate: Number(exchangeRate.toFixed(8)),
+        priceImpact: Number(priceImpact.toFixed(4)),
+        feeRate,
+        reserveIn: Number(reserveIn.toFixed(8)),
+        reserveOut: Number(reserveOut.toFixed(8)),
+      });
+    }
+
+    // No direct pool — try multi-hop through HNY as bridge
+    // Route: tokenIn → HNY → tokenOut
+    const BRIDGE = "HNY";
+    if (tIn === BRIDGE || tOut === BRIDGE) {
+      return res.status(404).json({ error: `No liquidity pool found for ${tIn}/${tOut}` });
+    }
+
+    // Leg 1: tokenIn → HNY
+    let pool1 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tIn, BRIDGE]);
+    let rev1 = false;
+    if (!pool1) {
+      pool1 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [BRIDGE, tIn]);
+      rev1 = true;
+    }
+    if (!pool1) return res.status(404).json({ error: `No pool for ${tIn}/${BRIDGE} (leg 1)` });
+
+    // Leg 2: HNY → tokenOut
+    let pool2 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [BRIDGE, tOut]);
+    let rev2 = false;
+    if (!pool2) {
+      pool2 = await get(db, `SELECT * FROM liquidity_pools WHERE tokenA=? AND tokenB=?`, [tOut, BRIDGE]);
+      rev2 = true;
+    }
+    if (!pool2) return res.status(404).json({ error: `No pool for ${BRIDGE}/${tOut} (leg 2)` });
+
+    const fee1 = Number(pool1.feeRate || 0.003);
+    const fee2 = Number(pool2.feeRate || 0.003);
+
+    const resIn1 = rev1 ? Number(pool1.reserveB) : Number(pool1.reserveA);
+    const resOut1 = rev1 ? Number(pool1.reserveA) : Number(pool1.reserveB);
+    const hnyMid = ammCalc(resIn1, resOut1, amtIn, fee1);
+
+    const resIn2 = rev2 ? Number(pool2.reserveB) : Number(pool2.reserveA);
+    const resOut2 = rev2 ? Number(pool2.reserveA) : Number(pool2.reserveB);
+    const amountOut = ammCalc(resIn2, resOut2, hnyMid, fee2);
+
+    const impact1 = (hnyMid / resOut1) * 100;
+    const impact2 = (amountOut / resOut2) * 100;
+    const totalImpact = Math.min(100, impact1 + impact2);
     const exchangeRate = amountOut / amtIn;
+    // Effective combined fee rate
+    const combinedFeeRate = 1 - (1 - fee1) * (1 - fee2);
 
     return res.json({
       success: true,
-      poolId: pool.id,
+      poolId: `${pool1.id}|${pool2.id}`,
+      route: "multi-hop",
+      bridgeToken: BRIDGE,
+      pool1Id: pool1.id,
+      pool2Id: pool2.id,
       tokenIn: tIn,
       tokenOut: tOut,
       amountIn: amtIn,
       amountOut: Number(amountOut.toFixed(8)),
+      hnyIntermediate: Number(hnyMid.toFixed(8)),
       exchangeRate: Number(exchangeRate.toFixed(8)),
-      priceImpact: Number(priceImpact.toFixed(4)),
-      feeRate,
-      reserveIn: Number(reserveIn.toFixed(8)),
-      reserveOut: Number(reserveOut.toFixed(8)),
+      priceImpact: Number(totalImpact.toFixed(4)),
+      feeRate: Number(combinedFeeRate.toFixed(6)),
+      reserveIn: Number(resIn1.toFixed(8)),
+      reserveOut: Number(resOut2.toFixed(8)),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "quote failed" });

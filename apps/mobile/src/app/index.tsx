@@ -61,6 +61,16 @@ import {
   type LiquidityPool,
 } from "../chain/transactions";
 import type { Transaction as TxLike, StakingPosition } from "../chain/transactions";
+import {
+  getWallets,
+  createWallet,
+  switchWallet,
+  getActiveWallet,
+  renameWallet,
+  getSeedFingerprint,
+  type WalletEntry,
+  type WalletList,
+} from "../chain/wallet-manager";
 
 /* ======================
    Web-safe KV storage
@@ -296,6 +306,16 @@ function fmt8(n: number) {
   return x.toFixed(8);
 }
 
+function fmtCooldown(seconds: number): string {
+  if (seconds <= 0) return "Ready";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m remaining`;
+  if (m > 0) return `${m}m ${s}s remaining`;
+  return `${s}s remaining`;
+}
+
 /** Removes whitespace + zero-width characters that break HNY_ validation */
 function sanitizeAddressInfo(input: string) {
   const raw = String(input ?? "");
@@ -390,6 +410,14 @@ export default function Index() {
   const [feeVaultBalance, setFeeVaultBalance] = useState(0);
   const [pendingDelta, setPendingDelta] = useState(0);
 
+  // ========== MULTI-WALLET STATE ==========
+  const [walletList, setWalletList] = useState<WalletEntry[]>([]);
+  const [activeWalletIndex, setActiveWalletIndex] = useState(0);
+  const [walletSwitcherOpen, setWalletSwitcherOpen] = useState(false);
+  const [walletBalances, setWalletBalances] = useState<{ [addr: string]: number }>({});
+  const [newWalletLabel, setNewWalletLabel] = useState("");
+  const [creatingWallet, setCreatingWallet] = useState(false);
+
   const [txs, setTxs] = useState<TxLike[]>([]);
   const [liveRefresh, setLiveRefresh] = useState(true);
   const [lastRefresh, setLastRefresh] = useState(0);
@@ -432,8 +460,9 @@ export default function Index() {
 
   // Faucet state
   const [faucetToken, setFaucetToken] = useState("ETH");
-  const [faucetAmount, setFaucetAmount] = useState("1000");
+  const [faucetAmount, setFaucetAmount] = useState("100");
   const [faucetBusy, setFaucetBusy] = useState(false);
+  const [tokenCooldowns, setTokenCooldowns] = useState<{ [sym: string]: number }>({});
 
   // Swap extra state
   const [fetchingQuote, setFetchingQuote] = useState(false);
@@ -496,29 +525,17 @@ export default function Index() {
     return Number((Math.max(0, spendableDisplay) + st).toFixed(8));
   }, [spendableBalance, stakedBalance, confirmedBalance, spendableDisplay]);
 
-  // Balances: some dev servers report "spendable" including staked amounts.
-  // We derive an effective spendable balance so staked HNY cannot be accidentally re-sent.
+  // Balances: server returns spendable = account balance - pending outgoing.
+  // Staked HNY has already been deducted from the account by the server (moved to STAKE_VAULT).
+  // So spendable is the true spendable amount — do NOT subtract staked again.
   const balancesView = useMemo(() => {
     const confirmedRaw = Number(confirmedBalance || 0);
     const spendableRaw = Number(spendableBalance || 0);
     const staked = Number(stakedBalance || 0);
 
-    // Heuristic:
-    // If spendableRaw appears to already exclude staked funds (rare in our dev server), don't subtract.
-    // Otherwise, treat staked as a locked sub-balance inside confirmed/spendable.
-    const looksLikeSpendableIncludesStaked = spendableRaw >= staked && confirmedRaw >= staked;
-
-    const spendableEff = looksLikeSpendableIncludesStaked
-      ? Math.max(0, Number((spendableRaw - staked).toFixed(8)))
-      : spendableRaw;
-
-    const totalEff = looksLikeSpendableIncludesStaked
-      ? confirmedRaw || spendableRaw
-      : Number((spendableRaw + staked).toFixed(8));
-
     return {
-      total: totalEff,
-      spendable: spendableEff,
+      total: confirmedRaw,
+      spendable: spendableRaw,
       staked,
     };
   }, [confirmedBalance, spendableBalance, stakedBalance]);
@@ -527,6 +544,15 @@ export default function Index() {
   const [stakeAmountText, setStakeAmountText] = useState<string>("");
   const [stakeLockDaysText, setStakeLockDaysText] = useState<string>("30");
   const [stakeBusy, setStakeBusy] = useState<boolean>(false);
+  const [stakeConfirmOpen, setStakeConfirmOpen] = useState(false);
+  const [stakePreview, setStakePreview] = useState<null | {
+    amount: number;
+    lockDays: number;
+    gasFee: number;
+    serviceFee: number;
+    totalFee: number;
+    totalCost: number;
+  }>(null);
   const [unstakeBusyId, setUnstakeBusyId] = useState<string | null>(null);
   const [claimBusyId, setClaimBusyId] = useState<string | null>(null);
   const [claimConfirmOpen, setClaimConfirmOpen] = useState(false);
@@ -568,7 +594,7 @@ export default function Index() {
   const pausePollingRef = useRef(false);
 
   const anyModalOpen =
-    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen || tokenSendOpen || swapOpen || swapConfirmOpen || portfolioOpen || faucetModalOpen || unifiedSendConfirmOpen || !!tokenDetailSymbol || contactsOpen || stakingModalOpen;
+    confirmOpen || historyOpen || settingsOpen || rbfOpen || cancelOpen || receiveOpen || tokenSendOpen || swapOpen || swapConfirmOpen || portfolioOpen || faucetModalOpen || unifiedSendConfirmOpen || !!tokenDetailSymbol || contactsOpen || stakingModalOpen || stakeConfirmOpen || walletSwitcherOpen;
 
   const sendFormDirty = !!toText || !!amountText;
 
@@ -702,8 +728,81 @@ async function pasteRecipientFromClipboard() {
      Data loading
   ====================== */
   async function loadWallet() {
+    // Initialize multi-wallet system
+    const wl = await getWallets();
+    setWalletList(wl.wallets);
+    setActiveWalletIndex(wl.activeIndex);
+    
+    // Ensure active wallet is registered
     const w = await ensureWalletId();
     setWallet(String(w || ""));
+    
+    // Load balances for all wallets (for the switcher preview)
+    loadAllWalletBalances(wl.wallets);
+  }
+  
+  async function loadAllWalletBalances(wallets: WalletEntry[]) {
+    const bals: { [addr: string]: number } = {};
+    for (const w of wallets) {
+      try {
+        const b: any = await getBalance(w.address);
+        bals[w.address] = Number(b?.confirmed ?? b?.balance ?? 0);
+      } catch {
+        bals[w.address] = 0;
+      }
+    }
+    setWalletBalances(bals);
+  }
+  
+  async function handleCreateWallet() {
+    if (creatingWallet) return;
+    setCreatingWallet(true);
+    try {
+      const label = newWalletLabel.trim() || `Wallet ${walletList.length + 1}`;
+      const entry = await createWallet(label);
+      
+      // Register the new wallet on the server
+      const { publicKeyB64 } = entry;
+      try {
+        const res = await fetch(`${await getApiBase()}/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ publicKey: publicKeyB64 }),
+        });
+        await res.json();
+      } catch {}
+      
+      // Switch to the new wallet
+      await switchWallet(entry.index);
+      const w = entry.address;
+      setWallet(w);
+      
+      // Refresh wallet list
+      const wl = await getWallets();
+      setWalletList(wl.wallets);
+      setActiveWalletIndex(wl.activeIndex);
+      setNewWalletLabel("");
+      
+      showToast(`Created "${label}"`);
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Failed to create wallet: ${e?.message || "Unknown"}`);
+    } finally {
+      setCreatingWallet(false);
+    }
+  }
+  
+  async function handleSwitchWallet(index: number) {
+    try {
+      const entry = await switchWallet(index);
+      setWallet(entry.address);
+      setActiveWalletIndex(index);
+      setWalletSwitcherOpen(false);
+      showToast(`Switched to ${entry.label}`);
+      await hardRefreshAll();
+    } catch (e: any) {
+      setMessage(`Switch failed: ${e?.message || "Unknown"}`);
+    }
   }
 
   async function refreshStatus() {
@@ -849,6 +948,22 @@ async function pasteRecipientFromClipboard() {
     return () => clearInterval(t);
   }, [mintCooldown]);
 
+  // Tick down token faucet cooldowns
+  useEffect(() => {
+    const hasActive = Object.values(tokenCooldowns).some(v => v > 0);
+    if (!hasActive) return;
+    const t = setInterval(() => {
+      setTokenCooldowns(prev => {
+        const next: any = {};
+        for (const [k, v] of Object.entries(prev)) {
+          next[k] = Math.max(0, (v as number) - 1);
+        }
+        return next;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [tokenCooldowns]);
+
   /* ======================
      Persist prefs per chain
   ====================== */
@@ -909,11 +1024,13 @@ async function pasteRecipientFromClipboard() {
     setTokenDetailSymbol(null);
     setContactsOpen(false);
     setQrScanOpen(false);
+    setStakeConfirmOpen(false);
 
     setQuote(null);
     setRbfTx(null);
     setCancelTx(null);
     setUnifiedSendQuote(null);
+    setStakePreview(null);
 
     pausePollingRef.current = false;
     if (!opts?.keepMessage) setMessage("");
@@ -947,8 +1064,7 @@ async function pasteRecipientFromClipboard() {
     }
   }
 
-  async function handleStake() {
-    if (stakeBusy) return;
+  function openStakeConfirm() {
     const amtTextClean = normalizeAmountText(stakeAmountText);
     const amtCheck = parseAmount8(amtTextClean);
     if (!amtCheck.ok || Number(amtCheck.value) <= 0) {
@@ -960,14 +1076,34 @@ async function pasteRecipientFromClipboard() {
       setMessage("Lock days must be a positive integer.");
       return;
     }
+    const amount = Number(amtCheck.value);
     const minGas = Math.max(Number(minGasFee || 0), MIN_GAS_FEE_FLOOR);
     const chosenGas = Math.max(minGas, computeChosenGas(minGas));
+    // Service fee = 0.0005% of USD value (HNY @ $1)
+    const hnyPriceUSD = tokenPrices["HNY"] || 1;
+    const usdValue = amount * hnyPriceUSD;
+    const serviceFee = Number((usdValue * serviceFeeRate).toFixed(8));
+    const totalFee = Number((chosenGas + serviceFee).toFixed(8));
+    const totalCost = Number((amount + totalFee).toFixed(8));
 
+    if (balancesView.spendable < totalCost) {
+      setMessage(`Insufficient HNY. Need ${fmtNum(totalCost)} (${fmtNum(amount)} stake + ${fmtNum(totalFee)} fees).`);
+      return;
+    }
+
+    setStakePreview({ amount, lockDays, gasFee: chosenGas, serviceFee, totalFee, totalCost });
+    setStakeConfirmOpen(true);
+  }
+
+  async function handleStakeSubmit() {
+    if (stakeBusy || !stakePreview) return;
     setStakeBusy(true);
     try {
-      await stake({ amount: Number(amtCheck.value), lockDays, gasFee: chosenGas });
+      await stake({ amount: stakePreview.amount, lockDays: stakePreview.lockDays, gasFee: stakePreview.gasFee, serviceFee: stakePreview.serviceFee });
       setMessage("Stake submitted ✅");
       setStakeAmountText("");
+      setStakeConfirmOpen(false);
+      setStakePreview(null);
       await hardRefreshAll();
     } catch (e: any) {
       setMessage(`Stake failed: ${e?.message || "Unknown error"}`);
@@ -1103,6 +1239,7 @@ async function pasteRecipientFromClipboard() {
 
   // ========== PORTFOLIO VALUE ==========
   const portfolioValueUSD = useMemo(() => {
+    // HNY is already in tokenBalances from the server, so just iterate all tokens
     return Object.entries(tokenBalances).reduce((sum, [symbol, amount]) => {
       const price = tokenPrices[symbol] || 0;
       return sum + Number(amount) * price;
@@ -1115,19 +1252,36 @@ async function pasteRecipientFromClipboard() {
     setFaucetBusy(true);
     setMessage("");
     try {
+      const seedFp = await getSeedFingerprint();
       if (faucetToken === "HNY") {
-        const res: any = await mint();
+        const res: any = await mint({ seedFingerprint: seedFp });
         setMessage("HNY Mint submitted ✅");
-        setMintCooldown(Number(res?.cooldownSeconds || 60));
+        const cd = Number(res?.cooldownSeconds || 86400);
+        setMintCooldown(cd);
       } else {
-        const amt = Number(faucetAmount) || 1000;
-        await tokenFaucet({ tokenSymbol: faucetToken, amount: amt });
+        const amt = Number(faucetAmount) || 100;
+        await tokenFaucet({ tokenSymbol: faucetToken, amount: amt, seedFingerprint: seedFp });
         setMessage(`✅ Minted ${fmtNum(amt, 0)} ${faucetToken}`);
+        // Set 24h cooldown for this token
+        setTokenCooldowns(prev => ({ ...prev, [faucetToken]: 86400 }));
       }
       setFaucetModalOpen(false);
       await hardRefreshAll();
     } catch (e: any) {
-      setMessage(`Faucet failed: ${e?.message || "Unknown error"}`);
+      const msg = e?.message || "Unknown error";
+      // Parse cooldown from server error
+      const cdMatch = msg.match(/(\d+)\s*(minutes|hours)/);
+      if (cdMatch) {
+        const unit = cdMatch[2] === "hours" ? 3600 : 60;
+        const cdSec = Number(cdMatch[1]) * unit;
+        if (faucetToken === "HNY") setMintCooldown(cdSec);
+        else setTokenCooldowns(prev => ({ ...prev, [faucetToken]: cdSec }));
+      }
+      if (e?.cooldownSeconds) {
+        if (faucetToken === "HNY") setMintCooldown(Number(e.cooldownSeconds));
+        else setTokenCooldowns(prev => ({ ...prev, [faucetToken]: Number(e.cooldownSeconds) }));
+      }
+      setMessage(`Faucet failed: ${msg}`);
     } finally {
       setFaucetBusy(false);
     }
@@ -1248,7 +1402,11 @@ async function pasteRecipientFromClipboard() {
     setMessage("");
     try {
       const amt = Number(swapAmountIn);
-      await swap({ tokenIn: swapTokenIn, tokenOut: swapTokenOut, amountIn: amt, minAmountOut: swapQuote.amountOut * 0.95 });
+      // Compute USD-based service fee for the swap
+      const tokenPriceUSD = tokenPrices[swapTokenIn] || 1;
+      const usdVal = amt * tokenPriceUSD;
+      const svcFee = Number((usdVal * serviceFeeRate).toFixed(8));
+      await swap({ tokenIn: swapTokenIn, tokenOut: swapTokenOut, amountIn: amt, minAmountOut: swapQuote.amountOut * 0.95, serviceFee: svcFee });
       setMessage(`✅ Swapped ${fmtNum(amt)} ${swapTokenIn} → ${fmtNum(swapQuote.amountOut)} ${swapTokenOut}`);
       setSwapAmountIn("");
       setSwapQuote(null);
@@ -1482,7 +1640,7 @@ async function pasteRecipientFromClipboard() {
 
   const mintLabel = useMemo(() => {
     if (mintBusy) return "Minting…";
-    if (mintCooldown > 0) return `Mint (${mintCooldown}s)`;
+    if (mintCooldown > 0) return `Mint (${fmtCooldown(mintCooldown)})`;
     return "Mint";
   }, [mintCooldown, mintBusy]);
   /* ======================
@@ -1576,9 +1734,19 @@ async function pasteRecipientFromClipboard() {
 
         {/* Wallet address (slim) */}
         <Card T={T} style={{ marginTop: 12 }}>
-          <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Pressable onPress={() => { pausePollingRef.current = true; setWalletSwitcherOpen(true); }} style={{ flexDirection: "row", alignItems: "center" }}>
             <View style={{ flex: 1 }}>
-              <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12 }}>Wallet</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Text style={{ color: T.sub, fontWeight: "800", fontSize: 12 }}>Wallet</Text>
+                {walletList.length > 0 && (
+                  <View style={{ backgroundColor: T.green, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 }}>
+                    <Text style={{ color: "#000", fontWeight: "900", fontSize: 10 }}>
+                      {walletList.find(w => w.index === activeWalletIndex)?.label || "Main"}
+                    </Text>
+                  </View>
+                )}
+                <Text style={{ color: T.sub, fontSize: 11, fontWeight: "600" }}>▼ Switch</Text>
+              </View>
               <Text style={{ color: T.text, fontSize: 15, fontWeight: "900", marginTop: 4 }}>
                 {wallet ? shortAddr(wallet) : "Loading…"}
               </Text>
@@ -1588,7 +1756,7 @@ async function pasteRecipientFromClipboard() {
                 <Ionicons name="copy-outline" size={18} color={T.text} />
               </Pressable>
             )}
-          </View>
+          </Pressable>
           <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
             <View style={{ flex: 1 }}>
               <Button T={T} label="Receive" variant="blue" onPress={() => { pausePollingRef.current = true; setReceiveOpen(true); }} />
@@ -1710,21 +1878,50 @@ async function pasteRecipientFromClipboard() {
                 const from = String(tx?.from || "").trim();
                 const to = String(tx?.to || "").trim();
 
-                // Direction:
-                // - For claim/mint/unstake, value is credited to the wallet even if from==to.
-                // - Otherwise, infer direction from from/to.
-                const txType = String(tx?.type || "").toLowerCase();
-                const direction =
-                  txType === "claim" || txType === "mint" || txType === "unstake"
-                    ? "Received"
-                    : w && from === w
-                      ? "Sent"
-                      : w && to === w
-                        ? "Received"
-                        : String(tx?.type || "Tx");
+                // Parse metaJson for token details
+                let meta: any = null;
+                try { meta = tx?.metaJson ? JSON.parse(tx.metaJson) : null; } catch {}
 
-                const amt = Number(tx?.amount || 0);
-                const signedAmount = direction === "Sent" ? -amt : direction === "Received" ? amt : amt;
+                const txType = String(tx?.type || "").toLowerCase();
+
+                // Determine token symbol and direction label
+                let tokenSymbol = "HNY";
+                let directionLabel = "";
+                let amountDisplay = "";
+
+                if (txType === "swap" && meta) {
+                  tokenSymbol = meta.tokenIn || "?";
+                  directionLabel = "Swap";
+                  amountDisplay = `${fmtNum(Number(meta.amountIn || tx?.amount || 0))} ${meta.tokenIn || "?"} → ${fmtNum(Number(meta.expectedAmountOut || meta.amountOut || 0))} ${meta.tokenOut || "?"}`;
+                } else if (txType === "token_send" && meta) {
+                  tokenSymbol = meta.tokenSymbol || "?";
+                  const direction = w && from === w ? "Sent" : "Received";
+                  directionLabel = direction;
+                  const amt = Number(meta.amount || tx?.amount || 0);
+                  amountDisplay = `${direction === "Sent" ? "-" : "+"}${fmtNum(amt)} ${tokenSymbol}`;
+                } else if (txType === "stake") {
+                  directionLabel = "Stake";
+                  amountDisplay = `${fmtNum(Number(tx?.amount || 0))} HNY`;
+                } else if (txType === "unstake" || txType === "claim") {
+                  directionLabel = txType === "unstake" ? "Unstake" : "Claim";
+                  amountDisplay = `+${fmtNum(Number(tx?.amount || 0))} HNY`;
+                } else if (txType === "mint") {
+                  directionLabel = "Mint";
+                  amountDisplay = `+${fmtNum(Number(tx?.amount || 0))} HNY`;
+                } else if (txType === "token_faucet" && meta) {
+                  directionLabel = "Faucet";
+                  const sym = meta.tokenSymbol || "?";
+                  amountDisplay = `+${fmtNum(Number(meta.amount || tx?.amount || 0))} ${sym}`;
+                } else {
+                  const direction = w && from === w ? "Sent" : w && to === w ? "Received" : "Tx";
+                  directionLabel = direction;
+                  const amt = Number(tx?.amount || 0);
+                  amountDisplay = `${direction === "Sent" ? "-" : "+"}${fmtNum(amt)} HNY`;
+                }
+
+                const gasFee = Number(tx?.gasFee || 0);
+                const svcFee = Number(tx?.serviceFee || 0);
+                const totalFee = gasFee + svcFee;
 
                 return (
                   <View
@@ -1737,27 +1934,34 @@ async function pasteRecipientFromClipboard() {
                       backgroundColor: T.glass2,
                     }}
                   >
-                    <Text style={{ color: T.text, fontWeight: "900" }}>
-                      {direction} • {status}
-                    </Text>
+                    <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                      <Text style={{ color: T.text, fontWeight: "900" }}>
+                        {directionLabel} • {status}
+                      </Text>
+                      <Text style={{ color: txType === "swap" ? T.green : directionLabel === "Sent" || directionLabel === "Stake" ? "#ff6b6b" : T.green, fontWeight: "900", fontSize: 14 }}>
+                        {amountDisplay}
+                      </Text>
+                    </View>
 
-                    <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
-                      From: {shortAddr(String(tx?.from || ""))}
-                    </Text>
+                    {txType !== "swap" && (
+                      <>
+                        <Text style={{ color: T.sub, marginTop: 6, fontWeight: "800" }}>
+                          From: {shortAddr(from)}
+                        </Text>
+                        <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                          To: {shortAddr(to)}
+                        </Text>
+                      </>
+                    )}
+
+                    {totalFee > 0 && (
+                      <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
+                        Fees: {fmt8(totalFee)} HNY
+                      </Text>
+                    )}
+
                     <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      To: {shortAddr(String(tx?.to || ""))}
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      Amount: {signedAmount}
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      Nonce: {String(tx?.nonce ?? "—")}
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      Block: {String(tx?.blockHeight ?? tx?.height ?? "—")}
-                    </Text>
-                    <Text style={{ color: T.sub, marginTop: 4, fontWeight: "800" }}>
-                      Time: {formatTxTime(tx?.timestamp ?? tx?.timeMs ?? tx?.time)}
+                      Block: {String(tx?.blockHeight ?? tx?.height ?? "—")} • Time: {formatTxTime(tx?.timestamp ?? tx?.timeMs ?? tx?.time)}
                     </Text>
                     <Pressable
                       onPress={async () => {
@@ -1765,7 +1969,7 @@ async function pasteRecipientFromClipboard() {
                         if (!id) return;
                         try {
                           await Clipboard.setStringAsync(id);
-                          showToast("TxID copied");
+                          showToast("TxID copied ✅");
                         } catch {}
                       }}
                     >
@@ -1921,7 +2125,10 @@ async function pasteRecipientFromClipboard() {
 
               {stakingTab === "stake" && (
                 <ScrollView style={{ marginTop: 12, flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }} keyboardShouldPersistTaps="handled">
-                  <Text style={{ color: T.sub, fontWeight: "800" }}>APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}</Text>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                    <Text style={{ color: T.sub, fontWeight: "800" }}>APR: {stakingApr ? `${(stakingApr * 100).toFixed(2)}%` : "—"}</Text>
+                    <Text style={{ color: T.green, fontWeight: "900", fontSize: 13 }}>Available: {fmtNum(balancesView.spendable)} HNY</Text>
+                  </View>
 
                   <Text style={{ color: T.sub, marginTop: 12, fontWeight: "800" }}>Amount</Text>
                   <TextInput
@@ -1960,7 +2167,7 @@ async function pasteRecipientFromClipboard() {
                     label={stakeBusy ? "Staking..." : "Stake"}
                     variant={stakeBusy ? "outline" : "purple"}
                     disabled={stakeBusy}
-                    onPress={handleStake}
+                    onPress={openStakeConfirm}
                   />
                 </ScrollView>
               )}
@@ -2751,6 +2958,89 @@ async function pasteRecipientFromClipboard() {
       )}
 
       {/* ===== FAUCET MODAL (includes HNY mint) ===== */}
+      {/* ===== WALLET SWITCHER MODAL ===== */}
+      {walletSwitcherOpen && (
+        <Overlay onClose={() => { setWalletSwitcherOpen(false); pausePollingRef.current = false; }}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontSize: 18, fontWeight: "900", flex: 1 }}>👛 Wallets</Text>
+                <Pressable onPress={() => { setWalletSwitcherOpen(false); pausePollingRef.current = false; }}>
+                  <Text style={{ color: T.text, fontWeight: "900" }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "600", fontSize: 11 }}>
+                All wallets share the same seed phrase. Tap to switch.
+              </Text>
+
+              <ScrollView style={{ marginTop: 12, maxHeight: 320 }}>
+                {walletList.map((w) => {
+                  const isActive = w.index === activeWalletIndex;
+                  const bal = walletBalances[w.address] || 0;
+                  return (
+                    <Pressable
+                      key={w.index}
+                      onPress={() => handleSwitchWallet(w.index)}
+                      style={{
+                        padding: 12,
+                        borderRadius: 12,
+                        marginBottom: 8,
+                        borderWidth: isActive ? 2 : 1,
+                        borderColor: isActive ? T.green : T.border,
+                        backgroundColor: isActive ? "rgba(57,255,20,0.08)" : T.glass2,
+                      }}
+                    >
+                      <View style={{ flexDirection: "row", alignItems: "center" }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: T.text, fontWeight: "900" }}>
+                            {w.label} {isActive ? "✓" : ""}
+                          </Text>
+                          <Text style={{ color: T.sub, fontWeight: "700", fontSize: 12, marginTop: 2 }}>
+                            {shortAddr(w.address)}
+                          </Text>
+                        </View>
+                        <Text style={{ color: T.green, fontWeight: "900", fontSize: 14 }}>
+                          {fmtNum(bal)} HNY
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={{ height: 1, backgroundColor: T.border, marginVertical: 12 }} />
+
+              <Text style={{ color: T.sub, fontWeight: "800", marginBottom: 8 }}>Add New Wallet</Text>
+              <TextInput
+                value={newWalletLabel}
+                onChangeText={setNewWalletLabel}
+                placeholder="Wallet name (e.g., Trading)"
+                placeholderTextColor="rgba(255,255,255,0.35)"
+                style={{
+                  paddingVertical: 10, paddingHorizontal: 12, borderRadius: 12,
+                  borderWidth: 1, borderColor: T.border, color: T.text,
+                  backgroundColor: T.glass2, fontWeight: "800",
+                }}
+              />
+              <View style={{ marginTop: 10 }}>
+                <Button
+                  T={T}
+                  label={creatingWallet ? "Creating…" : "➕ Create Wallet"}
+                  variant="green"
+                  onPress={handleCreateWallet}
+                  disabled={creatingWallet}
+                />
+              </View>
+
+              <Text style={{ color: T.sub, marginTop: 10, fontWeight: "500", fontSize: 11 }}>
+                Transfers between your wallets only cost the base gas fee ({fmt8(Number(minGasFee))} HNY).
+              </Text>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
       {faucetModalOpen && (
         <Overlay onClose={() => { setFaucetModalOpen(false); pausePollingRef.current = false; }}>
           <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
@@ -2776,17 +3066,19 @@ async function pasteRecipientFromClipboard() {
                 <View style={{ marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: "rgba(255,191,47,0.08)", borderWidth: 1, borderColor: "rgba(255,191,47,0.2)" }}>
                   <Text style={{ color: T.gold, fontWeight: "900" }}>🍯 Mint 100 HNY (Devnet Faucet)</Text>
                   <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600", fontSize: 12 }}>
-                    {mintCooldown > 0 ? `Cooldown: ${mintCooldown}s remaining` : "Ready to mint"}
+                    {mintCooldown > 0 ? `Cooldown: ${fmtCooldown(mintCooldown)}` : "Ready to mint"}
                   </Text>
                 </View>
               ) : (
-                <>
-                  <Text style={{ color: T.sub, marginTop: 14, fontWeight: "800" }}>Amount</Text>
-                  <TextInput value={faucetAmount} onChangeText={setFaucetAmount} placeholder="1000"
-                    placeholderTextColor={"rgba(255,255,255,0.35)"}
-                    keyboardType={Platform.OS === "web" ? "default" : "decimal-pad"}
-                    style={{ marginTop: 8, paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: T.border, color: T.text, backgroundColor: T.glass2, fontWeight: "800" }} />
-                </>
+                <View style={{ marginTop: 14, padding: 12, borderRadius: 12, backgroundColor: "rgba(100,200,255,0.08)", borderWidth: 1, borderColor: "rgba(100,200,255,0.2)" }}>
+                  <Text style={{ color: T.green, fontWeight: "900" }}>Mint 100 {faucetToken} (Devnet Faucet)</Text>
+                  <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600", fontSize: 12 }}>
+                    {(tokenCooldowns[faucetToken] || 0) > 0 ? `Cooldown: ${fmtCooldown(tokenCooldowns[faucetToken])}` : "Ready to mint"}
+                  </Text>
+                  <Text style={{ color: T.sub, marginTop: 4, fontWeight: "500", fontSize: 11 }}>
+                    Max 100 per token per 24 hours
+                  </Text>
+                </View>
               )}
 
               <View style={{ height: 16 }} />
@@ -2796,10 +3088,10 @@ async function pasteRecipientFromClipboard() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Button T={T}
-                    label={faucetBusy ? "Minting…" : faucetToken === "HNY" ? "Mint 100 HNY" : `Mint ${faucetToken}`}
+                    label={faucetBusy ? "Minting…" : faucetToken === "HNY" ? "Mint 100 HNY" : `Mint 100 ${faucetToken}`}
                     variant="green"
                     onPress={handleFaucet}
-                    disabled={faucetBusy || (faucetToken === "HNY" && mintCooldown > 0)} />
+                    disabled={faucetBusy || (faucetToken === "HNY" && mintCooldown > 0) || (faucetToken !== "HNY" && (tokenCooldowns[faucetToken] || 0) > 0)} />
                 </View>
               </View>
             </View>
@@ -2860,7 +3152,10 @@ async function pasteRecipientFromClipboard() {
                 <View style={{ marginTop: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(57,255,20,0.08)", borderWidth: 1, borderColor: swapQuote.priceImpact > 5 ? "rgba(255,90,90,0.5)" : "rgba(57,255,20,0.2)" }}>
                   <Text style={{ color: T.green, fontWeight: "900", fontSize: 18 }}>≈ {fmtNum(swapQuote.amountOut)} {swapTokenOut}</Text>
                   <Text style={{ color: T.sub, marginTop: 6, fontWeight: "600" }}>Rate: 1 {swapTokenIn} = {fmtNum(swapQuote.exchangeRate)} {swapTokenOut}</Text>
-                  <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool fee: {(swapQuote.feeRate * 100).toFixed(2)}%</Text>
+                  {swapQuote.route === "multi-hop" && (
+                    <Text style={{ color: T.purple, marginTop: 2, fontWeight: "700", fontSize: 11 }}>Route: {swapTokenIn} → HNY → {swapTokenOut}</Text>
+                  )}
+                  <Text style={{ color: T.sub, marginTop: 2, fontWeight: "600" }}>Impact: {swapQuote.priceImpact.toFixed(4)}% • Pool fee: 0.30%{swapQuote.route === "multi-hop" ? " × 2 hops" : ""}</Text>
                   {swapQuote.priceImpact > 5 && (
                     <Text style={{ color: T.danger, marginTop: 6, fontWeight: "900", fontSize: 13 }}>
                       ⚠️ High price impact! Consider a smaller amount.
@@ -2912,7 +3207,9 @@ async function pasteRecipientFromClipboard() {
 
                 <Text style={{ color: T.sub, fontWeight: "800" }}>Fee Breakdown</Text>
                 <Text style={{ color: T.text, fontWeight: "800", marginTop: 6 }}>Exchange rate: 1 {swapTokenIn} = {fmtNum(swapQuote.exchangeRate)} {swapTokenOut}</Text>
-                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Pool fee: {(swapQuote.feeRate * 100).toFixed(2)}%</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Pool fee: 0.30%{swapQuote.route === "multi-hop" ? " per hop (2 hops)" : ""} ≈ {fmtNum(Number(swapAmountIn) * (swapQuote.feeRate || 0.003), 4)} {swapTokenIn}</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Service fee: {fmt8(Number(swapAmountIn) * (tokenPrices[swapTokenIn] || 1) * serviceFeeRate)} HNY</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Gas fee: {fmt8(Number(minGasFee || 0.00000001))} HNY</Text>
                 <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Price impact: {swapQuote.priceImpact.toFixed(4)}%</Text>
               </View>
 
@@ -2923,6 +3220,48 @@ async function pasteRecipientFromClipboard() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Button T={T} label={swapBusy ? "Swapping…" : "Confirm Swap"} variant="green" disabled={swapBusy} onPress={handleSwapConfirm} />
+                </View>
+              </View>
+            </View>
+          </GlassCard>
+        </Overlay>
+      )}
+
+      {/* ===== STAKE CONFIRMATION ===== */}
+      {stakeConfirmOpen && stakePreview && (
+        <Overlay onClose={() => { setStakeConfirmOpen(false); setStakePreview(null); }} zIndex={10002}>
+          <GlassCard style={{ borderWidth: 1, borderColor: T.border, backgroundColor: T.glass }}>
+            <View style={{ padding: 14 }}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={{ color: T.text, fontWeight: "900", fontSize: 20 }}>⚡ Confirm Stake</Text>
+                <Pressable onPress={() => { setStakeConfirmOpen(false); setStakePreview(null); }}>
+                  <Text style={{ color: T.sub, fontWeight: "800", fontSize: 16 }}>Close</Text>
+                </Pressable>
+              </View>
+
+              <View style={{ marginTop: 16, padding: 12, borderRadius: 12, backgroundColor: "rgba(128,0,255,0.08)", borderWidth: 1, borderColor: "rgba(128,0,255,0.3)" }}>
+                <Text style={{ color: T.purple, fontWeight: "900", fontSize: 22 }}>Stake {fmtNum(stakePreview.amount)} HNY</Text>
+                <Text style={{ color: T.sub, marginTop: 6, fontWeight: "700" }}>Lock period: {stakePreview.lockDays} days</Text>
+                <Text style={{ color: T.sub, marginTop: 4, fontWeight: "700" }}>APR: {(stakingApr * 100).toFixed(2)}%</Text>
+              </View>
+
+              <View style={{ marginTop: 12, padding: 10, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.03)" }}>
+                <Text style={{ color: T.text, fontWeight: "800" }}>Fee Breakdown</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Gas fee: {fmt8(stakePreview.gasFee)} HNY</Text>
+                <Text style={{ color: T.text, fontWeight: "800", marginTop: 4 }}>Service fee (0.0005% of USD): {fmt8(stakePreview.serviceFee)} HNY</Text>
+                <View style={{ marginTop: 8, borderTopWidth: 1, borderTopColor: T.border, paddingTop: 8 }}>
+                  <Text style={{ color: T.green, fontWeight: "900", fontSize: 15 }}>Total deducted: {fmtNum(stakePreview.totalCost)} HNY</Text>
+                  <Text style={{ color: T.sub, fontSize: 11 }}>({fmtNum(stakePreview.amount)} staked + {fmt8(stakePreview.totalFee)} fees)</Text>
+                </View>
+              </View>
+
+              <View style={{ height: 14 }} />
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label="Cancel" variant="outline" onPress={() => { setStakeConfirmOpen(false); setStakePreview(null); }} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button T={T} label={stakeBusy ? "Staking..." : "Confirm Stake"} variant="purple" disabled={stakeBusy} onPress={handleStakeSubmit} />
                 </View>
               </View>
             </View>

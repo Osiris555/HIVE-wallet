@@ -6,7 +6,7 @@ const fetch = require('node-fetch');
 
 // Pyth Network Price Service API
 // This is the HTTP endpoint - for production you'd use on-chain Pyth contracts
-const PYTH_API = "https://hermes.pyth.network/api";
+const PYTH_API = "https://hermes.pyth.network/v2/updates/price/latest";
 
 // Pyth Price Feed IDs for each token
 // These are the official Pyth feed IDs for mainnet prices
@@ -39,47 +39,44 @@ async function fetchPythPrices() {
   }
 
   try {
-    // Construct Pyth API URL with all price feed IDs
-    const ids = Object.values(PYTH_PRICE_IDS).join(",");
-    const url = `${PYTH_API}/latest_price_feeds?ids[]=${ids.split(',').join('&ids[]=')}`;
+    // Construct Pyth v2 API URL with all price feed IDs
+    const ids = Object.values(PYTH_PRICE_IDS);
+    const params = ids.map(id => `ids[]=${id}`).join('&');
+    const url = `${PYTH_API}?${params}`;
 
-    const response = await fetch(url);
+    const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) {
       console.warn("Pyth API error:", response.status);
-      return priceCache.prices; // Return stale cache on error
+      return priceCache.prices;
     }
     
     const data = await response.json();
 
-    // Parse Pyth price format
     const prices = {
-      HNY: 1.00, // HNY pegged to $1 for now
-      stHNY: 1.05, // stHNY slight premium (5% APR implied)
+      HNY: 1.00,
+      stHNY: 1.05,
     };
 
-    // Pyth returns prices with confidence intervals
+    // v2 API returns { parsed: [{ id, price: { price, expo, conf, publish_time } }] }
+    const parsed = data.parsed || data;
+    const feedArray = Array.isArray(parsed) ? parsed : [];
+
     for (const [symbol, feedId] of Object.entries(PYTH_PRICE_IDS)) {
-      const feed = data.find(f => f.id === feedId);
+      const cleanId = feedId.replace(/^0x/, '');
+      const feed = feedArray.find(f => {
+        const fid = (f.id || '').replace(/^0x/, '');
+        return fid === cleanId;
+      });
       if (feed && feed.price) {
-        // Pyth prices come with exponent (e.g., price = 65000, exp = -2 means $650.00)
         const price = Number(feed.price.price);
         const expo = Number(feed.price.expo);
         const actualPrice = price * Math.pow(10, expo);
-        
-        prices[symbol] = actualPrice;
-
-        // Optional: You can also get confidence intervals
-        // const confidence = Number(feed.price.conf) * Math.pow(10, expo);
-        // console.log(`${symbol}: $${actualPrice.toFixed(2)} ±$${confidence.toFixed(2)}`);
+        if (actualPrice > 0) prices[symbol] = actualPrice;
       }
     }
 
-    priceCache = {
-      prices,
-      lastUpdate: now,
-    };
-
-    console.log("📈 Pyth prices updated:", prices);
+    priceCache = { prices, lastUpdate: now };
+    console.log("📈 Pyth prices updated:", Object.entries(prices).map(([k,v]) => `${k}: $${Number(v).toFixed(2)}`).join(', '));
     return prices;
   } catch (e) {
     console.warn("Failed to fetch Pyth prices:", e.message);
@@ -104,18 +101,20 @@ async function fetchPythPricesSimple() {
       stHNY: 1.05,
     };
 
-    // Fetch each price individually (simpler but more requests)
     for (const [symbol, feedId] of Object.entries(PYTH_PRICE_IDS)) {
       try {
-        const url = `${PYTH_API}/latest_price_feeds?ids[]=${feedId}`;
-        const response = await fetch(url);
+        const url = `${PYTH_API}?ids[]=${feedId}`;
+        const response = await fetch(url, { timeout: 5000 });
         
         if (response.ok) {
           const data = await response.json();
-          if (data && data[0] && data[0].price) {
-            const price = Number(data[0].price.price);
-            const expo = Number(data[0].price.expo);
-            prices[symbol] = price * Math.pow(10, expo);
+          const parsed = data.parsed || data;
+          const feedArray = Array.isArray(parsed) ? parsed : [];
+          if (feedArray[0] && feedArray[0].price) {
+            const price = Number(feedArray[0].price.price);
+            const expo = Number(feedArray[0].price.expo);
+            const actualPrice = price * Math.pow(10, expo);
+            if (actualPrice > 0) prices[symbol] = actualPrice;
           }
         }
       } catch (e) {
@@ -124,7 +123,7 @@ async function fetchPythPricesSimple() {
     }
 
     priceCache = { prices, lastUpdate: now };
-    console.log("📈 Pyth prices updated:", prices);
+    console.log("📈 Pyth prices updated:", Object.entries(prices).map(([k,v]) => `${k}: $${Number(v).toFixed(2)}`).join(', '));
     return prices;
   } catch (e) {
     console.warn("Failed to fetch Pyth prices:", e.message);

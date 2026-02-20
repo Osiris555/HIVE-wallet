@@ -553,7 +553,7 @@ export async function getStakingPositions(wallet?: string): Promise<{ positions:
   return { positions: (body?.positions || []) as StakingPosition[], apr: Number(body?.apr || 0) };
 }
 
-export async function stake(params: { amount: number; lockDays: number; gasFee?: number }): Promise<any> {
+export async function stake(params: { amount: number; lockDays: number; gasFee?: number; serviceFee?: number }): Promise<any> {
   const wallet = await ensureWalletId();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
@@ -571,7 +571,7 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
   if (!Number.isInteger(lockDays) || lockDays <= 0) throw makeError("Invalid lockDays", 400);
 
   const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
-  const serviceFee = 0;
+  const serviceFee = Number(params.serviceFee ?? 0);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({ lockDays });
@@ -600,6 +600,7 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
     timestamp,
     signature,
     gasFee,
+    serviceFee,
     expiresAtMs,
   });
 }
@@ -786,7 +787,7 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
   });
 }
 
-export async function mint(): Promise<any> {
+export async function mint(options?: { seedFingerprint?: string }): Promise<any> {
   const wallet = await ensureWalletId();
   const status = await getChainStatus();
   const chainId = String(status.chainId || "");
@@ -829,6 +830,7 @@ export async function mint(): Promise<any> {
     signature,
     gasFee,
     expiresAtMs,
+    seedFingerprint: options?.seedFingerprint || "",
   });
 }
 
@@ -1072,12 +1074,14 @@ export async function getTokenBalances(
 export async function tokenFaucet(params: {
   tokenSymbol: string;
   amount?: number;
+  seedFingerprint?: string;
 }): Promise<any> {
   const wallet = await ensureWalletId();
   return await postJson("/tokens/faucet", {
     wallet,
     tokenSymbol: params.tokenSymbol,
     amount: params.amount,
+    seedFingerprint: params.seedFingerprint || "",
   });
 }
 
@@ -1110,7 +1114,7 @@ export async function sendToken(params: {
   const serviceFee = Number(params.serviceFee ?? 0);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
-  const metaJson = JSON.stringify({ tokenSymbol: params.tokenSymbol });
+  const metaJson = JSON.stringify({ tokenSymbol: params.tokenSymbol, amount: amt });
   const { secretKeyB64 } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
@@ -1175,6 +1179,7 @@ export async function swap(params: {
   amountIn: number;
   minAmountOut?: number;
   gasFee?: number;
+  serviceFee?: number;
 }): Promise<any> {
   const wallet = await ensureWalletId();
   const status = await getChainStatus();
@@ -1200,7 +1205,7 @@ export async function swap(params: {
   });
 
   const gasFee = Number(params.gasFee ?? status.minGasFee ?? ONE_SAT) || ONE_SAT;
-  const serviceFee = 0;
+  const serviceFee = Number(params.serviceFee ?? 0);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({
@@ -1239,7 +1244,9 @@ export async function swap(params: {
     timestamp,
     signature,
     gasFee,
+    serviceFee,
     expiresAtMs,
+    metaJson,
   });
 }
 
