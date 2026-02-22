@@ -2547,7 +2547,7 @@ app.post("/tokens/faucet", async (req, res) => {
     const txRow = {
       id: txId,
       hash: sha256Hex(`token_faucet:${wallet}:${tokenSymbol}:${faucetAmount}:${ts}`),
-      type: "token_faucet",
+      type: "mint",
       fromWallet: "FAUCET",
       toWallet: wallet,
       amount: faucetAmount,
