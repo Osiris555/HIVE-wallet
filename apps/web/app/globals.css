@@ -1,0 +1,155 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --green: #39ff14;
+  --green-dim: rgba(57, 255, 20, 0.55);
+  --green-glow: rgba(57, 255, 20, 0.15);
+  --gold: #f5b429;
+  --gold-dim: rgba(245, 180, 41, 0.7);
+  --bg: #040507;
+  --bg2: #07090c;
+  --glass: rgba(255, 255, 255, 0.035);
+  --glass2: rgba(255, 255, 255, 0.06);
+  --border: rgba(57, 255, 20, 0.18);
+  --border2: rgba(255, 255, 255, 0.1);
+  --text: #e8f0e4;
+  --sub: rgba(232, 240, 228, 0.55);
+  --blue: #4a9eff;
+  --purple: #9b72ff;
+  --danger: #ff5a5a;
+  --radius: 16px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-grotesk), 'Space Grotesk', sans-serif;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* Glass card */
+.glass-card {
+  background: var(--glass);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-card:hover {
+  border-color: var(--border);
+  box-shadow: 0 0 20px var(--green-glow);
+}
+
+/* Green glow button */
+.btn-green {
+  background: var(--green);
+  color: #040507;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 10px 22px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.1s;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-green:hover {
+  box-shadow: 0 0 20px rgba(57, 255, 20, 0.5);
+  transform: translateY(-1px);
+}
+
+.btn-gold {
+  background: var(--gold);
+  color: #040507;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 10px 22px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: box-shadow 0.2s, transform 0.1s;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-gold:hover {
+  box-shadow: 0 0 20px rgba(245, 180, 41, 0.5);
+  transform: translateY(-1px);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 10px 22px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, transform 0.1s;
+  border: 1px solid var(--border2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-outline:hover {
+  border-color: var(--green);
+  color: var(--green);
+  transform: translateY(-1px);
+}
+
+/* Mono font for addresses */
+.font-mono-hive {
+  font-family: var(--font-mono), 'Space Mono', monospace;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg2);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(57, 255, 20, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(57, 255, 20, 0.6);
+}
+
+/* Badge */
+.badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+.badge-audio   { background: rgba(74,158,255,0.2);   color: var(--blue);   border: 1px solid rgba(74,158,255,0.4); }
+.badge-video   { background: rgba(155,114,255,0.2);  color: var(--purple); border: 1px solid rgba(155,114,255,0.4); }
+.badge-document{ background: rgba(245,180,41,0.2);   color: var(--gold);   border: 1px solid rgba(245,180,41,0.4); }
+.badge-photo   { background: rgba(57,255,20,0.15);   color: var(--green);  border: 1px solid rgba(57,255,20,0.3); }

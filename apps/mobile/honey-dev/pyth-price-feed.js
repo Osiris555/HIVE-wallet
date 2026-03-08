@@ -17,6 +17,7 @@ const PYTH_PRICE_IDS = {
   USDT: "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b", // USDT/USD
   USDC: "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a", // USDC/USD
   XRP: "0xec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8", // XRP/USD
+  BNB: "0x2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f", // BNB/USD
 };
 
 const PRICE_CACHE_TTL_MS = 60 * 1000; // Cache for 1 minute
@@ -42,9 +43,9 @@ async function fetchPythPrices() {
     // Construct Pyth v2 API URL with all price feed IDs
     const ids = Object.values(PYTH_PRICE_IDS);
     const params = ids.map(id => `ids[]=${id}`).join('&');
-    const url = `${PYTH_API}?${params}`;
+    const url = `${PYTH_API}?${params}&parsed=true`;
 
-    const response = await fetch(url, { timeout: 8000 });
+    const response = await fetch(url, { timeout: 15000 });
     if (!response.ok) {
       console.warn("Pyth API error:", response.status);
       return priceCache.prices;
@@ -55,6 +56,8 @@ async function fetchPythPrices() {
     const prices = {
       HNY: 1.00,
       stHNY: 1.05,
+      // Fallback prices used if Pyth fetch fails or feed not found
+      BTC: 67999, ETH: 1974, SOL: 84.5, BNB: 684, XRP: 0.52,
     };
 
     // v2 API returns { parsed: [{ id, price: { price, expo, conf, publish_time } }] }
@@ -103,8 +106,8 @@ async function fetchPythPricesSimple() {
 
     for (const [symbol, feedId] of Object.entries(PYTH_PRICE_IDS)) {
       try {
-        const url = `${PYTH_API}?ids[]=${feedId}`;
-        const response = await fetch(url, { timeout: 5000 });
+        const url = `${PYTH_API}?ids[]=${feedId}&parsed=true`;
+        const response = await fetch(url, { timeout: 10000 });
         
         if (response.ok) {
           const data = await response.json();

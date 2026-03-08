@@ -1,0 +1,2277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HIVE Wallet — Honey Network Testnet</title>
+  <meta name="description" content="HIVE Wallet is the official wallet for the Honey Network — a next-generation blockchain with sub-second finality, DeFi-native tokenomics, and real-time Pyth oracle price feeds." />
+
+  <!-- Open Graph (Facebook, LinkedIn, Discord, Telegram rich previews) -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://honey.network" />
+  <meta property="og:title" content="HIVE Wallet — Honey Network Testnet is Live" />
+  <meta property="og:description" content="The first non-custodial DeFi wallet on the Honey Network. Stake HNY for 5% APR, provide liquidity for 8% APR, swap 9 tokens via native AMM, and explore the chain with HoneyScan — all in one app." />
+  <meta property="og:image" content="../mobile/src/app/assets/skins/matrix-honey-coin.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:site_name" content="HIVE Wallet" />
+  <meta property="og:locale" content="en_US" />
+
+  <!-- Twitter / X Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:site" content="@HoneyNetwork" />
+  <meta name="twitter:creator" content="@HoneyNetwork" />
+  <meta name="twitter:title" content="HIVE Wallet — Honey Network Testnet is Live 🍯" />
+  <meta name="twitter:description" content="Non-custodial DeFi wallet on Honey Network. Swap tokens, stake HNY (5% APR), add liquidity (8% APR) and explore the chain live with HoneyScan. Testnet is live now." />
+  <meta name="twitter:image" content="../mobile/src/app/assets/skins/matrix-honey-coin.png" />
+
+  <!-- Telegram / WhatsApp pick up og: tags above -->
+  <meta name="theme-color" content="#39ff14" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" />
+  <style>
+    :root {
+      --green: #39ff14;
+      --green-dim: rgba(57,255,20,0.55);
+      --green-glow: rgba(57,255,20,0.15);
+      --gold: #f5b429;
+      --gold-dim: rgba(245,180,41,0.7);
+      --bg: #040507;
+      --bg2: #07090c;
+      --glass: rgba(255,255,255,0.035);
+      --glass2: rgba(255,255,255,0.06);
+      --border: rgba(57,255,20,0.18);
+      --border2: rgba(255,255,255,0.1);
+      --text: #e8f0e4;
+      --sub: rgba(232,240,228,0.55);
+      --blue: #4a9eff;
+      --purple: #9b72ff;
+      --danger: #ff5a5a;
+      --radius: 16px;
+      --node: http://localhost:3000;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Space Grotesk', sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── MATRIX CANVAS ── */
+    #matrix-canvas {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      z-index: 0;
+      opacity: 0.06;
+      pointer-events: none;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      padding: 0 40px;
+      height: 68px;
+      background: rgba(4,5,7,0.85);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      font-size: 1.2rem;
+      color: var(--green);
+      text-decoration: none;
+      flex: 0 0 auto;
+    }
+    .nav-logo .bee { font-size: 1.6rem; }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      margin-left: 48px;
+      flex: 1;
+    }
+    .nav-links a {
+      color: var(--sub);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      letter-spacing: 0.03em;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--green); }
+    .nav-actions { display: flex; gap: 12px; align-items: center; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 22px;
+      border-radius: 12px;
+      font-weight: 800;
+      font-size: 0.9rem;
+      cursor: pointer;
+      text-decoration: none;
+      border: none;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .btn-green {
+      background: var(--green);
+      color: #000;
+    }
+    .btn-green:hover { box-shadow: 0 0 24px rgba(57,255,20,0.4); transform: translateY(-1px); }
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border2);
+    }
+    .btn-outline:hover { border-color: var(--green); color: var(--green); }
+    .btn-gold {
+      background: var(--gold);
+      color: #000;
+    }
+    .btn-gold:hover { box-shadow: 0 0 24px rgba(245,180,41,0.4); transform: translateY(-1px); }
+
+    /* ── SECTIONS ── */
+    section { position: relative; z-index: 1; }
+
+    .section-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+
+    .section-label {
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      color: var(--green);
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+
+    h1, h2, h3 { line-height: 1.2; }
+
+    /* ── HERO ── */
+    #hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding-top: 68px;
+      overflow: hidden;
+      position: relative;
+    }
+    .hero-bg {
+      position: absolute;
+      inset: 0;
+      background-image: url('../mobile/src/app/assets/skins/matrix-honey-coin.png');
+      background-size: cover;
+      background-position: center;
+      opacity: 0.22;
+      z-index: 0;
+    }
+    .hero-gradient {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(4,5,7,0.3) 0%, rgba(4,5,7,0.7) 60%, rgba(4,5,7,1) 100%);
+      z-index: 1;
+    }
+    .hero-content {
+      position: relative;
+      z-index: 2;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 100px;
+      border: 1px solid var(--border);
+      background: rgba(57,255,20,0.06);
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--green);
+      margin-bottom: 28px;
+    }
+    .hero-badge .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.7); }
+    }
+    h1.hero-title {
+      font-size: clamp(2.8rem, 6vw, 5.5rem);
+      font-weight: 800;
+      line-height: 1.05;
+      margin-bottom: 24px;
+      letter-spacing: -0.02em;
+    }
+    h1.hero-title .accent { color: var(--green); }
+    h1.hero-title .accent-gold { color: var(--gold); }
+    .hero-subtitle {
+      font-size: clamp(1rem, 2vw, 1.25rem);
+      color: var(--sub);
+      max-width: 600px;
+      margin-bottom: 40px;
+      line-height: 1.7;
+    }
+    .hero-actions { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 64px; }
+    .hero-stats {
+      display: flex;
+      gap: 48px;
+      flex-wrap: wrap;
+    }
+    .hero-stat-item { display: flex; flex-direction: column; }
+    .hero-stat-value {
+      font-size: 1.8rem;
+      font-weight: 800;
+      color: var(--green);
+      font-family: 'Space Mono', monospace;
+    }
+    .hero-stat-label { font-size: 0.8rem; color: var(--sub); font-weight: 600; margin-top: 2px; }
+
+    /* ── LIVE TICKER ── */
+    #live-ticker {
+      background: rgba(57,255,20,0.04);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 0;
+      overflow: hidden;
+    }
+    .ticker-inner {
+      display: flex;
+      gap: 0;
+      animation: ticker 30s linear infinite;
+      white-space: nowrap;
+    }
+    .ticker-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 40px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--sub);
+      border-right: 1px solid var(--border);
+    }
+    .ticker-item .val { color: var(--green); font-family: 'Space Mono', monospace; }
+    @keyframes ticker {
+      from { transform: translateX(0); }
+      to { transform: translateX(-50%); }
+    }
+
+    /* ── ABOUT ── */
+    #about { padding: 100px 0; }
+    .about-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 80px;
+      align-items: center;
+    }
+    h2.section-title {
+      font-size: clamp(1.8rem, 3.5vw, 2.8rem);
+      font-weight: 800;
+      margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+    .about-text { color: var(--sub); line-height: 1.8; margin-bottom: 16px; }
+    .about-cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .mini-card {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .mini-card .icon { font-size: 1.8rem; margin-bottom: 8px; }
+    .mini-card h4 { font-size: 0.95rem; font-weight: 800; margin-bottom: 4px; color: var(--green); }
+    .mini-card p { font-size: 0.82rem; color: var(--sub); line-height: 1.5; }
+
+    /* ── FEATURES ── */
+    #features { padding: 100px 0; background: var(--bg2); }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 56px;
+    }
+    .feature-card {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+    .feature-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(57,255,20,0.4);
+      box-shadow: 0 8px 40px rgba(57,255,20,0.08);
+    }
+    .feature-img {
+      width: 100%;
+      height: 200px;
+      object-fit: cover;
+      object-position: top;
+      border-bottom: 1px solid var(--border);
+      background: #0a0d0a;
+    }
+    .feature-body { padding: 22px; }
+    .feature-tag {
+      font-size: 0.7rem;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      color: var(--green);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .feature-body h3 { font-size: 1.1rem; font-weight: 800; margin-bottom: 8px; }
+    .feature-body p { font-size: 0.85rem; color: var(--sub); line-height: 1.6; }
+
+    /* ── NETWORK SPECS ── */
+    #network { padding: 100px 0; }
+    .specs-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      margin-top: 56px;
+      align-items: start;
+    }
+    .specs-table { width: 100%; border-collapse: collapse; }
+    .specs-table tr { border-bottom: 1px solid var(--border); }
+    .specs-table tr:last-child { border-bottom: none; }
+    .specs-table td {
+      padding: 14px 0;
+      font-size: 0.9rem;
+    }
+    .specs-table td:first-child { color: var(--sub); font-weight: 600; width: 55%; }
+    .specs-table td:last-child {
+      color: var(--green);
+      font-weight: 800;
+      font-family: 'Space Mono', monospace;
+      font-size: 0.85rem;
+      text-align: right;
+    }
+    .network-chart {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+    }
+    .chart-title { font-size: 0.85rem; font-weight: 800; color: var(--sub); margin-bottom: 20px; text-transform: uppercase; letter-spacing: 0.1em; }
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .bar-label { font-size: 0.8rem; color: var(--sub); width: 90px; flex-shrink: 0; }
+    .bar-track {
+      flex: 1;
+      height: 8px;
+      background: var(--glass2);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--green), var(--gold));
+    }
+    .bar-val { font-size: 0.78rem; font-weight: 700; color: var(--green); font-family: 'Space Mono', monospace; width: 60px; text-align: right; }
+
+    /* ── TOKENS ── */
+    #tokens { padding: 100px 0; background: var(--bg2); }
+    .tokens-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 56px;
+    }
+    .token-card {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      transition: all 0.2s;
+    }
+    .token-card:hover { border-color: rgba(57,255,20,0.4); box-shadow: 0 8px 40px rgba(57,255,20,0.08); }
+    .token-icon { font-size: 2.8rem; margin-bottom: 12px; }
+    .token-symbol { font-size: 1.3rem; font-weight: 900; color: var(--green); margin-bottom: 4px; }
+    .token-name { font-size: 0.85rem; color: var(--sub); font-weight: 600; margin-bottom: 16px; }
+    .token-desc { font-size: 0.85rem; color: var(--sub); line-height: 1.6; margin-bottom: 16px; }
+    .token-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pill {
+      padding: 3px 10px;
+      border-radius: 100px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      border: 1px solid;
+    }
+    .pill-green { color: var(--green); border-color: rgba(57,255,20,0.3); background: rgba(57,255,20,0.06); }
+    .pill-gold { color: var(--gold); border-color: rgba(245,180,41,0.3); background: rgba(245,180,41,0.06); }
+    .pill-blue { color: var(--blue); border-color: rgba(74,158,255,0.3); background: rgba(74,158,255,0.06); }
+    .pill-purple { color: var(--purple); border-color: rgba(155,114,255,0.3); background: rgba(155,114,255,0.06); }
+
+    /* ── HONEYSCAN ── */
+    #honeyscan { padding: 100px 0; }
+    .scan-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      margin-bottom: 40px;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .scan-stats {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    .scan-stat {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      min-width: 130px;
+    }
+    .scan-stat-label { font-size: 0.72rem; font-weight: 700; color: var(--sub); text-transform: uppercase; letter-spacing: 0.1em; }
+    .scan-stat-value { font-size: 1.5rem; font-weight: 900; color: var(--green); font-family: 'Space Mono', monospace; margin-top: 4px; }
+    .search-bar {
+      display: flex;
+      gap: 0;
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      margin-bottom: 32px;
+    }
+    .search-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 16px 20px;
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.9rem;
+    }
+    .search-input::placeholder { color: var(--sub); font-family: 'Space Grotesk', sans-serif; }
+    .search-btn {
+      padding: 0 24px;
+      background: var(--green);
+      color: #000;
+      font-weight: 900;
+      font-size: 0.9rem;
+      cursor: pointer;
+      border: none;
+      font-family: inherit;
+      transition: background 0.2s;
+    }
+    .search-btn:hover { background: #4aff20; }
+
+    /* Scan result */
+    #scan-result {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 32px;
+      display: none;
+    }
+    #scan-result.visible { display: block; }
+
+    /* Tabs */
+    .scan-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 24px;
+    }
+    .scan-tab {
+      padding: 8px 20px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      font-weight: 800;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--sub);
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+    .scan-tab.active {
+      background: var(--green);
+      color: #000;
+      border-color: var(--green);
+    }
+
+    /* Tx table */
+    .scan-panel { display: none; }
+    .scan-panel.active { display: block; }
+    .tx-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.83rem;
+    }
+    .tx-table th {
+      text-align: left;
+      padding: 10px 12px;
+      color: var(--sub);
+      font-weight: 700;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+    }
+    .tx-table td {
+      padding: 12px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.78rem;
+      vertical-align: middle;
+    }
+    .tx-table tr:last-child td { border-bottom: none; }
+    .tx-table tr:hover td { background: rgba(57,255,20,0.03); }
+    .tx-type {
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      font-family: 'Space Grotesk', sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .tx-type.send { background: rgba(74,158,255,0.15); color: var(--blue); }
+    .tx-type.mint { background: rgba(57,255,20,0.12); color: var(--green); }
+    .tx-type.swap { background: rgba(155,114,255,0.15); color: var(--purple); }
+    .tx-type.stake, .tx-type.claim, .tx-type.unstake, .tx-type.unlock { background: rgba(245,180,41,0.12); color: var(--gold); }
+    .tx-type.lp_add, .tx-type.lp_remove, .tx-type.lp_claim { background: rgba(0,200,180,0.12); color: #00c8b4; }
+    .tx-type.token_send { background: rgba(74,158,255,0.12); color: #60aaff; }
+    .tx-status-ok { color: var(--green); }
+    .tx-status-fail { color: var(--danger); }
+    .tx-status-pending { color: var(--gold); }
+    .mono-addr { color: var(--sub); }
+    .mono-hash { color: rgba(57,255,20,0.6); font-size: 0.72rem; }
+    .mono-amount { color: var(--text); }
+
+    /* Block cards */
+    .blocks-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .block-card {
+      background: var(--glass2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .block-height { font-size: 1.2rem; font-weight: 900; color: var(--green); font-family: 'Space Mono', monospace; }
+    .block-meta { font-size: 0.75rem; color: var(--sub); margin-top: 4px; }
+    .block-txcount {
+      display: inline-block;
+      margin-top: 8px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: rgba(57,255,20,0.1);
+      color: var(--green);
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+    .loading-row { text-align: center; padding: 40px; color: var(--sub); font-size: 0.9rem; }
+
+    /* ── GET STARTED ── */
+    #started { padding: 100px 0; background: var(--bg2); }
+    .started-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 56px;
+    }
+    .step-card {
+      background: var(--glass);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      position: relative;
+    }
+    .step-number {
+      font-size: 3rem;
+      font-weight: 900;
+      color: rgba(57,255,20,0.12);
+      font-family: 'Space Mono', monospace;
+      line-height: 1;
+      margin-bottom: 12px;
+    }
+    .step-card h3 { font-size: 1.05rem; font-weight: 800; margin-bottom: 8px; }
+    .step-card p { font-size: 0.85rem; color: var(--sub); line-height: 1.6; }
+    .step-connector {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--green);
+      font-size: 1.4rem;
+      align-self: center;
+    }
+
+    /* ── LAUNCH CTA ── */
+    #launch-cta {
+      padding: 120px 0;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .cta-glow {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(57,255,20,0.06) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .cta-inner { position: relative; z-index: 1; }
+    .cta-inner h2 { font-size: clamp(2rem, 4vw, 3.5rem); font-weight: 800; margin-bottom: 16px; }
+    .cta-inner p { font-size: 1.1rem; color: var(--sub); max-width: 500px; margin: 0 auto 40px; }
+    .cta-actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+
+    /* ── FOOTER ── */
+    footer {
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      padding: 48px 0 32px;
+    }
+    .footer-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 40px;
+    }
+    .footer-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 48px;
+      margin-bottom: 48px;
+      flex-wrap: wrap;
+    }
+    .footer-brand .logo { font-size: 1.2rem; font-weight: 800; color: var(--green); margin-bottom: 10px; }
+    .footer-brand p { font-size: 0.85rem; color: var(--sub); max-width: 260px; line-height: 1.6; }
+    .footer-col h4 { font-size: 0.8rem; font-weight: 800; color: var(--text); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px; }
+    .footer-col a {
+      display: block;
+      color: var(--sub);
+      text-decoration: none;
+      font-size: 0.88rem;
+      margin-bottom: 10px;
+      transition: color 0.2s;
+    }
+    .footer-col a:hover { color: var(--green); }
+    .footer-bottom {
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .footer-bottom p { font-size: 0.8rem; color: var(--sub); }
+    .testnet-badge {
+      padding: 4px 12px;
+      border-radius: 100px;
+      background: rgba(57,255,20,0.08);
+      border: 1px solid var(--border);
+      color: var(--green);
+      font-size: 0.75rem;
+      font-weight: 800;
+    }
+
+    /* ── DIVIDER ── */
+    .divider { height: 1px; background: linear-gradient(90deg, transparent, var(--border), transparent); }
+
+    /* ── UTILS ── */
+    .text-center { text-align: center; }
+    .text-green { color: var(--green); }
+    .text-gold { color: var(--gold); }
+    .mt-8 { margin-top: 8px; }
+    .mt-16 { margin-top: 16px; }
+    .mb-4 { margin-bottom: 4px; }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; display: inline-block; vertical-align: bottom; }
+
+    /* ── NETWORK HEALTH BAR ── */
+    #net-health-bar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      z-index: 2000;
+      background: transparent;
+      transition: background 0.4s;
+    }
+    #net-health-bar.online { background: linear-gradient(90deg, var(--green), var(--gold), var(--green)); background-size: 200% 100%; animation: netpulse 3s linear infinite; }
+    #net-health-bar.offline { background: var(--danger); }
+    @keyframes netpulse { 0%{background-position:0% 0%} 100%{background-position:200% 0%} }
+
+    /* ── SCROLL ANIMATIONS ── */
+    .fade-in { opacity: 0; transform: translateY(28px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
+    .fade-in-delay-1 { transition-delay: 0.1s; }
+    .fade-in-delay-2 { transition-delay: 0.2s; }
+    .fade-in-delay-3 { transition-delay: 0.3s; }
+
+    /* ── SHARE FAB ── */
+    #share-fab {
+      position: fixed;
+      bottom: 32px; right: 32px;
+      z-index: 900;
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      background: var(--green);
+      color: #000;
+      font-size: 1.3rem;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 24px rgba(57,255,20,0.4);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    #share-fab:hover { transform: scale(1.1); box-shadow: 0 6px 32px rgba(57,255,20,0.6); }
+
+    /* ── SHARE MODAL ── */
+    #share-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(4,5,7,0.85);
+      backdrop-filter: blur(12px);
+      align-items: center;
+      justify-content: center;
+    }
+    #share-modal.open { display: flex; }
+    .share-box {
+      background: #0d1009;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px;
+      width: 100%;
+      max-width: 440px;
+      margin: 20px;
+      box-shadow: 0 24px 80px rgba(57,255,20,0.12);
+    }
+    .share-box h3 { font-size: 1.3rem; font-weight: 900; margin-bottom: 6px; }
+    .share-box p { font-size: 0.88rem; color: var(--sub); margin-bottom: 24px; }
+    .share-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .share-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 16px 8px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--glass);
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.18s;
+      text-decoration: none;
+      font-family: inherit;
+    }
+    .share-btn:hover { border-color: var(--green); background: var(--green-glow); transform: translateY(-2px); }
+    .share-btn .share-icon { font-size: 1.6rem; }
+    .share-btn.share-x:hover { border-color: #fff; background: rgba(255,255,255,0.06); }
+    .share-btn.share-tg:hover { border-color: #29b6f6; background: rgba(41,182,246,0.08); }
+    .share-btn.share-reddit:hover { border-color: #ff4500; background: rgba(255,69,0,0.08); }
+    .share-btn.share-linkedin:hover { border-color: #0077b5; background: rgba(0,119,181,0.08); }
+    .share-btn.share-wa:hover { border-color: #25d366; background: rgba(37,211,102,0.08); }
+    .share-btn.share-discord:hover { border-color: #5865f2; background: rgba(88,101,242,0.08); }
+    .copy-link-bar {
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+    .copy-link-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 10px 14px;
+      color: var(--sub);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.78rem;
+    }
+    .copy-link-btn {
+      padding: 0 18px;
+      background: var(--green);
+      color: #000;
+      font-weight: 900;
+      font-size: 0.82rem;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    .copy-link-btn:hover { background: #4aff20; }
+    .share-close-btn {
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--sub);
+      font-size: 0.85rem;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    .share-close-btn:hover { color: var(--text); border-color: var(--border2); }
+
+    /* ── ROADMAP ── */
+    #roadmap { padding: 100px 0; }
+    .roadmap-timeline {
+      position: relative;
+      margin-top: 56px;
+      padding-left: 28px;
+    }
+    .roadmap-timeline::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 2px;
+      background: linear-gradient(180deg, var(--green), var(--gold), rgba(255,255,255,0.1));
+    }
+    .roadmap-item {
+      position: relative;
+      margin-bottom: 40px;
+    }
+    .roadmap-item::before {
+      content: '';
+      position: absolute;
+      left: -34px; top: 6px;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      border: 2px solid;
+      background: var(--bg);
+    }
+    .roadmap-item.done::before { border-color: var(--green); background: var(--green); box-shadow: 0 0 12px rgba(57,255,20,0.5); }
+    .roadmap-item.active::before { border-color: var(--gold); background: var(--gold); box-shadow: 0 0 12px rgba(245,180,41,0.5); animation: pulse 1.6s ease-in-out infinite; }
+    .roadmap-item.soon::before { border-color: var(--border2); background: var(--bg2); }
+    .roadmap-phase {
+      font-size: 0.7rem;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .roadmap-item.done .roadmap-phase { color: var(--green); }
+    .roadmap-item.active .roadmap-phase { color: var(--gold); }
+    .roadmap-item.soon .roadmap-phase { color: var(--sub); }
+    .roadmap-item h3 { font-size: 1.1rem; font-weight: 800; margin-bottom: 8px; }
+    .roadmap-item.soon h3 { color: var(--sub); }
+    .roadmap-features {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .roadmap-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 64px;
+    }
+
+    /* ── FAQ ── */
+    #faq { padding: 100px 0; background: var(--bg2); }
+    .faq-list { margin-top: 48px; max-width: 800px; margin-left: auto; margin-right: auto; }
+    .faq-item {
+      border-bottom: 1px solid var(--border);
+    }
+    .faq-q {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 4px;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 1rem;
+      user-select: none;
+      gap: 16px;
+    }
+    .faq-q:hover { color: var(--green); }
+    .faq-chevron {
+      flex-shrink: 0;
+      font-size: 1rem;
+      color: var(--sub);
+      transition: transform 0.3s;
+    }
+    .faq-item.open .faq-chevron { transform: rotate(180deg); color: var(--green); }
+    .faq-a {
+      overflow: hidden;
+      max-height: 0;
+      transition: max-height 0.35s ease, padding 0.25s;
+      font-size: 0.92rem;
+      color: var(--sub);
+      line-height: 1.8;
+      padding: 0 4px;
+    }
+    .faq-item.open .faq-a { max-height: 400px; padding-bottom: 20px; }
+
+    /* ── WAITLIST ── */
+    .waitlist-form {
+      display: flex;
+      gap: 0;
+      max-width: 420px;
+      margin: 28px auto 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--glass);
+    }
+    .waitlist-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      padding: 14px 18px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    .waitlist-input::placeholder { color: var(--sub); }
+    .waitlist-btn {
+      padding: 0 22px;
+      background: var(--green);
+      color: #000;
+      font-weight: 900;
+      font-size: 0.88rem;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      white-space: nowrap;
+      transition: background 0.2s;
+    }
+    .waitlist-btn:hover { background: #4aff20; }
+    #waitlist-msg { font-size: 0.82rem; color: var(--green); margin-top: 10px; min-height: 20px; }
+
+    /* ── INLINE SHARE STRIP ── */
+    .share-strip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .share-strip-label { font-size: 0.78rem; color: var(--sub); font-weight: 700; }
+    .share-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 13px;
+      border-radius: 100px;
+      border: 1px solid var(--border2);
+      background: var(--glass);
+      color: var(--sub);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.15s;
+      font-family: inherit;
+    }
+    .share-chip:hover { border-color: var(--green); color: var(--green); }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .about-grid, .specs-grid { grid-template-columns: 1fr; }
+      .features-grid, .tokens-grid, .started-grid { grid-template-columns: 1fr 1fr; }
+      nav { padding: 0 20px; }
+      .nav-links { display: none; }
+      .section-inner { padding: 0 20px; }
+      .hero-content { padding: 0 20px; }
+      .footer-inner { padding: 0 20px; }
+    }
+    @media (max-width: 600px) {
+      .features-grid, .tokens-grid, .started-grid { grid-template-columns: 1fr; }
+      .scan-stats { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Network health bar (3px top stripe) -->
+<div id="net-health-bar"></div>
+
+<!-- Matrix rain canvas -->
+<canvas id="matrix-canvas"></canvas>
+
+<!-- ── NAVIGATION ── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <span class="bee">🍯</span>
+    <span>HIVE Wallet</span>
+  </a>
+  <div class="nav-links">
+    <a href="#about">About</a>
+    <a href="#features">Features</a>
+    <a href="#network">Network</a>
+    <a href="#tokens">Tokens</a>
+    <a href="#honeyscan">HoneyScan</a>
+    <a href="#started">Get Started</a>
+  </div>
+  <div class="nav-actions">
+    <button class="btn btn-outline" onclick="openShare()" style="padding: 8px 16px;" title="Share HIVE Wallet">↗ Share</button>
+    <a href="#honeyscan" class="btn btn-outline">🔍 Explorer</a>
+    <a href="http://localhost:8081" target="_blank" class="btn btn-green">Launch App →</a>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<section id="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-gradient"></div>
+  <div class="hero-content">
+    <div class="hero-badge">
+      <span class="dot"></span>
+      Honey Testnet · Live Now
+    </div>
+    <h1 class="hero-title">
+      The Wallet for the<br />
+      <span class="accent">Honey Network</span><br />
+      <span class="accent-gold">Testnet</span>
+    </h1>
+    <p class="hero-subtitle">
+      HIVE Wallet is a non-custodial, full-featured DeFi wallet built for the Honey Network — featuring real-time Pyth oracle prices, native staking, AMM liquidity pools, and multi-token support. Your keys. Your crypto.
+    </p>
+    <div class="hero-actions">
+      <a href="http://localhost:8081" target="_blank" class="btn btn-green" style="padding: 14px 32px; font-size: 1rem;">
+        🚀 Launch HIVE Wallet
+      </a>
+      <a href="#honeyscan" class="btn btn-outline" style="padding: 14px 32px; font-size: 1rem;">
+        🔍 Open HoneyScan
+      </a>
+      <button class="btn btn-outline" onclick="openShare()" style="padding: 14px 24px; font-size: 1rem;">
+        ↗ Share
+      </button>
+    </div>
+
+    <div class="share-strip" style="margin-bottom: 40px;">
+      <span class="share-strip-label">Share on:</span>
+      <a class="share-chip" onclick="shareX()" href="javascript:void(0)"><span>𝕏</span> X / Twitter</a>
+      <a class="share-chip" onclick="shareTelegram()" href="javascript:void(0)">✈️ Telegram</a>
+      <a class="share-chip" onclick="shareReddit()" href="javascript:void(0)">🔴 Reddit</a>
+      <a class="share-chip" onclick="shareLinkedIn()" href="javascript:void(0)">💼 LinkedIn</a>
+      <a class="share-chip" onclick="copyLink()" href="javascript:void(0)">🔗 Copy Link</a>
+    </div>
+    <div class="hero-stats">
+      <div class="hero-stat-item">
+        <span class="hero-stat-value" id="stat-height">—</span>
+        <span class="hero-stat-label">Chain Height</span>
+      </div>
+      <div class="hero-stat-item">
+        <span class="hero-stat-value" id="stat-block-time">4s</span>
+        <span class="hero-stat-label">Block Time</span>
+      </div>
+      <div class="hero-stat-item">
+        <span class="hero-stat-value" id="stat-hny-price">—</span>
+        <span class="hero-stat-label">HNY Price (USD)</span>
+      </div>
+      <div class="hero-stat-item">
+        <span class="hero-stat-value" id="stat-txs">—</span>
+        <span class="hero-stat-label">Total Transactions</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LIVE TICKER ── -->
+<div id="live-ticker">
+  <div class="ticker-inner" id="ticker-inner">
+    <!-- populated by JS -->
+  </div>
+</div>
+
+<!-- ── ABOUT ── -->
+<section id="about">
+  <div class="section-inner">
+    <div class="about-grid">
+      <div>
+        <div class="section-label">What is Honey Network?</div>
+        <h2 class="section-title">A New Blockchain Built for <span class="text-green">DeFi</span></h2>
+        <p class="about-text">
+          The Honey Network is a custom-built Layer 1 blockchain designed from the ground up for DeFi applications. With 4-second block times, sub-cent gas fees, and native AMM liquidity pools, it delivers the speed and economics that real DeFi demands.
+        </p>
+        <p class="about-text">
+          Built on an Ed25519 BIP39 keypair architecture, every wallet is non-custodial and fully self-sovereign. Your 12-word seed phrase controls your assets — no intermediaries, no custodians.
+        </p>
+        <p class="about-text">
+          Honey Network uses <strong style="color: var(--text)">Pyth Network oracle feeds</strong> for live, manipulation-resistant price data — the same oracle infrastructure used by the largest protocols in DeFi.
+        </p>
+        <div style="margin-top: 28px; display: flex; gap: 16px; flex-wrap: wrap;">
+          <a href="#network" class="btn btn-outline">View Specs →</a>
+          <a href="#started" class="btn btn-green">Get Started →</a>
+        </div>
+      </div>
+      <div class="about-cards">
+        <div class="mini-card">
+          <div class="icon">⚡</div>
+          <h4>4-Second Blocks</h4>
+          <p>Near-instant confirmation with deterministic block production every 4 seconds.</p>
+        </div>
+        <div class="mini-card">
+          <div class="icon">🔑</div>
+          <h4>Non-Custodial</h4>
+          <p>Ed25519 keypairs derived from BIP39 seed phrases. You own your keys entirely.</p>
+        </div>
+        <div class="mini-card">
+          <div class="icon">📡</div>
+          <h4>Pyth Oracle Prices</h4>
+          <p>Real-time, manipulation-resistant price feeds from the Pyth Network oracle.</p>
+        </div>
+        <div class="mini-card">
+          <div class="icon">🌊</div>
+          <h4>Native AMM DEX</h4>
+          <p>Uniswap v2-style AMM built into the protocol. Earn 8% APR in HNY rewards.</p>
+        </div>
+        <div class="mini-card">
+          <div class="icon">🔒</div>
+          <h4>Native Staking</h4>
+          <p>Stake HNY for stHNY and earn 5% APR, compounded continuously on-chain.</p>
+        </div>
+        <div class="mini-card">
+          <div class="icon">🪙</div>
+          <h4>Multi-Token</h4>
+          <p>Send, receive, and swap BTC, ETH, SOL, USDT, USDC, XRP and more natively.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── FEATURES ── -->
+<section id="features">
+  <div class="section-inner">
+    <div class="section-label">Wallet Features</div>
+    <h2 class="section-title">Everything You Need, <span class="text-green">Nothing You Don't</span></h2>
+    <div class="features-grid">
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/hive-wallet-main.png" alt="HIVE Wallet Portfolio" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">Portfolio</div>
+          <h3>Full Multi-Token Portfolio</h3>
+          <p>Track all your HNY, stHNY, LPHNY, BTC, ETH, SOL, USDT, USDC, and XRP balances with live USD valuations in one unified dashboard.</p>
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/send-modal.png" alt="Send Tokens" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">Send & Receive</div>
+          <h3>Priority Fee System</h3>
+          <p>Send any token to any address with QR code scanning, contact book, and granular priority fee selection. Service fees are just 0.0005% of transfer value.</p>
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/swap-modal.png" alt="Token Swap" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">DEX</div>
+          <h3>Native AMM Swaps</h3>
+          <p>Swap between any supported tokens via the built-in AMM with real-time price impact and pool fee display. Multi-hop routing for best execution.</p>
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/staking-lp-pools.png" alt="Staking & LP" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">DeFi</div>
+          <h3>Staking & Liquidity Pools</h3>
+          <p>Stake HNY for 5% APR stHNY rewards, or provide AMM liquidity for 8% APR in HNY. Real-time reward accrual with one-click claims.</p>
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/live-pyth-price-modal.png" alt="Live Prices" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">Oracle</div>
+          <h3>Live Pyth Oracle Prices</h3>
+          <p>Every token displays live USD valuations from Pyth Network feeds, updated every 60 seconds. Tap any asset for detailed price info and quick actions.</p>
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <img src="../mobile/assets/screens/wallet-manager.png" alt="Wallet Manager" class="feature-img" />
+        <div class="feature-body">
+          <div class="feature-tag">Multi-Wallet</div>
+          <h3>HD Wallet Manager</h3>
+          <p>Manage unlimited addresses under one seed phrase. Create, import, rename, or delete wallets instantly. Sub-wallet transfers cost just the base gas fee.</p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Extra feature pills -->
+    <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 40px; justify-content: center;">
+      <span class="pill pill-green" style="padding: 8px 18px; font-size: 0.82rem;">QR Code Scanner</span>
+      <span class="pill pill-green" style="padding: 8px 18px; font-size: 0.82rem;">Contact Book</span>
+      <span class="pill pill-green" style="padding: 8px 18px; font-size: 0.82rem;">Transaction History</span>
+      <span class="pill pill-green" style="padding: 8px 18px; font-size: 0.82rem;">RBF Replace-by-Fee</span>
+      <span class="pill pill-gold" style="padding: 8px 18px; font-size: 0.82rem;">App PIN Lock</span>
+      <span class="pill pill-gold" style="padding: 8px 18px; font-size: 0.82rem;">Seed Phrase Backup</span>
+      <span class="pill pill-blue" style="padding: 8px 18px; font-size: 0.82rem;">Multi-Network</span>
+      <span class="pill pill-blue" style="padding: 8px 18px; font-size: 0.82rem;">Token Faucet</span>
+      <span class="pill pill-purple" style="padding: 8px 18px; font-size: 0.82rem;">LP Position Split</span>
+      <span class="pill pill-purple" style="padding: 8px 18px; font-size: 0.82rem;">stHNY-HNY Pool</span>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── NETWORK SPECS ── -->
+<section id="network">
+  <div class="section-inner">
+    <div class="section-label">Chain Specifications</div>
+    <h2 class="section-title">Honey Network <span class="text-green">Technical Specs</span></h2>
+    <div class="specs-grid">
+      <div>
+        <table class="specs-table">
+          <tr><td>Chain ID</td><td>hny-devnet-1</td></tr>
+          <tr><td>Block Time</td><td>4 seconds</td></tr>
+          <tr><td>Consensus</td><td>Proof-of-Authority (Testnet)</td></tr>
+          <tr><td>Signature Scheme</td><td>Ed25519</td></tr>
+          <tr><td>Key Derivation</td><td>BIP39 / BIP44 HD</td></tr>
+          <tr><td>Base Gas Fee</td><td>0.00000001 HNY</td></tr>
+          <tr><td>Service Fee Rate</td><td>0.0005% of transfer USD</td></tr>
+          <tr><td>Wallet Fee (to holders)</td><td>25% of service fees</td></tr>
+          <tr><td>Tx Expiry (TTL)</td><td>60 seconds</td></tr>
+          <tr><td>Price Oracle</td><td>Pyth Network (live feeds)</td></tr>
+          <tr><td>Mempool</td><td>Priority queue (FIFO + fee)</td></tr>
+          <tr><td>Storage</td><td>SQLite (testnet)</td></tr>
+          <tr><td>Staking APR</td><td>5.00% (stHNY)</td></tr>
+          <tr><td>LP Reward APR</td><td>8.00% (paid in HNY)</td></tr>
+          <tr><td>Swap Pool Fee</td><td>0.10% per swap</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="network-chart">
+          <div class="chart-title">Fee Distribution</div>
+          <div class="bar-row">
+            <div class="bar-label">Fee Vault</div>
+            <div class="bar-track"><div class="bar-fill" style="width: 75%"></div></div>
+            <div class="bar-val">75%</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Wallet Holders</div>
+            <div class="bar-track"><div class="bar-fill" style="width: 25%; background: linear-gradient(90deg, var(--gold), #ffaa00)"></div></div>
+            <div class="bar-val">25%</div>
+          </div>
+
+          <div class="chart-title" style="margin-top: 32px;">Yield Rates</div>
+          <div class="bar-row">
+            <div class="bar-label">LP Pools</div>
+            <div class="bar-track"><div class="bar-fill" style="width: 80%"></div></div>
+            <div class="bar-val">8% APR</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Staking</div>
+            <div class="bar-track"><div class="bar-fill" style="width: 50%; background: linear-gradient(90deg, var(--gold), #ffaa00)"></div></div>
+            <div class="bar-val">5% APR</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Dual (stHNY LP)</div>
+            <div class="bar-track"><div class="bar-fill" style="width: 100%"></div></div>
+            <div class="bar-val">13% APR</div>
+          </div>
+        </div>
+
+        <div class="network-chart" style="margin-top: 20px;">
+          <div class="chart-title">Supported Token Pairs</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;">
+            <span class="pill pill-green">HNY-ETH</span>
+            <span class="pill pill-green">HNY-BTC</span>
+            <span class="pill pill-green">HNY-SOL</span>
+            <span class="pill pill-green">HNY-USDT</span>
+            <span class="pill pill-green">HNY-USDC</span>
+            <span class="pill pill-green">HNY-XRP</span>
+            <span class="pill pill-gold">stHNY-HNY</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── TOKEN ECOSYSTEM ── -->
+<section id="tokens">
+  <div class="section-inner">
+    <div class="section-label">Token Ecosystem</div>
+    <h2 class="section-title">Native <span class="text-green">Token Architecture</span></h2>
+    <div class="tokens-grid">
+
+      <div class="token-card">
+        <div class="token-icon">🍯</div>
+        <div class="token-symbol">HNY</div>
+        <div class="token-name">Honey — Native Gas Token</div>
+        <p class="token-desc">
+          The native currency of the Honey Network. Used for gas fees, service fees, LP rewards, and staking rewards. All transaction fees are denominated in HNY.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-green">Gas Token</span>
+          <span class="pill pill-green">Reward Currency</span>
+          <span class="pill pill-gold">Stakeable</span>
+        </div>
+      </div>
+
+      <div class="token-card">
+        <div class="token-icon">🔒</div>
+        <div class="token-symbol">stHNY</div>
+        <div class="token-name">Staked Honey</div>
+        <p class="token-desc">
+          Earned by staking HNY. stHNY represents your principal plus accrued staking rewards at 5% APR, compounded continuously. Unlocking has a 7-day unbonding period.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-gold">5% APR</span>
+          <span class="pill pill-gold">Liquid Staking</span>
+          <span class="pill pill-green">Swappable</span>
+          <span class="pill pill-blue">LP Eligible</span>
+        </div>
+      </div>
+
+      <div class="token-card">
+        <div class="token-icon">🌊🍯</div>
+        <div class="token-symbol">LPHNY</div>
+        <div class="token-name">Liquidity Provider Token</div>
+        <p class="token-desc">
+          Minted when you provide liquidity to any HNY AMM pool. LPHNY represents your proportional share of pool reserves. Redeem to withdraw liquidity plus accrued HNY rewards.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-blue">8% APR</span>
+          <span class="pill pill-purple">AMM Share</span>
+          <span class="pill pill-green">Transferable</span>
+        </div>
+      </div>
+
+      <div class="token-card">
+        <div class="token-icon">💎</div>
+        <div class="token-symbol">ETH</div>
+        <div class="token-name">Ethereum (Bridged)</div>
+        <p class="token-desc">
+          Native Ethereum representation on Honey Network. Fully swappable, sendable, and usable as LP pair with HNY. Live Pyth oracle price feeds.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-blue">Pyth Oracle</span>
+          <span class="pill pill-green">LP Eligible</span>
+        </div>
+      </div>
+
+      <div class="token-card">
+        <div class="token-icon">🟡</div>
+        <div class="token-symbol">BTC</div>
+        <div class="token-name">Bitcoin (Bridged)</div>
+        <p class="token-desc">
+          Bitcoin representation on Honey Network. Swap seamlessly to HNY or any other token via the built-in AMM with real-time BTC/USD Pyth pricing.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-gold">Pyth Oracle</span>
+          <span class="pill pill-green">LP Eligible</span>
+        </div>
+      </div>
+
+      <div class="token-card">
+        <div class="token-icon">💵</div>
+        <div class="token-symbol">USDT / USDC</div>
+        <div class="token-name">Stablecoins</div>
+        <p class="token-desc">
+          USD-pegged stablecoins for stable value storage, trading, and LP positions on Honey Network. Ideal for low-volatility liquidity provision paired with HNY.
+        </p>
+        <div class="token-pills">
+          <span class="pill pill-green">Stable</span>
+          <span class="pill pill-blue">LP Eligible</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── HONEYSCAN ── -->
+<section id="honeyscan">
+  <div class="section-inner">
+    <div class="scan-header">
+      <div>
+        <div class="section-label">Block Explorer</div>
+        <h2 class="section-title" style="margin-bottom: 0;">🔍 HoneyScan</h2>
+      </div>
+      <div class="scan-stats">
+        <div class="scan-stat">
+          <div class="scan-stat-label">Block Height</div>
+          <div class="scan-stat-value" id="scan-height">—</div>
+        </div>
+        <div class="scan-stat">
+          <div class="scan-stat-label">Next Block</div>
+          <div class="scan-stat-value" id="scan-next">—</div>
+        </div>
+        <div class="scan-stat">
+          <div class="scan-stat-label">Total Txs</div>
+          <div class="scan-stat-value" id="scan-total-txs">—</div>
+        </div>
+        <div class="scan-stat">
+          <div class="scan-stat-label">Accounts</div>
+          <div class="scan-stat-value" id="scan-accounts">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search bar -->
+    <div class="search-bar">
+      <input
+        type="text"
+        class="search-input"
+        id="scan-search-input"
+        placeholder="Search by wallet address, transaction hash, or block height…"
+      />
+      <button class="search-btn" onclick="doSearch()">Search</button>
+    </div>
+
+    <!-- Search result -->
+    <div id="scan-result">
+      <div id="scan-result-inner"></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="scan-tabs">
+      <button class="scan-tab active" onclick="switchTab('txs', this)">Recent Transactions</button>
+      <button class="scan-tab" onclick="switchTab('blocks', this)">Recent Blocks</button>
+    </div>
+
+    <!-- Tx panel -->
+    <div class="scan-panel active" id="panel-txs">
+      <div style="overflow-x: auto;">
+        <table class="tx-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Hash</th>
+              <th>From</th>
+              <th>To</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Age</th>
+            </tr>
+          </thead>
+          <tbody id="tx-tbody">
+            <tr><td colspan="7" class="loading-row">Connecting to Honey Network…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Blocks panel -->
+    <div class="scan-panel" id="panel-blocks">
+      <div class="blocks-grid" id="blocks-grid">
+        <div class="loading-row" style="grid-column: 1/-1;">Loading blocks…</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 16px; text-align: center;">
+      <button class="btn btn-outline" onclick="refreshScan()" style="font-size: 0.85rem; padding: 8px 20px;">↻ Refresh</button>
+      <span style="color: var(--sub); font-size: 0.78rem; margin-left: 16px;">Auto-refreshes every 8 seconds</span>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── ROADMAP ── -->
+<section id="roadmap">
+  <div class="section-inner">
+    <div class="section-label">What's Next</div>
+    <h2 class="section-title">Honey Network <span class="text-green">Roadmap</span></h2>
+
+    <div class="roadmap-grid">
+      <div class="roadmap-timeline">
+
+        <div class="roadmap-item done fade-in">
+          <div class="roadmap-phase">Phase 1 — Complete ✓</div>
+          <h3>Testnet Genesis</h3>
+          <div class="roadmap-features">
+            <span class="pill pill-green">Block Producer</span>
+            <span class="pill pill-green">HNY Token</span>
+            <span class="pill pill-green">Send / Receive</span>
+            <span class="pill pill-green">Priority Fee System</span>
+            <span class="pill pill-green">Transaction History</span>
+            <span class="pill pill-green">RBF Replace-by-Fee</span>
+          </div>
+        </div>
+
+        <div class="roadmap-item done fade-in fade-in-delay-1">
+          <div class="roadmap-phase">Phase 2 — Complete ✓</div>
+          <h3>DeFi Core</h3>
+          <div class="roadmap-features">
+            <span class="pill pill-green">Native AMM DEX</span>
+            <span class="pill pill-green">HNY Staking (stHNY)</span>
+            <span class="pill pill-green">LP Pools (LPHNY)</span>
+            <span class="pill pill-green">Multi-Token Portfolio</span>
+            <span class="pill pill-green">Pyth Oracle Prices</span>
+            <span class="pill pill-green">Multi-Hop Swaps</span>
+          </div>
+        </div>
+
+        <div class="roadmap-item done fade-in fade-in-delay-2">
+          <div class="roadmap-phase">Phase 3 — Complete ✓</div>
+          <h3>Wallet Features</h3>
+          <div class="roadmap-features">
+            <span class="pill pill-green">HD Multi-Wallet</span>
+            <span class="pill pill-green">BIP39 Seed Phrase</span>
+            <span class="pill pill-green">QR Code Scanner</span>
+            <span class="pill pill-green">Contact Book</span>
+            <span class="pill pill-green">App PIN Lock</span>
+            <span class="pill pill-green">HoneyScan Explorer</span>
+            <span class="pill pill-green">stHNY-HNY LP Pool</span>
+            <span class="pill pill-green">LP Reward Claims</span>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="roadmap-timeline">
+
+        <div class="roadmap-item active fade-in">
+          <div class="roadmap-phase">Phase 4 — In Progress 🔥</div>
+          <h3>Testnet Hardening</h3>
+          <div class="roadmap-features">
+            <span class="pill pill-gold">Email / Social Login</span>
+            <span class="pill pill-gold">Import Wallet</span>
+            <span class="pill pill-gold">Custom Networks</span>
+            <span class="pill pill-gold">Mobile App (iOS)</span>
+            <span class="pill pill-gold">Mobile App (Android)</span>
+            <span class="pill pill-gold">HoneyScan v2</span>
+          </div>
+        </div>
+
+        <div class="roadmap-item soon fade-in fade-in-delay-1">
+          <div class="roadmap-phase">Phase 5 — Coming Soon</div>
+          <h3>Mainnet Preparation</h3>
+          <div class="roadmap-features">
+            <span class="pill pill-blue">PoS Consensus</span>
+            <span class="pill pill-blue">Validator Nodes</span>
+            <span class="pill pill-blue">Ledger Hardware Wallet</span>
+            <span class="pill pill-blue">Governance Voting</span>
+            <span class="pill pill-blue">Cross-Chain Bridge</span>
+            <span class="pill pill-blue">Token Smart Contracts</span>
+          </div>
+        </div>
+
+        <div class="roadmap-item soon fade-in fade-in-delay-2">
+          <div class="roadmap-phase">Phase 6 — Future</div>
+          <h3>Honey Network Mainnet</h3>
+          <div class="roadmap-features">
+            <span class="pill" style="color:var(--sub);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">Public Mainnet Launch</span>
+            <span class="pill" style="color:var(--sub);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">HNY Public Sale</span>
+            <span class="pill" style="color:var(--sub);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">DEX Aggregator</span>
+            <span class="pill" style="color:var(--sub);border-color:rgba(255,255,255,0.1);background:rgba(255,255,255,0.03);">NFT Protocol</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── GET STARTED ── -->
+<section id="started">
+  <div class="section-inner">
+    <div class="section-label">Join the Testnet</div>
+    <h2 class="section-title text-center">Get Started in <span class="text-green">3 Steps</span></h2>
+    <div class="started-grid">
+      <div class="step-card">
+        <div class="step-number">01</div>
+        <h3>Create Your Wallet</h3>
+        <p>Open HIVE Wallet, create a new wallet and securely save your 12-word seed phrase. Your keys are stored locally and never leave your device.</p>
+        <div style="margin-top: 16px;">
+          <a href="http://localhost:8081/create-wallet" target="_blank" class="btn btn-outline" style="font-size: 0.82rem; padding: 8px 16px;">Create Wallet →</a>
+        </div>
+      </div>
+      <div class="step-card">
+        <div class="step-number">02</div>
+        <h3>Claim Testnet HNY</h3>
+        <p>Use the built-in Token Faucet to claim free testnet HNY, ETH, BTC, SOL, USDT, USDC and XRP. No real funds required — this is a testnet.</p>
+        <div style="margin-top: 16px;">
+          <a href="http://localhost:8081" target="_blank" class="btn btn-green" style="font-size: 0.82rem; padding: 8px 16px;">Open Faucet →</a>
+        </div>
+      </div>
+      <div class="step-card">
+        <div class="step-number">03</div>
+        <h3>Explore DeFi</h3>
+        <p>Swap tokens, stake HNY for stHNY rewards, add liquidity to earn 8% APR, and monitor your positions with live Pyth oracle price feeds.</p>
+        <div style="margin-top: 16px;">
+          <a href="http://localhost:8081" target="_blank" class="btn btn-outline" style="font-size: 0.82rem; padding: 8px 16px;">Start Trading →</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- Faucet screenshot -->
+    <div style="margin-top: 64px; background: var(--glass); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; text-align: center;">
+      <div class="section-label" style="text-align: center; margin-bottom: 20px;">Testnet Faucet</div>
+      <img src="../mobile/assets/screens/token-faucet-modal.png" alt="Token Faucet" style="max-width: 100%; width: 600px; border-radius: 12px; border: 1px solid var(--border);" />
+      <p style="margin-top: 20px; color: var(--sub); font-size: 0.9rem; max-width: 500px; margin-left: auto; margin-right: auto;">
+        The testnet faucet lets you mint any supported token for free. Use it to explore all wallet features without risking real funds.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── FAQ ── -->
+<section id="faq">
+  <div class="section-inner">
+    <div class="section-label text-center">Got Questions?</div>
+    <h2 class="section-title text-center">Frequently Asked <span class="text-green">Questions</span></h2>
+    <div class="faq-list">
+
+      <div class="faq-item fade-in">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>What is the Honey Network?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          The Honey Network is a custom Layer 1 blockchain built specifically for DeFi. It features 4-second block times, sub-cent gas fees, a native AMM DEX, liquid staking, and real-time price feeds from the Pyth Network oracle. The current release is a public testnet — all tokens are for testing only and have no real-world value.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-1">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>Is HIVE Wallet non-custodial? Who holds my keys?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Yes — HIVE Wallet is fully non-custodial. Your private keys are derived from a 12-word BIP39 seed phrase and are stored locally on your device using encrypted secure storage. Your keys never leave your device and no server ever has access to them. Your seed phrase is the only way to recover your wallets — store it somewhere safe.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-2">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>What are the transaction fees on Honey Network?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Gas fees start at 0.00000001 HNY (one satoshi equivalent), making them effectively free for most users. A service fee of 0.0005% of the transfer USD value is charged on sends and swaps — this is far below any major blockchain. Of each service fee collected, 75% goes to the network fee vault and 25% is credited to HIVE Wallet holders. Transfers between your own sub-wallets cost only the base gas fee.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>How does staking work? What is stHNY?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Stake your HNY to receive stHNY — a liquid staking token representing your principal plus continuously accruing rewards at 5% APR. Unlike traditional staking, stHNY is freely swappable and can also be deposited into the stHNY-HNY liquidity pool for additional 8% APR in HNY rewards (13% combined). To unstake, initiate an unlock and wait 7 days for the unbonding period.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-1">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>What are liquidity pools and LPHNY?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Liquidity pools are token pairs (e.g., HNY-ETH, HNY-BTC) that power the native AMM DEX. When you deposit tokens into a pool you receive LPHNY — an LP token representing your proportional share of the pool. LPHNY accrues 8% APR in HNY rewards in real-time, claimable at any time. You can also send LPHNY to another wallet, which automatically splits your LP position proportionally across pools.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-2">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>How does the swap work? What is price impact?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Swaps use a Uniswap v2-style constant product AMM (x*y=k). The swap price is determined by the current pool reserves — the larger your swap relative to the pool, the higher your price impact. A 0.10% pool fee is charged on each swap and stays in the pool, earning for liquidity providers. Multi-hop routing is supported, allowing swaps between token pairs that don't share a direct pool.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>Where do the live token prices come from?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          Real-time prices for BTC, ETH, SOL, XRP, and other tokens come from the <strong style="color:var(--text)">Pyth Network</strong> — the same oracle infrastructure used by Solana DeFi, Synthetix, Aave, and over 200 other protocols. Prices update every ~60 seconds and are used for USD valuations in your portfolio, service fee calculations, and LP position values. HNY pricing is set by the protocol for testnet purposes.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-1">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>Can I use HIVE Wallet on my phone?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          HIVE Wallet is built with React Native + Expo, which means native iOS and Android apps are in development. For now, the web app at localhost:8081 works on both desktop and mobile browsers. The mobile-optimized interface is fully touch-friendly. Native app store releases are planned for Phase 4 of the roadmap.
+        </div>
+      </div>
+
+      <div class="faq-item fade-in fade-in-delay-2">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          <span>Are testnet tokens worth anything?</span>
+          <span class="faq-chevron">▼</span>
+        </div>
+        <div class="faq-a">
+          No — all tokens on the Honey Network testnet (HNY, stHNY, LPHNY, ETH, BTC, SOL, USDT, USDC, XRP) are testnet tokens for development and testing purposes only. They have zero real-world monetary value. The faucet lets you mint unlimited tokens to explore the wallet's features freely. Real token economics will be established at mainnet launch.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ── LAUNCH CTA ── -->
+<section id="launch-cta">
+  <div class="cta-glow"></div>
+  <div class="section-inner">
+    <div class="cta-inner">
+      <div class="section-label" style="text-align: center;">Ready?</div>
+      <h2>Launch the <span class="text-green">HIVE Wallet</span></h2>
+      <p>Connect to the Honey Network testnet and explore the future of decentralized finance. No downloads required for the web app.</p>
+      <div class="cta-actions">
+        <a href="http://localhost:8081" target="_blank" class="btn btn-green" style="padding: 16px 40px; font-size: 1.05rem;">
+          🚀 Open HIVE Wallet
+        </a>
+        <a href="#honeyscan" class="btn btn-outline" style="padding: 16px 40px; font-size: 1.05rem;">
+          🔍 Open HoneyScan
+        </a>
+        <button class="btn btn-outline" onclick="openShare()" style="padding: 16px 28px; font-size: 1.05rem;">
+          ↗ Share
+        </button>
+      </div>
+
+      <!-- Mainnet waitlist -->
+      <div style="margin-top: 52px; padding-top: 52px; border-top: 1px solid var(--border);">
+        <p style="font-size: 0.85rem; color: var(--sub); margin-bottom: 4px;">Get notified when Honey Network mainnet launches</p>
+        <form class="waitlist-form" onsubmit="joinWaitlist(event)">
+          <input type="email" class="waitlist-input" id="waitlist-email" placeholder="your@email.com" required />
+          <button type="submit" class="waitlist-btn">Notify Me</button>
+        </form>
+        <div id="waitlist-msg"></div>
+      </div>
+
+      <!-- Share strip -->
+      <div style="margin-top: 40px; display: flex; justify-content: center;">
+        <div class="share-strip">
+          <span class="share-strip-label">Share the testnet:</span>
+          <a class="share-chip" onclick="shareX()" href="javascript:void(0)"><span>𝕏</span> Twitter</a>
+          <a class="share-chip" onclick="shareTelegram()" href="javascript:void(0)">✈️ Telegram</a>
+          <a class="share-chip" onclick="shareReddit()" href="javascript:void(0)">🔴 Reddit</a>
+          <a class="share-chip" onclick="copyLink()" href="javascript:void(0)">🔗 Copy Link</a>
+        </div>
+      </div>
+
+      <p style="margin-top: 24px; font-size: 0.8rem; color: rgba(255,255,255,0.3);">
+        HIVE Wallet runs on the Honey Network Testnet. All tokens are testnet tokens with no real-world value.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <div class="logo">🍯 HIVE Wallet</div>
+        <p>The official wallet and gateway to the Honey Network — a next-generation blockchain built for DeFi.</p>
+        <div style="margin-top: 16px;"><span class="testnet-badge">● Testnet Live</span></div>
+      </div>
+      <div class="footer-col">
+        <h4>Wallet</h4>
+        <a href="http://localhost:8081" target="_blank">Launch App</a>
+        <a href="http://localhost:8081/create-wallet" target="_blank">Create Wallet</a>
+        <a href="http://localhost:8081/import-wallet" target="_blank">Import Wallet</a>
+        <a href="#features">Features</a>
+      </div>
+      <div class="footer-col">
+        <h4>Network</h4>
+        <a href="#network">Chain Specs</a>
+        <a href="#tokens">Token Ecosystem</a>
+        <a href="#honeyscan">HoneyScan Explorer</a>
+        <a href="#about">About</a>
+      </div>
+      <div class="footer-col">
+        <h4>DeFi</h4>
+        <a href="#features">Native AMM Swaps</a>
+        <a href="#features">HNY Staking (5% APR)</a>
+        <a href="#features">Liquidity Pools (8% APR)</a>
+        <a href="#tokens">Token List</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <p>© 2026 HIVE Wallet · Honey Network Testnet. All testnet tokens have no real-world value.</p>
+      <p style="color: rgba(255,255,255,0.25); font-size: 0.75rem; font-family: 'Space Mono', monospace;">Chain: hny-devnet-1 · Node: localhost:3000</p>
+    </div>
+  </div>
+</footer>
+
+<!-- ── FLOATING SHARE FAB ── -->
+<button id="share-fab" onclick="openShare()" title="Share HIVE Wallet">↗</button>
+
+<!-- ── SHARE MODAL ── -->
+<div id="share-modal" onclick="closeShareOnBg(event)">
+  <div class="share-box">
+    <h3>🍯 Share HIVE Wallet</h3>
+    <p>Tell your network about the Honey Network testnet launch!</p>
+
+    <div class="share-grid">
+      <a class="share-btn share-x" onclick="shareX()" href="javascript:void(0)">
+        <span class="share-icon">𝕏</span>
+        <span>X / Twitter</span>
+      </a>
+      <a class="share-btn share-tg" onclick="shareTelegram()" href="javascript:void(0)">
+        <span class="share-icon">✈️</span>
+        <span>Telegram</span>
+      </a>
+      <a class="share-btn share-reddit" onclick="shareReddit()" href="javascript:void(0)">
+        <span class="share-icon">🔴</span>
+        <span>Reddit</span>
+      </a>
+      <a class="share-btn share-linkedin" onclick="shareLinkedIn()" href="javascript:void(0)">
+        <span class="share-icon">💼</span>
+        <span>LinkedIn</span>
+      </a>
+      <a class="share-btn share-wa" onclick="shareWhatsApp()" href="javascript:void(0)">
+        <span class="share-icon">💬</span>
+        <span>WhatsApp</span>
+      </a>
+      <a class="share-btn share-discord" onclick="shareDiscord()" href="javascript:void(0)">
+        <span class="share-icon">🎮</span>
+        <span>Discord</span>
+      </a>
+    </div>
+
+    <div class="copy-link-bar">
+      <input type="text" class="copy-link-input" id="share-link-input" value="https://honey.network" readonly />
+      <button class="copy-link-btn" onclick="copyLink()">Copy Link</button>
+    </div>
+
+    <button class="share-close-btn" onclick="closeShare()">✕ Close</button>
+  </div>
+</div>
+
+<script>
+  /* ── CONFIG ── */
+  const NODE = 'http://localhost:3000';
+
+  /* ── MATRIX RAIN ── */
+  (function() {
+    const canvas = document.getElementById('matrix-canvas');
+    const ctx = canvas.getContext('2d');
+    let cols, drops;
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$%&♦♣★☀⚡🍯';
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      cols = Math.floor(canvas.width / 16);
+      drops = Array(cols).fill(1);
+    }
+    function draw() {
+      ctx.fillStyle = 'rgba(4,5,7,0.05)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#39ff14';
+      ctx.font = '13px Space Mono, monospace';
+      drops.forEach((y, i) => {
+        const ch = chars[Math.floor(Math.random() * chars.length)];
+        ctx.fillText(ch, i * 16, y * 16);
+        if (y * 16 > canvas.height && Math.random() > 0.975) drops[i] = 0;
+        drops[i]++;
+      });
+    }
+    resize();
+    window.addEventListener('resize', resize);
+    setInterval(draw, 60);
+  })();
+
+  /* ── HELPERS ── */
+  function shortAddr(a) {
+    if (!a) return '—';
+    return a.length > 16 ? a.slice(0, 8) + '…' + a.slice(-6) : a;
+  }
+  function shortHash(h) {
+    if (!h) return '—';
+    return h.slice(0, 10) + '…' + h.slice(-6);
+  }
+  function timeAgo(ms) {
+    const s = Math.floor((Date.now() - ms) / 1000);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
+  }
+  function fmtNum(n, d = 4) {
+    return Number(n).toLocaleString('en-US', { maximumFractionDigits: d });
+  }
+  function txTypeClass(t) {
+    return (t || '').replace(/_/g, '_').toLowerCase();
+  }
+  function txTypeLabel(t) {
+    const map = {
+      send: 'Send', mint: 'Mint', stake: 'Stake', unstake: 'Unstake',
+      unlock: 'Unlock', claim: 'Claim', token_send: 'Token Send',
+      swap: 'Swap', lp_add: 'LP Add', lp_remove: 'LP Remove', lp_claim: 'LP Claim',
+    };
+    return map[t] || t || '?';
+  }
+  function statusClass(s) {
+    if (s === 'confirmed') return 'tx-status-ok';
+    if (s === 'failed') return 'tx-status-fail';
+    return 'tx-status-pending';
+  }
+  function statusLabel(s) {
+    if (s === 'confirmed') return '✓';
+    if (s === 'failed') return '✗';
+    return '…';
+  }
+
+  /* ── LIVE STATUS ── */
+  async function fetchStatus() {
+    try {
+      const r = await fetch(NODE + '/status');
+      const d = await r.json();
+      document.getElementById('stat-height').textContent = d.chainHeight?.toLocaleString() || '—';
+      document.getElementById('scan-height').textContent = d.chainHeight?.toLocaleString() || '—';
+      const sec = Math.ceil((d.msUntilNextBlock || 0) / 1000);
+      document.getElementById('stat-block-time').textContent = d.blockTimeMs ? (d.blockTimeMs / 1000) + 's' : '4s';
+      document.getElementById('scan-next').textContent = sec + 's';
+      // HNY price
+      const hnyPrice = d.tokenPricesUSD?.HNY;
+      if (hnyPrice) document.getElementById('stat-hny-price').textContent = '$' + fmtNum(hnyPrice, 4);
+      // Update ticker
+      buildTicker(d.tokenPricesUSD || {});
+    } catch(e) {
+      document.getElementById('scan-next').textContent = 'offline';
+    }
+  }
+
+  /* ── TICKER ── */
+  function buildTicker(prices) {
+    const tokens = [
+      { sym: 'HNY', icon: '🍯' }, { sym: 'BTC', icon: '🟡' }, { sym: 'ETH', icon: '💎' },
+      { sym: 'SOL', icon: '☀️' }, { sym: 'USDT', icon: '💵' }, { sym: 'USDC', icon: '💚' }, { sym: 'XRP', icon: '🌊' }
+    ];
+    const el = document.getElementById('ticker-inner');
+    const items = tokens.filter(t => prices[t.sym]).map(t =>
+      `<span class="ticker-item">${t.icon} ${t.sym} <span class="val">$${fmtNum(prices[t.sym], prices[t.sym] < 1 ? 6 : 2)}</span></span>`
+    ).join('');
+    el.innerHTML = items + items; // duplicate for seamless loop
+  }
+
+  /* ── HONEYSCAN ── */
+  async function refreshScan() {
+    try {
+      const r = await fetch(NODE + '/honeyscan/recent?limit=25');
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error);
+
+      document.getElementById('stat-txs').textContent = (d.totalTxs || 0).toLocaleString();
+      document.getElementById('scan-total-txs').textContent = (d.totalTxs || 0).toLocaleString();
+      document.getElementById('scan-accounts').textContent = (d.totalAccounts || 0).toLocaleString();
+
+      // Tx table
+      const tbody = document.getElementById('tx-tbody');
+      if (!d.txs || d.txs.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="loading-row">No transactions yet</td></tr>';
+      } else {
+        tbody.innerHTML = d.txs.map(tx => `
+          <tr>
+            <td><span class="tx-type ${txTypeClass(tx.type)}">${txTypeLabel(tx.type)}</span></td>
+            <td><span class="mono-hash truncate" title="${tx.hash}">${shortHash(tx.hash || tx.id)}</span></td>
+            <td><span class="mono-addr truncate" title="${tx.fromWallet}">${shortAddr(tx.fromWallet)}</span></td>
+            <td><span class="mono-addr truncate" title="${tx.toWallet}">${shortAddr(tx.toWallet)}</span></td>
+            <td><span class="mono-amount">${fmtNum(tx.amount || 0, 4)} HNY</span></td>
+            <td><span class="${statusClass(tx.status)}">${statusLabel(tx.status)}</span></td>
+            <td style="color: var(--sub); font-size: 0.72rem;">${timeAgo(tx.timestampMs)}</td>
+          </tr>
+        `).join('');
+      }
+
+      // Blocks grid
+      const grid = document.getElementById('blocks-grid');
+      if (!d.blocks || d.blocks.length === 0) {
+        grid.innerHTML = '<div class="loading-row" style="grid-column:1/-1">No blocks found</div>';
+      } else {
+        grid.innerHTML = d.blocks.map(b => `
+          <div class="block-card">
+            <div class="block-height">#${b.height.toLocaleString()}</div>
+            <div class="block-meta">${timeAgo(b.timestampMs)}</div>
+            <div class="block-meta" style="font-family: 'Space Mono'; font-size: 0.68rem; color: rgba(57,255,20,0.45); margin-top: 4px;">${(b.hash || '').slice(0,14)}…</div>
+            <div><span class="block-txcount">${b.txCount || 0} txs</span></div>
+          </div>
+        `).join('');
+      }
+    } catch(e) {
+      document.getElementById('tx-tbody').innerHTML = `<tr><td colspan="7" class="loading-row" style="color: var(--danger);">⚠ Could not connect to Honey Network node at ${NODE}</td></tr>`;
+    }
+  }
+
+  /* ── SEARCH ── */
+  async function doSearch() {
+    const q = document.getElementById('scan-search-input').value.trim();
+    if (!q) return;
+    const resultEl = document.getElementById('scan-result');
+    const inner = document.getElementById('scan-result-inner');
+    resultEl.classList.add('visible');
+    inner.innerHTML = '<div class="loading-row">Searching…</div>';
+    try {
+      const r = await fetch(`${NODE}/honeyscan/search/${encodeURIComponent(q)}`);
+      const d = await r.json();
+      if (d.type === 'wallet') {
+        inner.innerHTML = `
+          <div style="margin-bottom: 16px;">
+            <div class="section-label mb-4">Wallet Address</div>
+            <div style="font-family: 'Space Mono', monospace; color: var(--green); font-size: 1rem; word-break: break-all; margin-bottom: 12px;">${d.wallet}</div>
+            <div style="display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 16px;">
+              <div><div style="color: var(--sub); font-size: 0.78rem; font-weight: 700;">HNY Balance</div><div style="color: var(--green); font-weight: 900; font-size: 1.2rem;">${fmtNum(d.balance, 4)} HNY</div></div>
+              <div><div style="color: var(--sub); font-size: 0.78rem; font-weight: 700;">Nonce</div><div style="color: var(--text); font-weight: 900; font-size: 1.2rem;">${d.nonce}</div></div>
+              ${(d.tokenBalances || []).map(t => `<div><div style="color: var(--sub); font-size: 0.78rem; font-weight: 700;">${t.tokenSymbol}</div><div style="color: var(--text); font-weight: 800; font-size: 1rem;">${fmtNum(t.balance, 4)}</div></div>`).join('')}
+            </div>
+          </div>
+          <div style="font-weight: 800; color: var(--sub); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px;">Recent Transactions (${(d.txs || []).length})</div>
+          <div style="overflow-x:auto;"><table class="tx-table"><thead><tr><th>Type</th><th>Hash</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Age</th></tr></thead>
+          <tbody>${(d.txs || []).map(tx => `<tr>
+            <td><span class="tx-type ${txTypeClass(tx.type)}">${txTypeLabel(tx.type)}</span></td>
+            <td><span class="mono-hash">${shortHash(tx.hash||tx.id)}</span></td>
+            <td><span class="mono-addr">${shortAddr(tx.fromWallet)}</span></td>
+            <td><span class="mono-addr">${shortAddr(tx.toWallet)}</span></td>
+            <td><span class="mono-amount">${fmtNum(tx.amount||0,4)} HNY</span></td>
+            <td><span class="${statusClass(tx.status)}">${statusLabel(tx.status)}</span></td>
+            <td style="color:var(--sub);font-size:0.72rem;">${timeAgo(tx.timestampMs)}</td>
+          </tr>`).join('')}</tbody></table></div>
+        `;
+      } else if (d.type === 'tx') {
+        const tx = d.tx;
+        inner.innerHTML = `
+          <div class="section-label mb-4">Transaction</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:0.88rem;">
+            <div><span style="color:var(--sub)">Hash</span><br/><span style="font-family:'Space Mono';color:var(--green);word-break:break-all;">${tx.hash||tx.id}</span></div>
+            <div><span style="color:var(--sub)">Type</span><br/><span class="tx-type ${txTypeClass(tx.type)}">${txTypeLabel(tx.type)}</span></div>
+            <div><span style="color:var(--sub)">From</span><br/><span style="font-family:'Space Mono';font-size:0.8rem;">${tx.fromWallet}</span></div>
+            <div><span style="color:var(--sub)">To</span><br/><span style="font-family:'Space Mono';font-size:0.8rem;">${tx.toWallet}</span></div>
+            <div><span style="color:var(--sub)">Amount</span><br/><span style="color:var(--green);font-weight:900;">${fmtNum(tx.amount,4)} HNY</span></div>
+            <div><span style="color:var(--sub)">Status</span><br/><span class="${statusClass(tx.status)}" style="font-weight:800;">${tx.status}</span></div>
+            <div><span style="color:var(--sub)">Gas Fee</span><br/>${fmtNum(tx.gasFee,8)} HNY</div>
+            <div><span style="color:var(--sub)">Service Fee</span><br/>${fmtNum(tx.serviceFee,8)} HNY</div>
+            <div><span style="color:var(--sub)">Block</span><br/>#${tx.blockHeight||'pending'}</div>
+            <div><span style="color:var(--sub)">Time</span><br/>${timeAgo(tx.timestampMs)}</div>
+          </div>
+        `;
+      } else if (d.type === 'block') {
+        const b = d.block;
+        inner.innerHTML = `
+          <div class="section-label mb-4">Block #${b.height}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:0.88rem;margin-bottom:16px;">
+            <div><span style="color:var(--sub)">Hash</span><br/><span style="font-family:'Space Mono';color:var(--green);word-break:break-all;font-size:0.8rem;">${b.hash}</span></div>
+            <div><span style="color:var(--sub)">Transactions</span><br/><span style="font-weight:900;color:var(--green);">${b.txCount}</span></div>
+            <div><span style="color:var(--sub)">Time</span><br/>${timeAgo(b.timestampMs)}</div>
+          </div>
+          ${d.txs?.length ? `<div style="overflow-x:auto;"><table class="tx-table"><thead><tr><th>Type</th><th>Hash</th><th>From</th><th>Amount</th><th>Status</th></tr></thead><tbody>
+          ${d.txs.map(tx=>`<tr><td><span class="tx-type ${txTypeClass(tx.type)}">${txTypeLabel(tx.type)}</span></td><td><span class="mono-hash">${shortHash(tx.hash||tx.id)}</span></td><td><span class="mono-addr">${shortAddr(tx.fromWallet)}</span></td><td>${fmtNum(tx.amount,4)} HNY</td><td><span class="${statusClass(tx.status)}">${statusLabel(tx.status)}</span></td></tr>`).join('')}
+          </tbody></table></div>` : ''}
+        `;
+      } else {
+        inner.innerHTML = `<div style="text-align:center;padding:32px;color:var(--sub);">No results found for <strong style="color:var(--text)">"${q}"</strong></div>`;
+      }
+    } catch(e) {
+      inner.innerHTML = `<div style="text-align:center;padding:32px;color:var(--danger);">⚠ Search failed — is the Honey Network node running?</div>`;
+    }
+  }
+
+  // Search on Enter
+  document.getElementById('scan-search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doSearch();
+  });
+
+  /* ── TABS ── */
+  function switchTab(name, btn) {
+    document.querySelectorAll('.scan-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.scan-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  /* ── NAV ACTIVE STATE ── */
+  window.addEventListener('scroll', () => {
+    const nav = document.querySelector('nav');
+    nav.style.boxShadow = window.scrollY > 10 ? '0 4px 40px rgba(0,0,0,0.6)' : 'none';
+  });
+
+  /* ── NETWORK HEALTH BAR ── */
+  function setNetHealth(online) {
+    const bar = document.getElementById('net-health-bar');
+    bar.className = online ? 'online' : 'offline';
+  }
+
+  /* ── SCROLL ANIMATIONS ── */
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+  /* ── ANIMATED COUNTERS ── */
+  function animateCounter(el, target, decimals = 0, prefix = '', suffix = '') {
+    const duration = 1400;
+    const start = performance.now();
+    const startVal = 0;
+    function update(now) {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const current = startVal + (target - startVal) * eased;
+      el.textContent = prefix + current.toLocaleString('en-US', { maximumFractionDigits: decimals }) + suffix;
+      if (progress < 1) requestAnimationFrame(update);
+    }
+    requestAnimationFrame(update);
+  }
+  let countersAnimated = false;
+  const counterObserver = new IntersectionObserver(entries => {
+    if (!countersAnimated && entries.some(e => e.isIntersecting)) {
+      countersAnimated = true;
+      // Will fire when real data is loaded
+    }
+  }, { threshold: 0.3 });
+  const heroEl = document.getElementById('hero');
+  if (heroEl) counterObserver.observe(heroEl);
+
+  /* ── FAQ ACCORDION ── */
+  function toggleFaq(qEl) {
+    const item = qEl.parentElement;
+    const wasOpen = item.classList.contains('open');
+    document.querySelectorAll('.faq-item.open').forEach(i => i.classList.remove('open'));
+    if (!wasOpen) item.classList.add('open');
+  }
+
+  /* ── SHARE FUNCTIONS ── */
+  const SHARE_URL = window.location.href.split('#')[0];
+  const SHARE_TEXT = '🍯 HIVE Wallet + Honey Network Testnet is LIVE! Non-custodial DeFi wallet with native AMM swaps, 5% APR staking, 8% APR liquidity pools, and real-time Pyth oracle prices. Try it now 👇';
+
+  function openShare() {
+    document.getElementById('share-link-input').value = SHARE_URL;
+    document.getElementById('share-modal').classList.add('open');
+  }
+  function closeShare() {
+    document.getElementById('share-modal').classList.remove('open');
+  }
+  function closeShareOnBg(e) {
+    if (e.target === document.getElementById('share-modal')) closeShare();
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeShare(); });
+
+  function shareX() {
+    const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(SHARE_TEXT)}&url=${encodeURIComponent(SHARE_URL)}&hashtags=HoneyNetwork,DeFi,Crypto,HNY,Web3`;
+    window.open(url, '_blank', 'width=600,height=450');
+    closeShare();
+  }
+  function shareTelegram() {
+    const url = `https://t.me/share/url?url=${encodeURIComponent(SHARE_URL)}&text=${encodeURIComponent(SHARE_TEXT)}`;
+    window.open(url, '_blank', 'width=600,height=500');
+    closeShare();
+  }
+  function shareReddit() {
+    const url = `https://www.reddit.com/submit?url=${encodeURIComponent(SHARE_URL)}&title=${encodeURIComponent('HIVE Wallet — Honey Network DeFi Testnet is Live! Native AMM, 5% staking APR, 8% LP APR, Pyth oracle prices')}`;
+    window.open(url, '_blank', 'width=900,height=600');
+    closeShare();
+  }
+  function shareLinkedIn() {
+    const url = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(SHARE_URL)}`;
+    window.open(url, '_blank', 'width=600,height=500');
+    closeShare();
+  }
+  function shareWhatsApp() {
+    const url = `https://wa.me/?text=${encodeURIComponent(SHARE_TEXT + '\n' + SHARE_URL)}`;
+    window.open(url, '_blank');
+    closeShare();
+  }
+  function shareDiscord() {
+    // Discord doesn't have a direct share URL — copy the message for pasting
+    const text = SHARE_TEXT + '\n' + SHARE_URL;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.querySelector('.share-btn.share-discord span:last-child');
+      if (btn) { const orig = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = orig, 2000); }
+    }).catch(() => {});
+    closeShare();
+  }
+  function copyLink() {
+    navigator.clipboard.writeText(SHARE_URL).then(() => {
+      const btn = document.querySelector('.copy-link-btn');
+      if (btn) { btn.textContent = '✓ Copied!'; setTimeout(() => btn.textContent = 'Copy Link', 2000); }
+      // Also update share chips
+      document.querySelectorAll('.share-chip').forEach(c => {
+        if (c.textContent.includes('Copy Link')) { c.textContent = '✓ Copied!'; setTimeout(() => c.innerHTML = '🔗 Copy Link', 2000); }
+      });
+    }).catch(() => {});
+    closeShare();
+  }
+
+  /* ── WAITLIST ── */
+  function joinWaitlist(e) {
+    e.preventDefault();
+    const email = document.getElementById('waitlist-email').value.trim();
+    if (!email) return;
+    const msg = document.getElementById('waitlist-msg');
+    // Store locally (in a real app, POST to a server)
+    const list = JSON.parse(localStorage.getItem('HIVE_WAITLIST') || '[]');
+    if (!list.includes(email)) { list.push(email); localStorage.setItem('HIVE_WAITLIST', JSON.stringify(list)); }
+    msg.textContent = `✓ You're on the list! We'll notify ${email} at mainnet launch.`;
+    document.getElementById('waitlist-email').value = '';
+  }
+
+  /* ── INIT ── */
+  fetchStatus().then(() => setNetHealth(true)).catch(() => setNetHealth(false));
+  refreshScan();
+  setInterval(() => {
+    fetchStatus().then(() => setNetHealth(true)).catch(() => setNetHealth(false));
+    refreshScan();
+  }, 8000);
+</script>
+</body>
+</html>

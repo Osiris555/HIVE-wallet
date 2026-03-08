@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(npx expo install:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(node -e \"const h = require\\(''/c/Users/bobby/Desktop/HIVE-wallet/apps/mobile/node_modules/@noble/hashes/sha512.js''\\); console.log\\(Object.keys\\(h\\)\\)\")",
+      "Bash(node -e \"const h = require\\(''/c/Users/bobby/Desktop/HIVE-wallet/apps/mobile/node_modules/@noble/hashes/sha2.js''\\); console.log\\(Object.keys\\(h\\)\\)\")",
+      "Bash(node -e \"const p = require\\(''/c/Users/bobby/Desktop/HIVE-wallet/apps/mobile/node_modules/@noble/hashes/pbkdf2.js''\\); console.log\\(Object.keys\\(p\\)\\)\")",
+      "Bash(npx tsc:*)",
+      "Bash(node --input-type=module --eval:*)",
+      "Bash(npm install @noble/post-quantum --save)",
+      "Bash(npm install @scure/bip32 @noble/curves)",
+      "Bash(npm install multer @anthropic-ai/sdk --save)",
+      "Bash(npm install expo-av expo-document-picker expo-image-picker --save)",
+      "Bash(npm install react-native-webview)",
+      "Bash(npm install)",
+      "Bash(npm install recharts)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(npm install @types/react-dom)",
+      "Bash(npm run build)",
+      "Bash(node -e \"const db = require\\(''./db''\\); const d = db.openDb\\(\\); const rows = d.prepare\\(''SELECT symbol, mockPriceUSD FROM tokens ORDER BY symbol''\\).all\\(\\); console.log\\(JSON.stringify\\(rows, null, 2\\)\\);\")",
+      "Bash(node -e \"const db = require\\(''./db''\\); const d = db.openDb\\(\\); const rows = d.prepare\\(''SELECT id, base_symbol, mark_price_usd FROM futures_markets''\\).all\\(\\); console.log\\(JSON.stringify\\(rows, null, 2\\)\\);\")",
+      "Bash(node -e \"const db = require\\(''./db''\\); const d = db.openDb\\(\\); const rows = d.prepare\\(''SELECT * FROM futures_markets LIMIT 3''\\).all\\(\\); console.log\\(JSON.stringify\\(rows, null, 2\\)\\);\")",
+      "Bash(node -e \"require\\(''./auth''\\); console.log\\(''auth.js loads OK''\\)\")"
+    ]
+  }
+}

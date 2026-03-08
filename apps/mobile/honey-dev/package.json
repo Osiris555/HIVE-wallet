@@ -8,10 +8,12 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",
     "expo": "~54.0.32",
     "express": "^4.19.2",
+    "multer": "^2.1.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1"
   }

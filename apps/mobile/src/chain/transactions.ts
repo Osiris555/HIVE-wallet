@@ -7,7 +7,25 @@ import Constants from "expo-constants";
 import { NativeModules, Platform } from "react-native";
 
 // Keep in sync with apps/mobile/honey-dev/server.js
-export type TxType = "mint" | "send" | "stake" | "unlock" | "claim" | "unstake" | "token_send" | "swap";
+export type TxType = "mint" | "send" | "stake" | "unlock" | "claim" | "unstake" | "token_send" | "swap" | "lp_add" | "lp_remove" | "lp_claim";
+
+/**
+ * Chrysalis post-quantum attestation attached to a transaction.
+ * ML-DSA-65 signature over the same canonical message signed by Ed25519.
+ * The server stores this in metaJson — Phase 3 will enforce verification.
+ */
+export type ChrysalisAttestation = {
+  chrysalisId    : string;   // SHA3-256(kemPub ∥ dsaPub)
+  dsaPublicKeyHex: string;   // signer's ML-DSA-65 public key
+  dsaSignatureHex: string;   // ML-DSA-65 signature over the canonical message bytes
+  version        : string;   // "2.0" for Phase 2
+};
+
+export const WALLET_FEE_RATE = 0.25; // 25% of service fee
+
+export function computeWalletFee(serviceFee: number): number {
+  return Number((Number(serviceFee) * WALLET_FEE_RATE).toFixed(8));
+}
 
 export type Transaction = {
   id: string;
@@ -78,10 +96,10 @@ function isWeb() {
 
 function stripHost(input: string): string {
   // Accept:
-  //  - 192.168.0.20:8081
-  //  - http://192.168.0.20:8081
-  //  - http://192.168.0.20:8081/...
-  //  - 192.168.0.20
+  //  - 192.168.0.23:8081
+  //  - http://192.168.0.23:8081
+  //  - http://192.168.0.23:8081/...
+  //  - 192.168.0.23
   const s = String(input || "").trim();
   if (!s) return "";
   try {
@@ -422,41 +440,18 @@ async function getByWalletFlexible(route: string, wallet: string) {
   }
 }
 
-export async function ensureKeypair(): Promise<{ publicKeyB64: string; secretKeyB64: string }> {
-  // First check legacy storage (fast path - wallet-manager keeps these updated)
-  const pub = await kvGet(KEY_STORAGE_PUB);
-  const priv = await kvGet(KEY_STORAGE_PRIV);
-  if (pub && priv) return { publicKeyB64: pub, secretKeyB64: priv };
-
-  // Fall back: let wallet-manager initialize and write legacy keys
-  try {
-    const { getWallets, getKeypairForIndex } = require("./wallet-manager");
-    const list = await getWallets();
-    const active = list.wallets.find((w: any) => w.index === list.activeIndex) || list.wallets[0];
-    if (active) {
-      const kp = await getKeypairForIndex(active.index);
-      await kvSet(KEY_STORAGE_PUB, kp.publicKeyB64);
-      await kvSet(KEY_STORAGE_PRIV, kp.secretKeyB64);
-      await kvSet(WALLET_STORAGE, active.address);
-      return kp;
-    }
-  } catch (e) {
-    console.warn("wallet-manager fallback failed, generating fresh keypair:", e);
-  }
-
-  // Last resort: generate fresh keypair
-  const seed = await randomBytes(32);
-  const kp = nacl.sign.keyPair.fromSeed(seed);
-  const pubB64 = u8ToB64(kp.publicKey);
-  const privB64 = u8ToB64(kp.secretKey);
-  await kvSet(KEY_STORAGE_PUB, pubB64);
-  await kvSet(KEY_STORAGE_PRIV, privB64);
-  return { publicKeyB64: pubB64, secretKeyB64: privB64 };
+/** Get the active wallet's ML-DSA-65 keypair for signing. */
+export async function ensureKeypair(): Promise<{ address: string; mldsaPublicKeyHex: string; mldsaSecretKey: Uint8Array }> {
+  const { getActiveHiveMLDSAKeypair } = require("./wallet-manager");
+  const kp = await getActiveHiveMLDSAKeypair();
+  if (!kp) throw new Error("No active wallet found");
+  const mldsaPublicKeyHex = Array.from(kp.publicKey).map((b: number) => b.toString(16).padStart(2, "0")).join("");
+  return { address: kp.address, mldsaPublicKeyHex, mldsaSecretKey: kp.secretKey };
 }
 
 export async function registerWallet(): Promise<{ wallet: string; nonce: number; registered: boolean; chainId: string }> {
-  const { publicKeyB64 } = await ensureKeypair();
-  const res = await postJson("/register", { publicKey: publicKeyB64 });
+  const { mldsaPublicKeyHex } = await ensureKeypair();
+  const res = await postJson("/register", { mldsaPublicKeyHex });
 
   const wallet = String(res?.wallet || "");
   if (!wallet) throw makeError("Register did not return a wallet", 500, res);
@@ -477,13 +472,34 @@ export async function ensureWalletId(): Promise<string> {
  * Call this before any signed transaction to prevent "missing public key" errors.
  */
 export async function ensureRegisteredWallet(): Promise<string> {
-  let wallet = await ensureWalletId();
-  const acct = await getAccount(wallet);
-  if (!acct?.registered) {
-    const regResult = await registerWallet();
-    // Re-read wallet in case registration derived a different address
-    wallet = regResult.wallet || await ensureWalletId();
+  // Use atomic wallet-manager source to prevent iOS desync.
+  try {
+    const { getActiveHiveMLDSAKeypair } = require("./wallet-manager");
+    const kp = await getActiveHiveMLDSAKeypair();
+    if (kp) {
+      let needsRegister = false;
+      try {
+        const acct = await getAccount(kp.address);
+        needsRegister = !acct?.registered;
+      } catch {
+        needsRegister = true;
+      }
+      if (needsRegister) {
+        const mldsaPublicKeyHex = Array.from(kp.publicKey as Uint8Array)
+          .map((b: number) => b.toString(16).padStart(2, "0")).join("");
+        const res = await postJson("/register", { mldsaPublicKeyHex });
+        const serverWallet = String(res?.wallet || "");
+        if (serverWallet) {
+          await kvSet(WALLET_STORAGE, serverWallet);
+          return serverWallet;
+        }
+      }
+      return kp.address;
+    }
+  } catch (e) {
+    console.warn("ensureRegisteredWallet failed:", e);
   }
+  const wallet = await ensureWalletId();
   return wallet;
 }
 
@@ -505,11 +521,12 @@ export async function getTransactions(wallet: string): Promise<Transaction[]> {
   return out?.transactions || out?.txs || [];
 }
 
-function signMessage(message: string, secretKeyB64: string) {
-  const msgBytes = naclUtil.decodeUTF8(message);
-  const sk = b64ToU8(secretKeyB64);
-  const sig = nacl.sign.detached(msgBytes, sk);
-  return u8ToB64(sig);
+/** ML-DSA-65 (Dilithium) detached signing — returns hex-encoded 3309-byte signature. */
+export function signMessageMLDSA(message: string, secretKey: Uint8Array): string {
+  const msgBytes = new TextEncoder().encode(message);
+  const { ml_dsa65 } = require("@noble/post-quantum/ml-dsa") as { ml_dsa65: typeof import("@noble/post-quantum/ml-dsa").ml_dsa65 };
+  const sig = ml_dsa65.sign(secretKey, msgBytes);
+  return Array.from(sig).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function getTransactionById(txid: string): Promise<any> {
@@ -603,7 +620,7 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({ lockDays });
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "stake",
@@ -617,7 +634,7 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/stake", {
     chainId,
@@ -626,7 +643,7 @@ export async function stake(params: { amount: number; lockDays: number; gasFee?:
     lockDays,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -668,7 +685,7 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
   if (!Number.isFinite(payout) || payout <= 0) throw makeError("Unable to compute unstake payout", 500, pos);
 
   const metaJson = JSON.stringify({ positionId });
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "unstake",
@@ -682,7 +699,7 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/unstake", {
     chainId,
@@ -690,7 +707,7 @@ export async function unstake(params: { positionId: string; gasFee?: number }): 
     positionId,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     expiresAtMs,
   });
@@ -714,7 +731,7 @@ export async function unlockStakePosition(params: { positionId: string; gasFee?:
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({ positionId });
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "unlock",
@@ -728,7 +745,7 @@ export async function unlockStakePosition(params: { positionId: string; gasFee?:
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/staking/unlock", {
     chainId,
@@ -736,7 +753,7 @@ export async function unlockStakePosition(params: { positionId: string; gasFee?:
     positionId,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     expiresAtMs,
   });
@@ -779,7 +796,7 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
 
   const serviceFee = computeServiceFee(amt, chainStatus.serviceFeeRate);
   const metaJson = JSON.stringify({ positionId });
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "claim",
@@ -793,7 +810,7 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/staking/claim", {
     chainId,
@@ -802,7 +819,7 @@ export async function claimStakingReward(params: { positionId: string; gasFee?: 
     amount: amt,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -825,7 +842,7 @@ export async function mint(options?: { seedFingerprint?: string }): Promise<any>
   const serviceFee = 0;
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "mint",
@@ -839,14 +856,14 @@ export async function mint(options?: { seedFingerprint?: string }): Promise<any>
     timestamp,
   });
 
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/mint", {
     chainId,
     wallet,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     expiresAtMs,
     seedFingerprint: options?.seedFingerprint || "",
@@ -858,6 +875,7 @@ export async function send(params: {
   amount: number;
   gasFee: number;
   serviceFee: number;
+  chrysalisAttestation?: ChrysalisAttestation;
 }): Promise<any> {
   const from = await ensureRegisteredWallet();
 
@@ -876,7 +894,7 @@ export async function send(params: {
   const serviceFee = Number(params.serviceFee);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "send",
@@ -890,7 +908,7 @@ export async function send(params: {
     timestamp,
   });
 
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/send", {
     chainId,
@@ -899,10 +917,11 @@ export async function send(params: {
     amount: amt,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
+    ...(params.chrysalisAttestation ? { chrysalisAttestation: params.chrysalisAttestation } : {}),
   });
 }
 
@@ -934,7 +953,7 @@ export async function rbfReplacePending(params: {
   const serviceFee = Number(params.serviceFee);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "send",
@@ -947,7 +966,7 @@ export async function rbfReplacePending(params: {
     expiresAtMs,
     timestamp,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/rbf", {
     chainId,
@@ -956,7 +975,7 @@ export async function rbfReplacePending(params: {
     amount: amt,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -983,7 +1002,7 @@ export async function cancelPending(params: { nonce: number; gasFee: number; ser
   const serviceFee = Number(params.serviceFee);
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "send",
@@ -996,14 +1015,14 @@ export async function cancelPending(params: { nonce: number; gasFee: number; ser
     expiresAtMs,
     timestamp,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/cancel", {
     chainId,
     from,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -1123,7 +1142,7 @@ export async function sendToken(params: {
   const expiresAtMs = timestamp + Number(status.txTtlMs || 60000);
 
   const metaJson = JSON.stringify({ tokenSymbol: params.tokenSymbol, amount: amt });
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "token_send",
@@ -1137,7 +1156,7 @@ export async function sendToken(params: {
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/tokens/send", {
     chainId,
@@ -1147,7 +1166,7 @@ export async function sendToken(params: {
     amount: amt,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -1223,7 +1242,7 @@ export async function swap(params: {
     expectedAmountOut: quote.amountOut,
   });
 
-  const { secretKeyB64 } = await ensureKeypair();
+  const { mldsaSecretKey } = await ensureKeypair();
   const msg = canonicalSignedMessage({
     chainId,
     type: "swap",
@@ -1237,7 +1256,7 @@ export async function swap(params: {
     timestamp,
     metaJson,
   });
-  const signature = signMessage(msg, secretKeyB64);
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
 
   return await postJson("/swap", {
     chainId,
@@ -1248,7 +1267,7 @@ export async function swap(params: {
     minAmountOut: minOut,
     nonce,
     timestamp,
-    signature,
+    signatureHex,
     gasFee,
     serviceFee,
     expiresAtMs,
@@ -1262,3 +1281,131 @@ export async function getLiquidityPools(): Promise<LiquidityPool[]> {
   return (body?.pools || []) as LiquidityPool[];
 }
 
+/* ======================
+   LIQUIDITY POOL POSITIONS
+====================== */
+
+export type LpPosition = {
+  id: string;
+  wallet: string;
+  poolId: string;
+  lpShares: number;
+  createdAtMs: number;
+  rewardPaidHNY: number;
+  // enriched fields from server
+  pool: LiquidityPool;
+  sharePercent: number;
+  tokenAValue: number;
+  tokenBValue: number;
+  positionUSD: number;
+  pendingRewardHNY: number;
+  apr: number;
+};
+
+// Add liquidity to a pool (signed)
+export async function addLiquidity(params: {
+  poolId: string;
+  amountA: number;
+  amountB: number;
+}): Promise<any> {
+  const wallet = await ensureRegisteredWallet();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  const nonce = Number(acct?.nonce ?? 0);
+  const timestamp = Date.now();
+
+  const { mldsaSecretKey } = await ensureKeypair();
+  const msg = `lp_add:${chainId}:${wallet}:${params.poolId}:${fmt8(params.amountA)}:${fmt8(params.amountB)}:${nonce}:${timestamp}`;
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
+
+  return await postJson("/liquidity/add", {
+    chainId,
+    wallet,
+    poolId: params.poolId,
+    amountA: params.amountA,
+    amountB: params.amountB,
+    nonce,
+    timestamp,
+    signatureHex,
+  });
+}
+
+// Remove liquidity from a pool (signed)
+export async function removeLiquidity(params: {
+  poolId: string;
+  lpShares: number;
+}): Promise<any> {
+  const wallet = await ensureRegisteredWallet();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  const nonce = Number(acct?.nonce ?? 0);
+  const timestamp = Date.now();
+
+  const { mldsaSecretKey } = await ensureKeypair();
+  const msg = `lp_remove:${chainId}:${wallet}:${params.poolId}:${fmt8(params.lpShares)}:${nonce}:${timestamp}`;
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
+
+  return await postJson("/liquidity/remove", {
+    chainId,
+    wallet,
+    poolId: params.poolId,
+    lpShares: params.lpShares,
+    nonce,
+    timestamp,
+    signatureHex,
+  });
+}
+
+// Get LP positions for a wallet
+export async function getLpPositions(wallet?: string): Promise<{ positions: LpPosition[]; apr: number }> {
+  const w = wallet || (await ensureWalletId());
+  const body = await getJson(`/liquidity/positions/${encodeURIComponent(w)}`);
+  return {
+    positions: (body?.positions || []) as LpPosition[],
+    apr: Number(body?.apr || 0),
+  };
+}
+
+// Check LPHNY and stHNY availability for swap UI
+export async function getLphnyAvailable(wallet?: string): Promise<{ lphny: number; stHNY: number }> {
+  const w = wallet || (await ensureWalletId());
+  const body = await getJson(`/liquidity/lphny-available?wallet=${encodeURIComponent(w)}`);
+  return {
+    lphny: Number(body?.lphny || 0),
+    stHNY: Number(body?.stHNY || 0),
+  };
+}
+
+// Claim pending LP rewards for a position
+export async function claimLpReward(params: { positionId: string }): Promise<any> {
+  const wallet = await ensureRegisteredWallet();
+  const status = await getChainStatus();
+  const chainId = String(status.chainId || "");
+  if (!chainId) throw makeError("Server did not return chainId", 500, status);
+
+  const acct = await getAccount(wallet);
+  const nonce = Number(acct?.nonce ?? 0);
+  const timestamp = Date.now();
+
+  const positionId = String(params.positionId || "").trim();
+  if (!positionId) throw makeError("Missing positionId", 400);
+
+  const { mldsaSecretKey } = await ensureKeypair();
+  const msg = `lp_claim:${chainId}:${wallet}:${positionId}:${nonce}:${timestamp}`;
+  const signatureHex = signMessageMLDSA(msg, mldsaSecretKey);
+
+  return await postJson("/liquidity/claim", {
+    chainId,
+    wallet,
+    positionId,
+    nonce,
+    timestamp,
+    signatureHex,
+  });
+}

@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "HIVE Wallet",
+  "version": "1.0.0",
+  "description": "Post-quantum secure browser wallet for Honey Network. ML-DSA-65 signing, NFT marketplace, DEX trading.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "HIVE Wallet"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "permissions": ["storage", "activeTab", "alarms"],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://localhost:3001/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inpage.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

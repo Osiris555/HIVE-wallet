@@ -1,0 +1,6 @@
+{
+  "/page": "app/page.js",
+  "/nft/mint/page": "app/nft/mint/page.js",
+  "/wallet/page": "app/wallet/page.js",
+  "/trade/page": "app/trade/page.js"
+}
